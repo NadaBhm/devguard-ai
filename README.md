@@ -6,7 +6,7 @@ Agentic AI-powered DevSecOps platform. Submit a GitHub repo URL → AI agents an
 
 | Member | Role | Primary | Secondary |
 |--------|------|---------|-----------|
-| **Nada** | Team Lead, Subgroup 1 Lead | CodeSec Agent, RAG Backend | Code review, sprint planning |
+| **Nada** | Subgroup 1 Lead | CodeSec Agent, RAG Backend | Code review, sprint planning |
 | **Karim** | Frontend Lead, Subgroup 1 | InfraCost Agent, Dashboard UI | UI/UX design |
 | **Oussema** | Subgroup 2 Lead | DeployOps Agent, Backend Core | API design, DB schema |
 | **Hbib** | DevOps Lead, Subgroup 2 | Orchestrator, Chat, CI/CD | Platform deployment |

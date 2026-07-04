@@ -85,18 +85,46 @@ npm run dev
 ```
 devguard-ai/
 ├── src/
-│   ├── subgroup1/          # Nada + Karim
-│   │   ├── codesec/        # Security analysis (Nada)
-│   │   ├── infracost/      # Cost estimation (Karim)
-│   │   └── rag/            # Vector search (Nada)
-│   ├── subgroup2/          # Oussema + Hbib
-│   │   ├── deployops/      # AWS deployment (Oussema)
-│   │   └── orchestrator/   # Workflow engine (Hbib)
-│   ├── backend/            # Shared FastAPI core
-│   └── frontend/           # React dashboard
-├── infrastructure/         # Docker Compose, Terraform
-├── docs/                   # API contracts, ADRs
-└── tests/                  # Integration & E2E tests
+│   ├── subgroup1/               # Nada + Karim
+│   │   ├── codesec/             # Nada owns
+│   │   │   ├── agent.py
+│   │   │   ├── scanners/
+│   │   │   └── tests/
+│   │   ├── infracost/           # Karim owns ⭐
+│   │   │   ├── agent.py
+│   │   │   ├── templates/
+│   │   │   └── tests/
+│   │   └── rag/                 # Nada owns
+│   │       ├── embeddings.py
+│   │       └── tests/
+│   │
+│   ├── subgroup2/               # Oussema + Hbib
+│   │   ├── deployops/           # Oussema owns
+│   │   │   ├── agent.py
+│   │   │   └── tests/
+│   │   └── orchestrator/        # Hbib owns
+│   │       ├── graph.py
+│   │       └── tests/
+│   │
+│   ├── backend/                 # Shared API core (Oussema leads)
+│   │   ├── main.py
+│   │   ├── routes/
+│   │   ├── models/
+│   │   └── tests/
+│   │
+│   └── frontend/                # Shared React (Karim leads)
+│       ├── src/
+│       │   ├── components/
+│       │   └── pages/
+│       └── package.json
+│
+├── infrastructure/              # Docker, Terraform
+│   ├── docker-compose.yml
+│   └── terraform/
+├── tests/                       # Integration & E2E tests
+├── docs/
+└── README.md
+
 ```
 
 ## Development Workflow

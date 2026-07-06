@@ -1,0 +1,596 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://devguard-ai.dev/schemas/orchestrator-input-schema.json",
+  "title": "DevGuard AI - Orchestrator State Schema",
+  "description": "Schéma de l'état global du workflow orchestré par LangGraph. Porte les résultats des agents, les gates humaines, et les métadonnées d'exécution.",
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Identifiant unique du job d'analyse (UUID v4)"
+    },
+    "repo_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://github\\.com/[\\w.-]+/[\\w.-]+/?$",
+      "description": "URL du repository GitHub public à analyser et déployer"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "cloning",
+        "analyzing",
+        "awaiting_approval_gate_1",
+        "infra_generating",
+        "awaiting_approval_gate_2",
+        "deploying",
+        "health_checking",
+        "completed",
+        "failed",
+        "rolled_back"
+      ],
+      "description": "État courant du workflow orchestré"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp ISO 8601 de création du job"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Timestamp ISO 8601 de dernière mise à jour du job"
+    },
+    "codesec_result": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Résultat produit par l'agent CodeSec (Nada) - null tant qu'il n'a pas tourné",
+      "properties": {
+        "stack_detected": {
+          "type": "object",
+          "properties": {
+            "primary_language": {
+              "type": "string"
+            },
+            "framework": {
+              "type": "string"
+            },
+            "database": {
+              "type": "string"
+            },
+            "confidence_score": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "sast_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "file_path": {
+                "type": "string"
+              },
+              "line_number": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "cwe_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "secrets_found": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "api_key",
+                  "token",
+                  "password",
+                  "private_key",
+                  "other"
+                ]
+              },
+              "file_path": {
+                "type": "string"
+              },
+              "line_number": {
+                "type": "integer"
+              },
+              "redacted_value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "cve_vulnerabilities": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cve_id": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "package_name": {
+                "type": "string"
+              },
+              "installed_version": {
+                "type": "string"
+              },
+              "fixed_version": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        "security_score": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Score de sécurité global 0-100 (US-1.1.5)"
+        },
+        "sbom": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "format": {
+              "type": "string",
+              "enum": [
+                "cyclonedx",
+                "spdx"
+              ]
+            },
+            "content": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "infracost_result": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Résultat produit par l'agent InfraCost (Karim) - null tant qu'il n'a pas tourné",
+      "properties": {
+        "architecture_recommendation": {
+          "type": "string",
+          "enum": [
+            "ecs_fargate",
+            "lambda",
+            "ec2",
+            "hybrid"
+          ]
+        },
+        "justification": {
+          "type": "string"
+        },
+        "generated_terraform": {
+          "type": "object",
+          "properties": {
+            "main_tf": {
+              "type": "string"
+            },
+            "variables_tf": {
+              "type": "string"
+            },
+            "outputs_tf": {
+              "type": "string"
+            },
+            "plan_passed": {
+              "type": "boolean"
+            }
+          }
+        },
+        "cost_estimate": {
+          "type": "object",
+          "properties": {
+            "monthly_cost_usd": {
+              "type": "number"
+            },
+            "currency": {
+              "type": "string",
+              "default": "USD"
+            },
+            "breakdown": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "service": {
+                    "type": "string"
+                  },
+                  "monthly_cost_usd": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "load_scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "users": {
+                "type": "integer",
+                "enum": [
+                  1000,
+                  10000,
+                  100000
+                ]
+              },
+              "estimated_monthly_cost_usd": {
+                "type": "number"
+              },
+              "scaling_assumptions": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "optimizations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "type": "string",
+                "enum": [
+                  "spot_instances",
+                  "reserved_instances",
+                  "graviton",
+                  "savings_plan"
+                ]
+              },
+              "projected_savings_usd": {
+                "type": "number"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "region_comparison": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "region": {
+                "type": "string"
+              },
+              "monthly_cost_usd": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "deployops_result": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Résultat produit par l'agent DeployOps (Oussema) - null tant qu'il n'a pas tourné",
+      "properties": {
+        "deployment_status": {
+          "type": "string",
+          "enum": [
+            "success",
+            "failed",
+            "rolled_back"
+          ]
+        },
+        "deployed_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health_check": {
+          "type": "object",
+          "properties": {
+            "passed": {
+              "type": "boolean"
+            },
+            "response_time_ms": {
+              "type": "integer"
+            },
+            "status_code": {
+              "type": "integer"
+            },
+            "checked_at": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        },
+        "rollback_triggered": {
+          "type": "boolean"
+        },
+        "rollback_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "terraform_outputs": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "ecs_cluster_name": {
+              "type": "string"
+            },
+            "service_name": {
+              "type": "string"
+            },
+            "alb_dns": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "human_gates": {
+      "type": "object",
+      "description": "État des points de validation humaine",
+      "properties": {
+        "gate_1_pre_infracost": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true
+            },
+            "approved": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "comment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "approved_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "approved_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "gate_2_pre_deployops": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true
+            },
+            "approved": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "comment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "approved_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "approved_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "error_log": {
+      "type": "array",
+      "description": "Historique des erreurs/retries pour le error_handler",
+      "items": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "Nom du node LangGraph où l'erreur s'est produite"
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Numéro de tentative (1 = premier échec)"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "default": 3,
+            "description": "Nombre max de retries avant escalation"
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stack_trace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolved": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    },
+    "orchestrator_metadata": {
+      "type": "object",
+      "description": "Métadonnées internes de l'orchestrator pour traçage et debugging",
+      "properties": {
+        "graph_version": {
+          "type": "string",
+          "description": "Version du graph LangGraph (ex: '1.0.0')"
+        },
+        "start_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Début d'exécution du workflow"
+        },
+        "elapsed_seconds": {
+          "type": "number",
+          "description": "Temps écoulé depuis le début"
+        },
+        "current_node": {
+          "type": "string",
+          "description": "Node actuellement en cours d'exécution"
+        },
+        "nodes_executed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Liste des nodes déjà exécutés"
+        },
+        "chat_session_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "ID de session pour le chat LLM (US-2.2.5)"
+        }
+      }
+    },
+    "final_report": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Rapport final généré (US-2.2.6) - null tant que le workflow n'est pas terminé",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "pdf",
+            "html",
+            "json"
+          ]
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "download_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "total_vulnerabilities": {
+              "type": "integer"
+            },
+            "critical_count": {
+              "type": "integer"
+            },
+            "estimated_monthly_cost_usd": {
+              "type": "number"
+            },
+            "deployment_status": {
+              "type": "string"
+            },
+            "recommendations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "job_id",
+    "repo_url",
+    "status"
+  ],
+  "additionalProperties": false
+}

@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv() 
 import asyncio
-from src.shared import GeminiClient
+from shared.llm.gemini import GeminiClient
 
 async def test():
     client = GeminiClient()  # Reads GEMINI_API_KEY from env

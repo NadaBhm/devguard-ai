@@ -8,6 +8,7 @@ from .gemini_client import (
     gemini_dependency,
 )
 
+
 __all__ = [
     "GeminiClient",
     "GeminiResponse", 

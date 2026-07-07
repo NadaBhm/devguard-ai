@@ -1,6 +1,6 @@
 """
 
-    this file provides a class `TerraformRunner` to run Terraform commands in a specified working directory.
+    class `TerraformRunner` to run Terraform commands in a specified working directory.
     example usage:
     
     from pathlib import Path

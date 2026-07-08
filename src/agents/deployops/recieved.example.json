@@ -1,41 +1,228 @@
 {
-  "job_id": "job_abc123",
-  "artifacts": {
-    "terraform": {
-      "files": {
-        "main.tf": "resource \"aws_instance\" \"web\" { ... }",
-        "variables.tf": "variable \"region\" { ... }",
-        "outputs.tf": "output \"url\" { ... }"
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://devguard-ai.dev/schemas/deployops-mock-schema.json",
+  "title": "DevGuard AI - DeployOps Agent Mock Schema",
+  "description": "Schema du mock DeployOps Agent (Oussema) avec champs essentiels pour l'orchestrateur",
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "description": "Identifiant du job (doit matcher l'orchestrateur)"
+    },
+    "deployment_status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "failed",
+        "rolled_back"
+      ],
+      "description": "Statut final du deploiement (REQUIS par orchestrateur)"
+    },
+    "deployed_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uri",
+      "description": "URL de l'application deployee (REQUIS par orchestrateur)"
+    },
+    "health_check": {
+      "type": "object",
+      "description": "Resultat du health check (REQUIS par orchestrateur)",
+      "properties": {
+        "passed": {
+          "type": "boolean",
+          "description": "True si l'application repond correctement"
+        },
+        "response_time_ms": {
+          "type": "integer",
+          "description": "Temps de reponse en millisecondes"
+        },
+        "status_code": {
+          "type": "integer",
+          "description": "Code HTTP retourne (200, 404, etc.)"
+        },
+        "checked_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp du health check"
+        }
       },
-      "variables": {
-        "region": "us-east-1",
-        "environment": "dev"
+      "required": [
+        "passed",
+        "response_time_ms",
+        "status_code"
+      ]
+    },
+    "rollback_triggered": {
+      "type": "boolean",
+      "description": "True si un rollback a ete declenche (REQUIS par orchestrateur)"
+    },
+    "rollback_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Raison du rollback si applicable"
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Message d'erreur si le deploiement a echoue"
+    },
+    "terraform_outputs": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Outputs Terraform du deploiement (REQUIS par orchestrateur)",
+      "properties": {
+        "ecs_cluster_name": {
+          "type": "string"
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "alb_dns": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ecs_cluster_name",
+        "service_name",
+        "alb_dns"
+      ]
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "Artifacts generes par le deploiement",
+      "properties": {
+        "terraform": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "object",
+              "properties": {
+                "main.tf": {
+                  "type": "string"
+                },
+                "variables.tf": {
+                  "type": "string"
+                },
+                "outputs.tf": {
+                  "type": "string"
+                }
+              }
+            },
+            "variables": {
+              "type": "object",
+              "properties": {
+                "region": {
+                  "type": "string"
+                },
+                "environment": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "dockerfile": {
+          "type": "string",
+          "description": "Contenu du Dockerfile"
+        },
+        "docker_image": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            }
+          }
+        },
+        "source_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Chemin vers le code source (optionnel)"
+        }
       }
     },
-    "dockerfile": "FROM python:3.12\nCOPY . /app",
-    "docker_image": {
-      "name": "devguard-app",
-      "tag": "latest"
+    "aws_config": {
+      "type": "object",
+      "description": "Configuration AWS du deploiement",
+      "properties": {
+        "region": {
+          "type": "string"
+        },
+        "ecs_cluster": {
+          "type": "string"
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "task_cpu": {
+          "type": "string"
+        },
+        "task_memory": {
+          "type": "string"
+        }
+      }
     },
-    "source_code": "/tmp/repo_abc123"  // optional
+    "deployment_config": {
+      "type": "object",
+      "description": "Configuration du deploiement",
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "rolling",
+            "blue-green"
+          ]
+        },
+        "health_check_path": {
+          "type": "string"
+        },
+        "health_check_port": {
+          "type": "integer"
+        },
+        "timeout_minutes": {
+          "type": "integer"
+        },
+        "min_healthy_percent": {
+          "type": "integer"
+        },
+        "max_percent": {
+          "type": "integer"
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "description": "Informations d'approbation",
+      "properties": {
+        "deploy_approved": {
+          "type": "boolean"
+        },
+        "approved_by": {
+          "type": "string",
+          "format": "email"
+        }
+      }
+    }
   },
-  "aws_config": {
-    "region": "us-east-1",
-    "ecs_cluster": "devguard-cluster",
-    "service_name": "app-service",
-    "task_cpu": "256",
-    "task_memory": "512"
-  },
-  "deployment_config": {
-    "strategy": "rolling",      // rolling, blue-green
-    "health_check_path": "/health",
-    "health_check_port": 8080,
-    "timeout_minutes": 5,
-    "min_healthy_percent": 50,
-    "max_percent": 200
-  },
-  "approval": {
-    "deploy_approved": true,
-    "approved_by": "user@email.com"
-  }
+  "required": [
+    "job_id",
+    "deployment_status",
+    "deployed_url",
+    "health_check",
+    "rollback_triggered",
+    "terraform_outputs"
+  ],
+  "additionalProperties": false
 }

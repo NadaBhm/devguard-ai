@@ -65,9 +65,10 @@ class DeployOpsAgent:
             return {"status": "failed", "error": "terraform apply failed"}
         output = tf_runner.output()
         self.logger.info(f"Deployment successful for job {job_id}")
-        deployed_url = output.get("service_url", None)
+        deployed_url = output.get("service_url", {}).get("value")
         
         if not self.health_check(deployed_url):
+            self.rollback(clean_payload["job_id"], clean_payload)
             self.logger.error("Health check failed after deployment")
             return {"status": "failed", "error": "health check failed"}
         
@@ -92,8 +93,49 @@ class DeployOpsAgent:
     def status(self):
         """used to check current agent status for enhanced user experience"""
         
-    def rollback(self):
-        """used to rollback to previous website state in case of failure or the will of the user"""
+    def rollback(self, job_id: str, payload: dict) -> dict:
+        """Rollback ECS service to previous task definition"""
+        
+        aws = AWSClient()
+        cluster = payload["aws_config"]["ecs_cluster"]
+        service_name = payload["aws_config"]["service_name"]
+        
+        try:
+            service = aws.ecs().describe_services(
+                cluster=cluster,
+                services=[service_name]
+            )
+            
+            deployments = service["services"][0].get("deployments", [])
+            
+            if len(deployments) < 2:
+                return {
+                    "status": "failed", 
+                    "error": "No previous deployment to rollback to"
+                }
+            
+            previous_task = deployments[-2]
+            task_arn = previous_task["taskDefinition"]
+            
+            aws.ecs().update_service(
+                cluster=cluster,
+                service=service_name,
+                taskDefinition=task_arn,
+                forceNewDeployment=True
+            )
+            
+            waiter = aws.ecs().get_waiter("services_stable")
+            waiter.wait(cluster=cluster, services=[service_name])
+            
+            return {
+                "status": "success",
+                "job_id": job_id,
+                "message": f"Rolled back to {task_arn}"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Rollback failed: {e}")
+            return {"status": "failed", "error": str(e)}
 
 
 

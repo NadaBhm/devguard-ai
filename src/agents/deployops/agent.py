@@ -6,29 +6,26 @@ must : terraform file,
 
 
 """
+import json
+import logging
+import os
+import re
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+import httpx
 from dotenv import load_dotenv
 
-from asyncio.windows_events import NULL
-import logging
-from pathlib import Path
-import json
-import os
-import subprocess
-import logging
-from typing import Any
-import httpx
-import time
-from pyparsing import Dict, Optional
-from src.lib.terraform.runner import TerraformRunner
 from src.lib.aws.client import AWSClient
-from typing import Optional
+from src.lib.terraform.runner import TerraformRunner
 
 logging.basicConfig(level=logging.INFO)
 
 
 class DeployOpsAgent:
-    def __init__(self, terraform_file: str):
-        self.terraform_file = terraform_file
+    def __init__(self):
         self.logger = logging.getLogger(__name__)
 
     def deploy(self):
@@ -41,7 +38,7 @@ class DeployOpsAgent:
         job_id = clean_payload["job_id"]
         self.logger.info(f"Starting deployment for job {job_id}")
         
-        workspace_dir = Path(f"tmp/deployops/{job_id}")
+        workspace_dir = Path(f"/tmp/deployops/{job_id}")
         workspace_dir.mkdir(parents=True, exist_ok=True)
         
         self._write_artifacts(clean_payload["artifacts"], workspace_dir)

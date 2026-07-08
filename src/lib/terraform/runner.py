@@ -1,8 +1,8 @@
 """
+Class `TerraformRunner` to run Terraform commands in a specified working directory.
 
-    class `TerraformRunner` to run Terraform commands in a specified working directory.
-    example usage:
-    
+Example usage:
+
     from pathlib import Path
     from src.lib.terraform.runner import TerraformRunner
     
@@ -14,14 +14,13 @@
             print("Plan successful:", plan)
             if runner.apply():
                 print("Apply successful")
-    
 """
 
 import subprocess
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +29,35 @@ class TerraformRunner:
         self.working_dir = working_dir
         self.working_dir.mkdir(parents=True, exist_ok=True)
     
-    def _run(self, cmd: list) -> subprocess.CompletedProcess:
-        full_cmd = ["terraform"] + cmd
+    def _sanitize_cmd(self, cmd: List[str]) -> List[str]:
+        allowed_commands = {
+            "init", "plan", "apply", "destroy", "validate", 
+            "output", "fmt", "refresh", "show"
+        }
+        
+        if not cmd or cmd[0] not in allowed_commands:
+            raise ValueError(f"Invalid terraform command: {cmd[0] if cmd else 'empty'}")
+        
+        sanitized = []
+        for arg in cmd:
+            if not all(c.isalnum() or c in "-_=." for c in arg):
+                raise ValueError(f"Invalid characters in argument: {arg}")
+            sanitized.append(arg)
+        
+        return sanitized
+    
+    def _run(self, cmd: List[str]) -> subprocess.CompletedProcess:
+        sanitized_cmd = self._sanitize_cmd(cmd)
+        full_cmd = ["terraform"] + sanitized_cmd
+        
         logger.info(f"Running: {' '.join(full_cmd)}")
         return subprocess.run(
             full_cmd,
             cwd=self.working_dir,
             capture_output=True,
             text=True,
-            check=False
+            check=False,
+            shell=False
         )
     
     def init(self) -> bool:
@@ -83,4 +102,11 @@ class TerraformRunner:
     
     def validate(self) -> bool:
         result = self._run(["validate"])
+        return result.returncode == 0
+    
+    def fmt(self, recursive: bool = True) -> bool:
+        cmd = ["fmt"]
+        if recursive:
+            cmd.append("-recursive")
+        result = self._run(cmd)
         return result.returncode == 0

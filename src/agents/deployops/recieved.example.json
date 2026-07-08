@@ -1,0 +1,41 @@
+{
+  "job_id": "job_abc123",
+  "artifacts": {
+    "terraform": {
+      "files": {
+        "main.tf": "resource \"aws_instance\" \"web\" { ... }",
+        "variables.tf": "variable \"region\" { ... }",
+        "outputs.tf": "output \"url\" { ... }"
+      },
+      "variables": {
+        "region": "us-east-1",
+        "environment": "dev"
+      }
+    },
+    "dockerfile": "FROM python:3.12\nCOPY . /app",
+    "docker_image": {
+      "name": "devguard-app",
+      "tag": "latest"
+    },
+    "source_code": "/tmp/repo_abc123"  // optional
+  },
+  "aws_config": {
+    "region": "us-east-1",
+    "ecs_cluster": "devguard-cluster",
+    "service_name": "app-service",
+    "task_cpu": "256",
+    "task_memory": "512"
+  },
+  "deployment_config": {
+    "strategy": "rolling",      // rolling, blue-green
+    "health_check_path": "/health",
+    "health_check_port": 8080,
+    "timeout_minutes": 5,
+    "min_healthy_percent": 50,
+    "max_percent": 200
+  },
+  "approval": {
+    "deploy_approved": true,
+    "approved_by": "user@email.com"
+  }
+}

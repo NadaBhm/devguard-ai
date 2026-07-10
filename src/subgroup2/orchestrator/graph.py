@@ -30,11 +30,16 @@ CHANGELOG:
 - v1.0.2: Changed terraform_outputs from Optional[dict] to dict (required by schema)
 - v1.0.2: Added HealthCheckResult TypedDict for strict typing
 - v1.0.2: Added job_id to mock_deployops_agent_impl payload
+- v1.0.3: Fixed GraphInterrupt being swallowed by the generic except in _safe_node_wrapper
+- v1.0.3: Fixed run_workflow / docs to use the real Command(resume=...) API
+- v1.0.4: Fixed _safe_node_wrapper signature (removed stray extra "str" parameter
+          that shadowed the built-in str() and caused a TypeError on every node call)
+- v1.0.4: Fixed _human_gate_2_impl to use status "rejected" instead of "failed"
+          on human rejection, consistent with _human_gate_1_impl
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -44,6 +49,7 @@ from typing import Any, Literal, Optional, TypedDict
 from langgraph.graph import StateGraph, END
 from langgraph.types import interrupt
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphInterrupt
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -221,6 +227,7 @@ class OrchestratorState(TypedDict):
         "pending", "cloning", "analyzing", "awaiting_approval_gate_1",
         "infra_generating", "awaiting_approval_gate_2", "deploying",
         "health_checking", "completed", "failed", "rolled_back",
+        "rejected",
     ]
     created_at: str
     updated_at: str
@@ -237,11 +244,25 @@ class OrchestratorState(TypedDict):
 # SECTION 2: SAFE NODE WRAPPER
 # =============================================================================
 
-def _safe_node_wrapper(node_func, node_name: str, state: OrchestratorState) -> OrchestratorState:
+def _safe_node_wrapper(node_func, node_name, state: OrchestratorState) -> OrchestratorState:
     """
     Safe wrapper for graph nodes.
     Catches exceptions, logs them, marks status as failed, and returns state.
     NO time.sleep() - async-friendly.
+
+    IMPORTANT: Does NOT catch GraphInterrupt - this is LangGraph's internal
+    mechanism for human-in-the-loop pauses. Catching it would break the
+    interrupt/resume functionality.
+
+    BUGFIX v1.0.4: This function previously had a stray extra parameter
+    named "str" between node_name and state. That had two effects:
+      1) Every call site only passed 3 arguments (node_func, node_name, s),
+         so Python raised "missing 1 required positional argument: state"
+         on the very first node executed.
+      2) Even if that were fixed by passing a 4th argument, naming a
+         parameter "str" shadows the built-in str() function for the
+         entire body of this function, breaking str(e) calls below.
+    Both issues are fixed by removing the extra parameter entirely.
     """
     if state.get("status") == "failed":
         logger.warning(f"[{state['job_id']}] Skipping {node_name} - workflow already failed")
@@ -250,6 +271,11 @@ def _safe_node_wrapper(node_func, node_name: str, state: OrchestratorState) -> O
     try:
         result = node_func(state)
         return result
+    except GraphInterrupt:
+        # Re-raise immediately - this is NOT an error, it's LangGraph's
+        # mechanism for pausing the workflow at human approval gates.
+        # The orchestrator resumes via graph.invoke(Command(resume={...}), config)
+        raise
     except Exception as e:
         logger.error(f"[{state['job_id']}] {node_name} failed: {e}")
         
@@ -267,7 +293,7 @@ def _safe_node_wrapper(node_func, node_name: str, state: OrchestratorState) -> O
         state["status"] = "failed"
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         return state
-
+    
 
 # =============================================================================
 # SECTION 3: MOCK AGENT FUNCTIONS (Sprint 1)
@@ -647,7 +673,7 @@ def _human_gate_1_impl(state: OrchestratorState) -> OrchestratorState:
 
     if not gate["approved"]:
         logger.warning(f"[{state['job_id']}] Gate 1 REJECTED. Workflow halted.")
-        state["status"] = "failed"
+        state["status"] = "rejected"
         state["error_log"].append({
             "node": "human_gate_1",
             "attempt": 1,
@@ -696,7 +722,10 @@ def _human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
 
     if not gate["approved"]:
         logger.warning(f"[{state['job_id']}] Gate 2 REJECTED. Workflow halted.")
-        state["status"] = "failed"
+        # BUGFIX v1.0.4: was "failed" - now "rejected" for consistency with
+        # gate 1, so monitoring can distinguish a human "no" from a real
+        # technical failure.
+        state["status"] = "rejected"
         state["error_log"].append({
             "node": "human_gate_2",
             "attempt": 1,
@@ -769,7 +798,7 @@ def _generate_report_impl(state: OrchestratorState) -> OrchestratorState:
     if optimizations:
         recommendations.extend([opt.get("description", "") for opt in optimizations])
 
-    start_time = datetime.fromisoformat(state["orchestrator_metadata"]["start_time"].replace("Z", "+00:00"))
+    start_time = datetime.fromisoformat(state["orchestrator_metadata"]["start_time"])
     elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
     state["orchestrator_metadata"]["elapsed_seconds"] = elapsed
 
@@ -796,7 +825,9 @@ def _generate_report_impl(state: OrchestratorState) -> OrchestratorState:
 # =============================================================================
 
 def route_after_codesec(state: OrchestratorState) -> str:
-    if state.get("status") == "failed":
+    # BUGFIX v1.0.5: also route to "end" on "rejected" (e.g. a future real
+    # CodeSec agent rejecting an unsupported repo), not just "failed".
+    if state.get("status") in ("failed", "rejected"):
         return "end"
     if state.get("codesec_result") is None:
         return "end"
@@ -804,7 +835,7 @@ def route_after_codesec(state: OrchestratorState) -> str:
 
 
 def route_after_gate_1(state: OrchestratorState) -> str:
-    if state.get("status") == "failed":
+    if state.get("status") in ("failed", "rejected"):
         return "end"
     if state["human_gates"]["gate_1_pre_infracost"]["approved"]:
         return "infracost_agent"
@@ -812,7 +843,7 @@ def route_after_gate_1(state: OrchestratorState) -> str:
 
 
 def route_after_infracost(state: OrchestratorState) -> str:
-    if state.get("status") == "failed":
+    if state.get("status") in ("failed", "rejected"):
         return "end"
     if state.get("infracost_result") is None:
         return "end"
@@ -820,7 +851,7 @@ def route_after_infracost(state: OrchestratorState) -> str:
 
 
 def route_after_gate_2(state: OrchestratorState) -> str:
-    if state.get("status") == "failed":
+    if state.get("status") in ("failed", "rejected"):
         return "end"
     if state["human_gates"]["gate_2_pre_deployops"]["approved"]:
         return "deployops_agent"
@@ -828,7 +859,7 @@ def route_after_gate_2(state: OrchestratorState) -> str:
 
 
 def route_after_deployops(state: OrchestratorState) -> str:
-    if state.get("status") == "failed":
+    if state.get("status") in ("failed", "rejected"):
         return "end"
     if state.get("deployops_result") is None:
         return "end"
@@ -920,8 +951,50 @@ def build_orchestrator_graph() -> StateGraph:
     memory = MemorySaver()
     graph = builder.compile(checkpointer=memory)
 
-    logger.info("Orchestrator graph compiled successfully (v1.0.2).")
+    logger.info("Orchestrator graph compiled successfully (v1.0.5).")
     return graph
+
+
+# =============================================================================
+# SECTION 7.1: GRAPH SINGLETON
+# =============================================================================
+# BUGFIX v1.0.5: run_workflow() used to call build_orchestrator_graph() on
+# every invocation, which creates a brand new MemorySaver each time. Since
+# MemorySaver keeps checkpoints only inside the object it was constructed
+# with, a fresh graph means a fresh (empty) checkpoint store - any job
+# paused at an interrupt() became unresumable, because the checkpoint that
+# graph.invoke(Command(resume=...), config) needs to look up simply isn't
+# there anymore. The graph (and its checkpointer) must be built ONCE and
+# reused for every call - typically once at FastAPI app startup.
+
+_graph_singleton: Optional[StateGraph] = None
+
+
+def get_orchestrator_graph() -> StateGraph:
+    """
+    Return the single, shared, compiled orchestrator graph.
+    Builds it once (lazily) and reuses it afterwards so that the
+    MemorySaver checkpoints survive across separate run_workflow /
+    resume_workflow calls within the same process.
+
+    NOTE: In FastAPI, prefer building this once in a startup/lifespan
+    hook and reusing that instance, rather than relying on the
+    lazy-singleton fallback here.
+    """
+    global _graph_singleton
+    if _graph_singleton is None:
+        _graph_singleton = build_orchestrator_graph()
+    return _graph_singleton
+
+
+def reset_orchestrator_graph() -> None:
+    """
+    Force the next get_orchestrator_graph() call to rebuild a fresh graph
+    (and a fresh MemorySaver). Mostly useful for tests that need isolated
+    checkpoint state between test cases.
+    """
+    global _graph_singleton
+    _graph_singleton = None
 
 
 # =============================================================================
@@ -960,7 +1033,7 @@ def create_initial_state(repo_url: str) -> OrchestratorState:
         },
         "error_log": [],
         "orchestrator_metadata": {
-            "graph_version": "1.0.2",
+            "graph_version": "1.0.5",
             "start_time": now,
             "elapsed_seconds": 0.0,
             "current_node": "start",
@@ -974,11 +1047,18 @@ def create_initial_state(repo_url: str) -> OrchestratorState:
 def run_workflow(repo_url: str, thread_id: Optional[str] = None) -> OrchestratorState:
     """
     Run the complete orchestrator workflow for a repository.
-    
+
     NOTE: For human gates, execution will pause at interrupt points.
-    Resume with: graph.invoke(None, config, resume_after_interrupt=True)
+    Resume with resume_workflow(thread_id, resume_data) below - do NOT
+    call run_workflow() again for the same job, it would start a brand
+    new job with a brand new job_id.
+
+    BUGFIX v1.0.5: now uses get_orchestrator_graph() (a shared, cached
+    graph instance) instead of build_orchestrator_graph() directly, so
+    the MemorySaver checkpoint created here is still around when
+    resume_workflow() is called later for the same thread_id.
     """
-    graph = build_orchestrator_graph()
+    graph = get_orchestrator_graph()
     state = create_initial_state(repo_url)
     config = {"configurable": {"thread_id": thread_id or state["job_id"]}}
 
@@ -1003,8 +1083,42 @@ def run_workflow(repo_url: str, thread_id: Optional[str] = None) -> Orchestrator
         return state
 
 
+def resume_workflow(thread_id: str, resume_data: dict) -> OrchestratorState:
+    """
+    Resume a workflow that is paused at a human gate (interrupt()).
+
+    thread_id must match the one used in the original run_workflow() call
+    (defaults to the job_id if none was passed explicitly).
+
+    resume_data is handed back as the return value of interrupt(...) inside
+    the paused node - e.g. for a human gate:
+        {"approved": True, "comment": "OK", "approved_by": "user@email.com"}
+
+    Example:
+        result = resume_workflow(
+            job_id,
+            {"approved": True, "comment": "Looks good", "approved_by": "alice@company.com"},
+        )
+    """
+    from langgraph.types import Command
+
+    graph = get_orchestrator_graph()
+    config = {"configurable": {"thread_id": thread_id}}
+
+    logger.info(f"Resuming workflow for thread {thread_id} with resume_data: {resume_data}")
+
+    try:
+        final_state = graph.invoke(Command(resume=resume_data), config)
+        logger.info(f"Workflow resumed for thread {thread_id} | status: {final_state.get('status')}")
+        return final_state
+    except Exception as e:
+        logger.error(f"Resuming workflow failed for thread {thread_id}: {e}")
+        raise
+
+
+
 # =============================================================================
-# SECTION 9: MAIN
+# SECTION 9: MAIN (for testing)
 # =============================================================================
 
 if __name__ == "__main__":
@@ -1012,7 +1126,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("DevGuard AI - Orchestrator Test Run")
-    print("Version: 1.0.2 (Aligned with deployops-mock-schema.json)")
+    print("Version: 1.0.4 (safe_node_wrapper signature fix + gate_2 status fix)")
     print("=" * 60)
 
     state = create_initial_state(test_repo)
@@ -1027,16 +1141,22 @@ if __name__ == "__main__":
     print("  Graph compiled successfully!")
 
     print(f"\n[TEST 3] Running workflow (will pause at human gates)...")
+    print("  Note: Human gates use LangGraph interrupt() mechanism.")
+    print("  To resume, use: graph.invoke(Command(resume={...}), config)")
+    
     config = {"configurable": {"thread_id": state["job_id"]}}
     
     try:
+        # Stream to see progress step by step
         for event in graph.stream(state, config):
             for node_name, node_state in event.items():
                 if node_name == "__interrupt__":
                     print(f"\n  ⏸️  INTERRUPT at gate: {node_state[0]['value']['gate']}")
                     print(f"     Message: {node_state[0]['value']['message']}")
                     print(f"     Actions: {node_state[0]['value']['actions']}")
-                    print(f"\n  To resume, call: graph.invoke(None, config, resume_after_interrupt=True)")
+                    print(f"\n  To resume, call:")
+                    print(f"    from langgraph.types import Command")
+                    print(f"    graph.invoke(Command(resume={{'approved': True, ...}}), config)")
                     break
                 else:
                     status = node_state.get("status", "unknown")
@@ -1046,4 +1166,4 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 60)
     print("Test complete.")
-    print("=" * 60) 
+    print("=" * 60)

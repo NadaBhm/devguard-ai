@@ -380,3 +380,34 @@ class TestSafeNodeWrapper:
         result = _safe_node_wrapper(should_not_run, "skipped", initial_state)
         assert result["status"] == "failed"
         assert len(result["error_log"]) == 0
+
+
+class TestSafeNodeWrapperWithInterrupt:
+    """Test que GraphInterrupt n'est PAS attrapé par le wrapper."""
+    
+    def test_graph_interrupt_is_re_raised(self, initial_state):
+        """Vérifier que GraphInterrupt passe à travers le wrapper."""
+        from langgraph.errors import GraphInterrupt
+        
+        def node_with_interrupt(state):
+            raise GraphInterrupt(value={"test": "interrupt"})
+        
+        # GraphInterrupt doit être re-levée, pas attrapée
+        with pytest.raises(GraphInterrupt):
+            _safe_node_wrapper(node_with_interrupt, "interrupt_node", initial_state)
+        
+        # Le status ne doit PAS être "failed"
+        assert initial_state["status"] != "failed"
+        assert len(initial_state["error_log"]) == 0
+    
+    def test_real_exception_is_caught(self, initial_state):
+        """Vérifier que les vraies exceptions sont toujours attrapées."""
+        def node_with_error(state):
+            raise ValueError("Real error")
+        
+        result = _safe_node_wrapper(node_with_error, "error_node", initial_state)
+        
+        assert result["status"] == "failed"
+        assert len(result["error_log"]) == 1
+        assert result["error_log"][0]["node"] == "error_node"
+        assert result["error_log"][0]["message"] == "Real error"

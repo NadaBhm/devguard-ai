@@ -48,14 +48,31 @@ jobs:
   frontend-lint-and-build:
     name: Frontend (React) - lint & build
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # BUGFIX v1.1: actions/setup-node's cache-dependency-path used to
+      # point at src/frontend/package-lock.json unconditionally. Until
+      # T-1.16 (Karim) creates src/frontend/, that file doesn't exist,
+      # and setup-node's cache resolution step FAILS HARD at this point -
+      # continue-on-error on the later steps (install/lint/build) never
+      # even gets a chance to run, because Set up Node itself errors out.
+      # Fix: check the folder exists first, and skip the rest of this
+      # job's steps entirely (via `if:`) when it doesn't, instead of
+      # relying on continue-on-error to catch a failure it can't reach.
+      - name: Check if frontend exists
+        id: check_frontend
+        run: |
+          if [ -f "src/frontend/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::src/frontend/package.json not found yet (T-1.16 not done) - skipping frontend CI job"
+          fi
+
       - name: Set up Node
+        if: steps.check_frontend.outputs.exists == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -63,13 +80,19 @@ jobs:
           cache-dependency-path: src/frontend/package-lock.json
 
       - name: Install dependencies
+        if: steps.check_frontend.outputs.exists == 'true'
+        working-directory: src/frontend
         run: npm ci || npm install
-        continue-on-error: true # Sprint 1: frontend may not be initialized yet
+        continue-on-error: true
 
       - name: Lint (ESLint)
+        if: steps.check_frontend.outputs.exists == 'true'
+        working-directory: src/frontend
         run: npm run lint || true
         continue-on-error: true
 
       - name: Build
+        if: steps.check_frontend.outputs.exists == 'true'
+        working-directory: src/frontend
         run: npm run build || true
         continue-on-error: true

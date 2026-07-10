@@ -1,0 +1,75 @@
+name: CI
+
+# Sprint 1 skeleton (T-1.1): lint + test scaffolding for both the Python
+# backend/agents and the React frontend. Kept intentionally lenient
+# (continue-on-error where noted) since most modules are still mocks -
+# the goal for Sprint 1 is a GREEN pipeline that runs, not 100% coverage.
+# Sprint 5 (T-5.6/T-5.7) will harden this (strict linting, real coverage
+# gates, no continue-on-error).
+
+on:
+  push:
+    branches: ["main", "master", "feature/**"]
+  pull_request:
+    branches: ["main", "master"]
+
+jobs:
+  backend-lint-and-test:
+    name: Backend (Python) - lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check src/ || true
+        continue-on-error: true # Sprint 1: not all modules exist yet
+
+      - name: Type check (mypy)
+        run: mypy src/ || true
+        continue-on-error: true # Sprint 1: not all modules exist yet
+
+      - name: Run tests (pytest)
+        run: pytest --maxfail=1 --disable-warnings -q || true
+        continue-on-error: true # Sprint 1: most agents are still mocks
+
+  frontend-lint-and-build:
+    name: Frontend (React) - lint & build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: src/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci || npm install
+        continue-on-error: true # Sprint 1: frontend may not be initialized yet
+
+      - name: Lint (ESLint)
+        run: npm run lint || true
+        continue-on-error: true
+
+      - name: Build
+        run: npm run build || true
+        continue-on-error: true

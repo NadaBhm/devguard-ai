@@ -1,0 +1,96 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+}
+
+data "aws_ecs_cluster" "this" {
+  cluster_name = "{{ cluster | hcl_string }}"
+}
+
+resource "aws_iam_role" "ecs_execution" {
+  name = "{{ service_name | hcl_string }}-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
+        Principal = { Service = "ecs-tasks.amazonaws.com" }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_ecs_task_definition" "app" {
+  family                   = "{{ service_name | hcl_string }}"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = "{{ task_cpu }}"
+  memory                   = "{{ task_memory }}"
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "{{ service_name | hcl_string }}"
+      image     = "{{ docker_image | hcl_string }}"
+      essential = true
+      portMappings = [
+        {
+          containerPort = {{ health_check_port }}
+          protocol      = "tcp"
+        }
+      ]
+    }
+  ])
+}
+
+resource "aws_security_group" "service" {
+  name        = "{{ service_name | hcl_string }}-sg"
+  description = "Allow inbound traffic to {{ service_name | hcl_string }}"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = {{ health_check_port }}
+    to_port     = {{ health_check_port }}
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_ecs_service" "app" {
+  name            = "{{ service_name | hcl_string }}"
+  cluster         = data.aws_ecs_cluster.this.arn
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.subnet_ids
+    security_groups  = [aws_security_group.service.id]
+    assign_public_ip = true
+  }
+
+  deployment_minimum_healthy_percent = {{ min_healthy_percent }}
+  deployment_maximum_percent         = {{ max_percent }}
+}

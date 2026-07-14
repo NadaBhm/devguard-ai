@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "compute_type": "ecs",
+  "artifacts": {
+    "terraform": {
+      "files": {
+        "main.tf": "resource \"aws_ecs_service\" \"app\" { name = \"repo-name-service\" cluster = \"devguard-cluster\" }",
+        "variables.tf": "variable \"region\" { default = \"us-east-1\" }",
+        "outputs.tf": "output \"service_url\" { value = aws_lb.app.dns_name }"
+      },
+      "variables": { "region": "us-east-1", "environment": "dev" }
+    },
+    "dockerfile": "FROM python:3.12-slim\nWORKDIR /app\nCOPY . .\nRUN pip install -r requirements.txt\nCMD [\"uvicorn\", \"main:app\", \"--host\", \"0.0.0.0\"]",
+    "docker_image": { "name": "repo-name", "tag": "a1b2c3d4e5f6" },
+    "source_code": "/tmp/repo_550e8400"
+  },
+  "aws_config": {
+    "region": "us-east-1",
+    "ecs": {
+      "cluster": "devguard-cluster",
+      "service_name": "repo-name-service",
+      "task_cpu": "512",
+      "task_memory": "1024"
+    },
+    "lambda": null,
+    "ec2": null,
+    "estimated_monthly_cost": {
+      "amount": 18.02,
+      "currency": "USD",
+      "range_min": 14.42,
+      "range_max": 21.62
+    }
+  },
+  "deployment_config": {
+    "ecs": {
+      "strategy": "rolling",
+      "health_check_path": "/health",
+      "health_check_port": 8080,
+      "timeout_minutes": 5,
+      "min_healthy_percent": 50,
+      "max_percent": 200
+    },
+    "lambda": null,
+    "ec2": null
+  },
+  "approval": { "status": "approved", "approved_by": "mohamedkarim.moalla@ensi-uma.tn" },
+  "enrichment": {
+    "architecture_explanation": "This repository detected a containerized FastAPI service with Docker Compose, which favors a long-running orchestrated service over an event-driven function, so ECS Fargate was selected.",
+    "cost_summary": "Running this service on ECS Fargate is estimated at $18.02/month (range: $14.42-$21.62), based on a 0.5 vCPU / 1 GB task running continuously.",
+    "finops_justification": "Reserved capacity is recommended over Spot because the service is a stateful, non-batch workload without horizontal autoscaling detected in the Compose configuration.",
+    "enrichment_source": "gemini"
+  }
+}

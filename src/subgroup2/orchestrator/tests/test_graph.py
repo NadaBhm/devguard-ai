@@ -388,14 +388,15 @@ class TestSafeNodeWrapperWithInterrupt:
     def test_graph_interrupt_is_re_raised(self, initial_state):
         """Vérifier que GraphInterrupt passe à travers le wrapper."""
         from langgraph.errors import GraphInterrupt
-        
+        from langgraph.types import Interrupt
+
         def node_with_interrupt(state):
-            raise GraphInterrupt(value={"test": "interrupt"})
-        
+            raise GraphInterrupt(interrupts=[Interrupt(value={"test": "interrupt"})])
+
         # GraphInterrupt doit être re-levée, pas attrapée
         with pytest.raises(GraphInterrupt):
             _safe_node_wrapper(node_with_interrupt, "interrupt_node", initial_state)
-        
+
         # Le status ne doit PAS être "failed"
         assert initial_state["status"] != "failed"
         assert len(initial_state["error_log"]) == 0

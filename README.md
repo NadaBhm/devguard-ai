@@ -165,3 +165,25 @@ See `.env.example` for all required variables.
 ## License
 
 Internal — Team Use Only
+
+
+
+
+
+## alembic migration commands : 
+
+# initial migration
+alembic revision --autogenerate -m "Initial migration with User model"
+alembic upgrade head
+
+# runs migration 
+alembic upgrade head 
+
+# start backend server 
+uvicorn src.backend.main:app --reload
+
+# Generate a new migration with autogenerate (if you have models)
+alembic revision --autogenerate -m "initial_migration"
+
+# OR generate a blank migration
+alembic revision -m "initial_migration"

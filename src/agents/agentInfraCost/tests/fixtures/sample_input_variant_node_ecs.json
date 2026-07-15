@@ -1,0 +1,27 @@
+{
+  "job_id": "job-variant-002",
+  "status": "completed",
+  "error": null,
+  "repo_url": "https://github.com/owner/node-api-service",
+  "repo_metadata": {
+    "name": "node-api-service",
+    "branch": "main",
+    "commit_sha": "9988776655",
+    "total_files": 210,
+    "loc": 12000,
+    "language_breakdown": { "javascript": 10500, "dockerfile": 300, "typescript": 1200 }
+  },
+  "stack_detection": {
+    "primary_language": "javascript",
+    "frameworks": ["express", "prisma"],
+    "database": "mysql",
+    "build_tool": "npm",
+    "container": {
+      "detected": true, "base_image": "node:20-alpine",
+      "dockerfile_path": "Dockerfile", "compose_detected": true
+    },
+    "confidence": 0.95,
+    "detected_files": ["package.json", "Dockerfile", "server.js", "docker-compose.yml"]
+  },
+  "security_score": { "score": 74, "grade": "B", "recommendations": [] }
+}

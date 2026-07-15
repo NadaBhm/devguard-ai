@@ -1,0 +1,27 @@
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "error": null,
+  "repo_url": "https://github.com/owner/repo-name",
+  "repo_metadata": {
+    "name": "repo-name",
+    "branch": "main",
+    "commit_sha": "a1b2c3d4e5f6",
+    "total_files": 150,
+    "loc": 8500,
+    "language_breakdown": { "python": 6200, "javascript": 1500, "dockerfile": 200, "terraform": 600 }
+  },
+  "stack_detection": {
+    "primary_language": "python",
+    "frameworks": ["fastapi", "sqlalchemy"],
+    "database": "postgresql",
+    "build_tool": "pip",
+    "container": {
+      "detected": true, "base_image": "python:3.12-slim",
+      "dockerfile_path": "Dockerfile", "compose_detected": true
+    },
+    "confidence": 0.92,
+    "detected_files": ["requirements.txt", "Dockerfile", "main.py", "docker-compose.yml"]
+  },
+  "security_score": { "score": 68, "grade": "C", "recommendations": [] }
+}

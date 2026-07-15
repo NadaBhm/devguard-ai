@@ -1,0 +1,926 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://devguard-ai.dev/schemas/orchestrator-input-schema.json",
+  "title": "DevGuard AI - Orchestrator State Schema",
+  "description": "Schema global de l'etat du workflow LangGraph. codesec_result contient le payload EXACT de l'agent CodeSec (Nada). deployops_result aligne avec deployops-mock-schema.json (Oussema).",
+  "type": "object",
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Identifiant unique du job d'analyse (UUID v4)"
+    },
+    "repo_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://github\\.com/[\\w.-]+/[\\w.-]+/?$",
+      "description": "URL du repository GitHub public"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "cloning",
+        "analyzing",
+        "awaiting_approval_gate_1",
+        "infra_generating",
+        "awaiting_approval_gate_2",
+        "deploying",
+        "health_checking",
+        "completed",
+        "failed",
+        "rolled_back"
+      ],
+      "description": "Etat courant du workflow"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "codesec_result": {
+      "type": ["object", "null"],
+      "description": "PAYLOAD EXACT de l'agent CodeSec (Nada) - voir codesec-mock-schema.json",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "error": {
+          "type": ["string", "null"]
+        },
+        "repo_url": {
+          "type": "string"
+        },
+        "repo_metadata": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "commit_sha": {
+              "type": "string"
+            },
+            "total_files": {
+              "type": "integer"
+            },
+            "loc": {
+              "type": "integer"
+            },
+            "language_breakdown": {
+              "type": "object"
+            }
+          }
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              },
+              "started_at": {
+                "type": "string"
+              },
+              "completed_at": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "files_scanned": {
+              "type": "integer"
+            },
+            "sast_findings_count": {
+              "type": "integer"
+            },
+            "secrets_found_count": {
+              "type": "integer"
+            },
+            "vulnerable_dependencies_count": {
+              "type": "integer"
+            },
+            "dockerfile_issues_count": {
+              "type": "integer"
+            },
+            "total_critical": {
+              "type": "integer"
+            },
+            "total_high": {
+              "type": "integer"
+            },
+            "total_medium": {
+              "type": "integer"
+            },
+            "total_low": {
+              "type": "integer"
+            },
+            "total_info": {
+              "type": "integer"
+            }
+          }
+        },
+        "stack_detection": {
+          "type": "object",
+          "properties": {
+            "primary_language": {
+              "type": "string"
+            },
+            "frameworks": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "database": {
+              "type": "string"
+            },
+            "build_tool": {
+              "type": "string"
+            },
+            "container": {
+              "type": "object"
+            },
+            "confidence": {
+              "type": "number"
+            },
+            "detected_files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "sast_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": {
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "info"
+                ]
+              },
+              "category": {
+                "type": "string"
+              },
+              "owasp_category": {
+                "type": "string"
+              },
+              "cwe_id": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "column": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              },
+              "remediation": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "secrets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "column": {
+                "type": "integer"
+              },
+              "value_preview": {
+                "type": "string"
+              },
+              "commit_sha": {
+                "type": "string"
+              },
+              "confidence": {
+                "type": "number"
+              },
+              "remediation": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "dependencies": {
+          "type": "object",
+          "properties": {
+            "total_packages": {
+              "type": "integer"
+            },
+            "direct": {
+              "type": "integer"
+            },
+            "transitive": {
+              "type": "integer"
+            },
+            "vulnerable_packages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "package": {
+                    "type": "string"
+                  },
+                  "installed_version": {
+                    "type": "string"
+                  },
+                  "fixed_version": {
+                    "type": "string"
+                  },
+                  "cve_id": {
+                    "type": "string"
+                  },
+                  "severity": {
+                    "type": "string"
+                  },
+                  "cvss_score": {
+                    "type": "number"
+                  },
+                  "description": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "dockerfile_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": {
+                "type": "string"
+              },
+              "tool": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              },
+              "remediation": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "sbom": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string"
+            },
+            "specVersion": {
+              "type": "string"
+            },
+            "serialNumber": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer"
+            },
+            "components_count": {
+              "type": "integer"
+            },
+            "components": {
+              "type": "array"
+            },
+            "download_url": {
+              "type": "string"
+            }
+          }
+        },
+        "security_score": {
+          "type": "object",
+          "properties": {
+            "score": {
+              "type": "integer"
+            },
+            "grade": {
+              "type": "string",
+              "enum": [
+                "A",
+                "B",
+                "C",
+                "D",
+                "E",
+                "F"
+              ]
+            },
+            "max_score": {
+              "type": "integer"
+            },
+            "breakdown": {
+              "type": "object"
+            },
+            "severity_counts": {
+              "type": "object"
+            },
+            "recommendations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "infracost_result": {
+      "type": ["object", "null"],
+      "description": "Resultat de l'agent InfraCost (Karim)",
+      "properties": {
+        "architecture_recommendation": {
+          "type": "string",
+          "enum": [
+            "ecs_fargate",
+            "lambda",
+            "ec2",
+            "hybrid"
+          ]
+        },
+        "justification": {
+          "type": "string"
+        },
+        "generated_terraform": {
+          "type": "object",
+          "properties": {
+            "main_tf": {
+              "type": "string"
+            },
+            "variables_tf": {
+              "type": "string"
+            },
+            "outputs_tf": {
+              "type": "string"
+            },
+            "plan_passed": {
+              "type": "boolean"
+            }
+          }
+        },
+        "cost_estimate": {
+          "type": "object",
+          "properties": {
+            "monthly_cost_usd": {
+              "type": "number"
+            },
+            "currency": {
+              "type": "string",
+              "default": "USD"
+            },
+            "breakdown": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "service": {
+                    "type": "string"
+                  },
+                  "monthly_cost_usd": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "load_scenarios": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "users": {
+                "type": "integer",
+                "enum": [
+                  1000,
+                  10000,
+                  100000
+                ]
+              },
+              "estimated_monthly_cost_usd": {
+                "type": "number"
+              },
+              "scaling_assumptions": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "optimizations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "strategy": {
+                "type": "string",
+                "enum": [
+                  "spot_instances",
+                  "reserved_instances",
+                  "graviton",
+                  "savings_plan"
+                ]
+              },
+              "projected_savings_usd": {
+                "type": "number"
+              },
+              "description": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "region_comparison": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "region": {
+                "type": "string"
+              },
+              "monthly_cost_usd": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "deployops_result": {
+      "type": ["object", "null"],
+      "description": "Resultat de l'agent DeployOps (Oussema) - ALIGNE avec deployops-mock-schema.json",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "Identifiant du job (doit matcher l'orchestrateur)"
+        },
+        "deployment_status": {
+          "type": "string",
+          "enum": [
+            "success",
+            "failed",
+            "rolled_back"
+          ],
+          "description": "Statut final du deploiement (REQUIS par orchestrateur)"
+        },
+        "deployed_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri",
+          "description": "URL de l'application deployee (REQUIS par orchestrateur)"
+        },
+        "health_check": {
+          "type": "object",
+          "description": "Resultat du health check (REQUIS par orchestrateur)",
+          "properties": {
+            "passed": {
+              "type": "boolean",
+              "description": "True si l'application repond correctement"
+            },
+            "response_time_ms": {
+              "type": "integer",
+              "description": "Temps de reponse en millisecondes"
+            },
+            "status_code": {
+              "type": "integer",
+              "description": "Code HTTP retourne (200, 404, etc.)"
+            },
+            "checked_at": {
+              "type": "string",
+              "format": "date-time",
+              "description": "Timestamp du health check"
+            }
+          },
+          "required": [
+            "passed",
+            "response_time_ms",
+            "status_code"
+          ]
+        },
+        "rollback_triggered": {
+          "type": "boolean",
+          "description": "True si un rollback a ete declenche (REQUIS par orchestrateur)"
+        },
+        "rollback_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Raison du rollback si applicable"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Message d'erreur si le deploiement a echoue"
+        },
+        "terraform_outputs": {
+          "type": "object",
+          "description": "Outputs Terraform du deploiement (REQUIS par orchestrateur)",
+          "properties": {
+            "ecs_cluster_name": {
+              "type": "string"
+            },
+            "service_name": {
+              "type": "string"
+            },
+            "alb_dns": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ecs_cluster_name",
+            "service_name",
+            "alb_dns"
+          ]
+        },
+        "artifacts": {
+          "type": "object",
+          "description": "Artifacts generes par le deploiement",
+          "properties": {
+            "terraform": {
+              "type": "object",
+              "properties": {
+                "files": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "variables": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "dockerfile": {
+              "type": "string",
+              "description": "Contenu du Dockerfile"
+            },
+            "docker_image": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "tag": {
+                  "type": "string"
+                }
+              }
+            },
+            "source_code": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Chemin vers le code source (optionnel)"
+            }
+          }
+        },
+        "aws_config": {
+          "type": "object",
+          "description": "Configuration AWS du deploiement",
+          "properties": {
+            "region": {
+              "type": "string"
+            },
+            "ecs_cluster": {
+              "type": "string"
+            },
+            "service_name": {
+              "type": "string"
+            },
+            "task_cpu": {
+              "type": "string"
+            },
+            "task_memory": {
+              "type": "string"
+            }
+          }
+        },
+        "deployment_config": {
+          "type": "object",
+          "description": "Configuration du deploiement",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "enum": [
+                "rolling",
+                "blue-green"
+              ]
+            },
+            "health_check_path": {
+              "type": "string"
+            },
+            "health_check_port": {
+              "type": "integer"
+            },
+            "timeout_minutes": {
+              "type": "integer"
+            },
+            "min_healthy_percent": {
+              "type": "integer"
+            },
+            "max_percent": {
+              "type": "integer"
+            }
+          }
+        },
+        "approval": {
+          "type": "object",
+          "description": "Informations d'approbation",
+          "properties": {
+            "deploy_approved": {
+              "type": "boolean"
+            },
+            "approved_by": {
+              "type": "string",
+              "format": "email"
+            }
+          }
+        }
+      },
+      "required": [
+        "job_id",
+        "deployment_status",
+        "deployed_url",
+        "health_check",
+        "rollback_triggered",
+        "terraform_outputs"
+      ]
+    },
+    "human_gates": {
+      "type": "object",
+      "description": "Points de validation humaine",
+      "properties": {
+        "gate_1_pre_infracost": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true
+            },
+            "approved": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "comment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "approved_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "approved_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "gate_2_pre_deployops": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true
+            },
+            "approved": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "comment": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "approved_at": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            },
+            "approved_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "error_log": {
+      "type": "array",
+      "description": "Historique des erreurs/retries",
+      "items": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string"
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "max_attempts": {
+            "type": "integer",
+            "default": 3
+          },
+          "message": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stack_trace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resolved": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      }
+    },
+    "orchestrator_metadata": {
+      "type": "object",
+      "description": "Metadonnees internes",
+      "properties": {
+        "graph_version": {
+          "type": "string"
+        },
+        "start_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "current_node": {
+          "type": "string"
+        },
+        "nodes_executed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "chat_session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "final_report": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Rapport final",
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": [
+            "pdf",
+            "html",
+            "json"
+          ]
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "download_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "total_vulnerabilities": {
+              "type": "integer"
+            },
+            "critical_count": {
+              "type": "integer"
+            },
+            "estimated_monthly_cost_usd": {
+              "type": "number"
+            },
+            "deployment_status": {
+              "type": "string"
+            },
+            "recommendations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "pipeline_duration_seconds": {
+              "type": "number",
+              "description": "Duree totale du pipeline en secondes"
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": [
+    "job_id",
+    "repo_url",
+    "status"
+  ],
+  "additionalProperties": false
+}

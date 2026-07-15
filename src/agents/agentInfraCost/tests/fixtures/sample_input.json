@@ -1,0 +1,168 @@
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "error": null,
+  "repo_url": "https://github.com/owner/repo-name",
+  "repo_metadata": {
+    "name": "repo-name",
+    "branch": "main",
+    "commit_sha": "a1b2c3d4e5f6",
+    "total_files": 150,
+    "loc": 8500,
+    "language_breakdown": {
+      "python": 6200,
+      "javascript": 1500,
+      "dockerfile": 200,
+      "terraform": 600
+    }
+  },
+  "phases": [
+    {"name": "clone", "status": "completed", "started_at": "2026-07-01T10:00:00Z", "completed_at": "2026-07-01T10:00:05Z"},
+    {"name": "stack_detection", "status": "completed", "started_at": "2026-07-01T10:00:05Z", "completed_at": "2026-07-01T10:00:10Z"},
+    {"name": "sast", "status": "completed", "started_at": "2026-07-01T10:00:10Z", "completed_at": "2026-07-01T10:00:20Z"},
+    {"name": "secrets", "status": "completed", "started_at": "2026-07-01T10:00:20Z", "completed_at": "2026-07-01T10:00:25Z"},
+    {"name": "dependencies", "status": "completed", "started_at": "2026-07-01T10:00:25Z", "completed_at": "2026-07-01T10:00:30Z"},
+    {"name": "dockerfile_scan", "status": "completed", "started_at": "2026-07-01T10:00:30Z", "completed_at": "2026-07-01T10:00:32Z"},
+    {"name": "sbom", "status": "completed", "started_at": "2026-07-01T10:00:32Z", "completed_at": "2026-07-01T10:00:35Z"},
+    {"name": "scoring", "status": "completed", "started_at": "2026-07-01T10:00:35Z", "completed_at": "2026-07-01T10:00:36Z"}
+  ],
+  "summary": {
+    "files_scanned": 150,
+    "sast_findings_count": 12,
+    "secrets_found_count": 2,
+    "vulnerable_dependencies_count": 1,
+    "dockerfile_issues_count": 3,
+    "total_critical": 1,
+    "total_high": 4,
+    "total_medium": 5,
+    "total_low": 2,
+    "total_info": 0
+  },
+  "stack_detection": {
+    "primary_language": "python",
+    "frameworks": ["fastapi", "sqlalchemy"],
+    "database": "postgresql",
+    "build_tool": "pip",
+    "container": {
+      "detected": true,
+      "base_image": "python:3.12-slim",
+      "dockerfile_path": "Dockerfile",
+      "compose_detected": true
+    },
+    "confidence": 0.92,
+    "detected_files": ["requirements.txt", "Dockerfile", "main.py", "docker-compose.yml"]
+  },
+  "sast_findings": [
+    {
+      "rule_id": "python.sql-injection",
+      "tool": "semgrep",
+      "severity": "critical",
+      "category": "owasp-top10",
+      "owasp_category": "A03:2021 – Injection",
+      "cwe_id": "CWE-89",
+      "file": "app/db.py",
+      "line": 24,
+      "column": 10,
+      "message": "Possible SQL injection via string concatenation",
+      "snippet": "query = f\"SELECT * FROM users WHERE id = {user_id}\"",
+      "remediation": "Use parameterized queries with SQLAlchemy ORM"
+    }
+  ],
+  "secrets": [
+    {
+      "type": "aws_access_key_id",
+      "tool": "gitleaks",
+      "file": ".env",
+      "line": 3,
+      "column": 1,
+      "value_preview": "AKIAIOSFODNN7EXAMPLE",
+      "commit_sha": "a1b2c3d4e5f6",
+      "confidence": 0.95,
+      "remediation": "Rotate the key and use AWS Secrets Manager"
+    }
+  ],
+  "dependencies": {
+    "total_packages": 42,
+    "direct": 12,
+    "transitive": 30,
+    "vulnerable_packages": [
+      {
+        "package": "requests",
+        "installed_version": "2.25.0",
+        "fixed_version": "2.31.0",
+        "cve_id": "CVE-2023-32681",
+        "severity": "high",
+        "cvss_score": 7.5,
+        "description": "Unintended leak of Proxy-Authorization header"
+      }
+    ]
+  },
+  "dockerfile_findings": [
+    {
+      "rule_id": "DS001",
+      "tool": "trivy",
+      "severity": "high",
+      "category": "dockerfile",
+      "file": "Dockerfile",
+      "line": 5,
+      "message": "Running as root user",
+      "snippet": "USER root",
+      "remediation": "Add 'USER appuser' after creating non-root user"
+    },
+    {
+      "rule_id": "DS002",
+      "tool": "trivy",
+      "severity": "medium",
+      "category": "dockerfile",
+      "file": "Dockerfile",
+      "line": 1,
+      "message": "Using 'latest' tag for base image",
+      "snippet": "FROM python:latest",
+      "remediation": "Pin to specific version: FROM python:3.12-slim"
+    }
+  ],
+  "sbom": {
+    "format": "CycloneDX",
+    "specVersion": "1.5",
+    "serialNumber": "urn:uuid:550e8400-e29b-41d4-a716-446655440001",
+    "version": 1,
+    "components_count": 42,
+    "components": [
+      {
+        "type": "library",
+        "name": "fastapi",
+        "version": "0.110.0",
+        "purl": "pkg:pypi/fastapi@0.110.0",
+        "licenses": [{"id": "MIT"}],
+        "source_file": "requirements.txt"
+      }
+    ],
+    "download_url": "/api/jobs/{job_id}/sbom/download"
+  },
+  "security_score": {
+    "score": 68,
+    "grade": "C",
+    "max_score": 100,
+    "breakdown": {
+      "sast": 20,
+      "secrets": 15,
+      "dependencies": 20,
+      "dockerfile": 8,
+      "sbom": 10,
+      "stack_detection": 7
+    },
+    "severity_counts": {
+      "critical": 1,
+      "high": 4,
+      "medium": 5,
+      "low": 2,
+      "info": 0
+    },
+    "recommendations": [
+      "Fix 1 critical SQL injection in app/db.py:24",
+      "Update requests to >= 2.31.0 (CVE-2023-32681)",
+      "Remove 2 hardcoded secrets from .env and scripts/deploy.sh",
+      "Run Dockerfile as non-root user (Dockerfile:5)"
+    ]
+  }
+}

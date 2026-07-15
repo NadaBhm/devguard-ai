@@ -1,0 +1,29 @@
+{
+  "job_id": "job-variant-001",
+  "status": "completed",
+  "error": null,
+  "repo_url": "https://github.com/owner/small-cli-tool",
+  "repo_metadata": {
+    "name": "small-cli-tool",
+    "branch": "main",
+    "commit_sha": "f1e2d3c4b5a6",
+    "total_files": 18,
+    "loc": 420,
+    "language_breakdown": { "python": 420 }
+  },
+  "stack_detection": {
+    "primary_language": "python",
+    "frameworks": [],
+    "database": null,
+    "build_tool": "pip",
+    "container": {
+      "detected": false,
+      "base_image": null,
+      "dockerfile_path": null,
+      "compose_detected": false
+    },
+    "confidence": 0.88,
+    "detected_files": ["requirements.txt", "handler.py"]
+  },
+  "security_score": { "score": 90, "grade": "A", "recommendations": [] }
+}

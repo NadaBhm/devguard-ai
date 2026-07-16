@@ -74,7 +74,4 @@ class RepoAnalysisInput(BaseModel):
     repo_url: str
     repo_metadata: RepoMetadata
     stack_detection: StackDetection
-    # Informational only (see module docstring) — never used by the
-    # decision engine or cost estimator. Optional because a payload missing
-    # it is not, by itself, a fail-fast condition.
     security_score: Optional[SecurityScore] = None

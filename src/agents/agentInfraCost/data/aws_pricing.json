@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "description": "Table de prix statique utilisée par cost_estimator.py. Ne fait AUCUN appel réseau. À mettre à jour manuellement tous les 3-6 mois via les pages officielles AWS.",
+    "region": "us-east-1",
+    "currency": "USD",
+    "last_verified": "2026-07-14",
+    "sources": [
+      "https://aws.amazon.com/fargate/pricing/",
+      "https://aws.amazon.com/lambda/pricing/",
+      "https://aws.amazon.com/ec2/pricing/on-demand/"
+    ],
+    "note": "Prix on-demand, sans remise Spot/Reserved (gérées séparément par finops_optimizer.py). Marge d'incertitude appliquée par cost_estimator.py : ±20%."
+  },
+  "ecs_fargate": {
+    "x86": { "vcpu_per_hour": 0.04048, "memory_gb_per_hour": 0.004445 },
+    "arm_graviton": { "vcpu_per_hour": 0.032384, "memory_gb_per_hour": 0.003556 },
+    "hours_per_month": 730
+  },
+  "lambda": {
+    "x86": { "gb_second": 0.0000166667, "requests_per_million": 0.20 },
+    "arm_graviton": { "gb_second": 0.0000133334, "requests_per_million": 0.20 },
+    "free_tier": { "requests_per_month": 1000000, "gb_seconds_per_month": 400000 }
+  },
+  "ec2_on_demand_hourly": {
+    "t3.nano": 0.0052, "t3.micro": 0.0104, "t3.small": 0.0208, "t3.medium": 0.0416,
+    "t3.large": 0.0832, "t3.xlarge": 0.1664,
+    "t4g.nano": 0.0042, "t4g.micro": 0.0084, "t4g.small": 0.0168, "t4g.medium": 0.0336,
+    "m5.large": 0.096, "m6i.large": 0.096, "m7g.large": 0.0816
+  },
+  "ebs_gp3_per_gb_month": 0.08,
+  "optimization_discounts": {
+    "spot_avg_pct": 0.65, "reserved_1yr_pct": 0.42, "reserved_3yr_pct": 0.60, "graviton_pct": 0.20,
+    "_note": "Pourcentages moyens observés, utilisés par finops_optimizer.py pour projeter une économie estimée. Ne remplacent pas un devis AWS réel."
+  }
+}

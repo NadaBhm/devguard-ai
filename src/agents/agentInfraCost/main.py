@@ -3,10 +3,11 @@
 Exposes ``POST /agents/infracost/generate``. The request body is Agent 1's
 raw analysis payload; it is genuinely validated (module 1,
 ``input_validator``), a genuine architecture decision is made (module 2,
-``decision_engine``), and genuine Terraform is rendered (module 3,
-``terraform_generator``) — those three modules are real and tested.
-Everything downstream of that (real cost, real FinOps advice, real LLM
-enrichment) does not exist yet (modules 4-10), so this endpoint fills those
+``decision_engine``), genuine Terraform is rendered (module 3,
+``terraform_generator``), and a genuine cost estimate is computed (module 4,
+``cost_estimator``) — those four modules are real and tested. Everything
+downstream of that (load-scenario simulation, real FinOps advice, real LLM
+enrichment) does not exist yet (modules 5-10), so this endpoint fills those
 parts of the response with clearly-labelled placeholder values, just to
 guarantee the response always has the exact shape of the final contract
 (``models.output_schema.InfraCostOutput``). Other teams can already
@@ -21,6 +22,7 @@ from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException
 
+from core.cost_estimator import estimate_cost
 from core.decision_engine import DecisionResult, decide_architecture
 from core.input_validator import (
     InputValidationError,
@@ -53,7 +55,6 @@ from models.output_schema import (
     LambdaAwsConfig,
     LambdaDeploymentConfig,
     LambdaInfraCostOutput,
-    Money,
     TerraformArtifacts,
 )
 
@@ -69,10 +70,9 @@ _ERROR_CODES: dict[type[InputValidationError], str] = {
 }
 
 _NOT_BUILT_YET = (
-    "Mock response: modules 4-10 (real cost, finops, llm enrichment) are "
-    "not built yet."
+    "Mock response: modules 5-10 (load scenarios, finops, llm enrichment) "
+    "are not built yet."
 )
-_MOCK_COST = Money(amount=0.0, currency="USD", range_min=0.0, range_max=0.0)
 
 
 def _mock_artifacts(analysis: RepoAnalysisInput, decision: DecisionResult) -> Artifacts:
@@ -124,7 +124,11 @@ def _mock_artifacts(analysis: RepoAnalysisInput, decision: DecisionResult) -> Ar
 def _mock_enrichment() -> Enrichment:
     return Enrichment(
         architecture_explanation=_NOT_BUILT_YET,
-        cost_summary=_NOT_BUILT_YET,
+        cost_summary=(
+            "estimated_monthly_cost is real (module 4, cost_estimator), but a "
+            "human-readable summary of it needs module 10 (llm_enrichment), "
+            "not built yet."
+        ),
         finops_justification=_NOT_BUILT_YET,
         enrichment_source="fallback",
     )
@@ -139,7 +143,7 @@ def _build_ecs_output(
         artifacts=artifacts,
         aws_config=AwsConfigEcs(
             region="us-east-1",
-            estimated_monthly_cost=_MOCK_COST,
+            estimated_monthly_cost=estimate_cost(decision),
             ecs=EcsAwsConfig(
                 cluster="devguard-cluster",
                 service_name="app-service",
@@ -171,7 +175,7 @@ def _build_lambda_output(
         artifacts=artifacts,
         aws_config=AwsConfigLambda(
             region="us-east-1",
-            estimated_monthly_cost=_MOCK_COST,
+            estimated_monthly_cost=estimate_cost(decision),
             lambda_=LambdaAwsConfig(
                 function_name="app-handler",
                 runtime="python3.12",
@@ -197,7 +201,7 @@ def _build_ec2_output(
         artifacts=artifacts,
         aws_config=AwsConfigEc2(
             region="us-east-1",
-            estimated_monthly_cost=_MOCK_COST,
+            estimated_monthly_cost=estimate_cost(decision),
             ec2=Ec2AwsConfig(
                 instance_type=str(sizing["instance_type"]),
                 ami_id="ami-0000000000000000",

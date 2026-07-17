@@ -1,0 +1,11 @@
+variable "region" {
+  description = "AWS region to deploy into"
+  type        = string
+  default     = "{{ region }}"
+}
+
+variable "environment" {
+  description = "Deployment environment"
+  type        = string
+  default     = "{{ environment }}"
+}

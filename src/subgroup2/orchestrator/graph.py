@@ -1126,7 +1126,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("DevGuard AI - Orchestrator Test Run")
-    print("Version: 1.0.4 (safe_node_wrapper signature fix + gate_2 status fix)")
+    print("Version: 1.0.5 (graph singleton + interrupt handling)")
     print("=" * 60)
 
     state = create_initial_state(test_repo)
@@ -1151,9 +1151,12 @@ if __name__ == "__main__":
         for event in graph.stream(state, config):
             for node_name, node_state in event.items():
                 if node_name == "__interrupt__":
-                    print(f"\n  ⏸️  INTERRUPT at gate: {node_state[0]['value']['gate']}")
-                    print(f"     Message: {node_state[0]['value']['message']}")
-                    print(f"     Actions: {node_state[0]['value']['actions']}")
+                    # CORRECTION: node_state est un tuple (Interrupt, ...)
+                    interrupt_obj = node_state[0]
+                    interrupt_data = interrupt_obj.value
+                    print(f"\n  ⏸️  INTERRUPT at gate: {interrupt_data.get('gate')}")
+                    print(f"     Message: {interrupt_data.get('message')}")
+                    print(f"     Actions: {interrupt_data.get('actions')}")
                     print(f"\n  To resume, call:")
                     print(f"    from langgraph.types import Command")
                     print(f"    graph.invoke(Command(resume={{'approved': True, ...}}), config)")

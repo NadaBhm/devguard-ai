@@ -1,0 +1,16 @@
+variable "region" {
+  description = "AWS region to deploy into"
+  type        = string
+  default     = "{{ region | hcl_string }}"
+}
+
+variable "environment" {
+  description = "Deployment environment name"
+  type        = string
+  default     = "{{ environment | hcl_string }}"
+}
+
+variable "deployment_package_path" {
+  description = "Path to the zipped Lambda deployment package"
+  type        = string
+}

@@ -98,7 +98,7 @@ devguard-ai/
 │   │       ├── embeddings.py
 │   │       └── tests/
 │   │
-│   ├── subgroup2/               # Oussema + Hbib
+│   ├── agents/               # Oussema + Hbib
 │   │   ├── deployops/           # Oussema owns
 │   │   │   ├── agent.py
 │   │   │   └── tests/

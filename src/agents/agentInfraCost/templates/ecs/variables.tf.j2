@@ -1,0 +1,21 @@
+variable "region" {
+  description = "AWS region to deploy into"
+  type        = string
+  default     = "{{ region | hcl_string }}"
+}
+
+variable "environment" {
+  description = "Deployment environment name"
+  type        = string
+  default     = "{{ environment | hcl_string }}"
+}
+
+variable "vpc_id" {
+  description = "VPC to deploy the ECS service into"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "Subnets to deploy the ECS service into"
+  type        = list(string)
+}

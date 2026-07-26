@@ -1,0 +1,55 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+}
+
+resource "aws_security_group" "instance" {
+  name        = "{{ key_pair_name | hcl_string }}-sg"
+  description = "Allow inbound traffic to the EC2 fleet"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = {{ health_check_port }}
+    to_port     = {{ health_check_port }}
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_instance" "app" {
+  count         = {{ instance_count }}
+  ami           = "{{ ami_id | hcl_string }}"
+  instance_type = "{{ instance_type | hcl_string }}"
+  key_name      = "{{ key_pair_name | hcl_string }}"
+  subnet_id     = var.subnet_id
+
+  vpc_security_group_ids = [aws_security_group.instance.id]
+
+{% if docker_image %}
+  user_data = <<-EOF
+              #!/bin/bash
+              yum install -y docker
+              service docker start
+              docker run -d -p {{ health_check_port }}:{{ health_check_port }} {{ docker_image | hcl_string }}
+              EOF
+{% endif %}
+
+  tags = {
+    Name = "{{ instance_type | hcl_string }}-app"
+  }
+}

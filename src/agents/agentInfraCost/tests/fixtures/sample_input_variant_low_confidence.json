@@ -1,0 +1,29 @@
+{
+  "job_id": "job-variant-003",
+  "status": "completed",
+  "error": null,
+  "repo_url": "https://github.com/owner/mystery-repo",
+  "repo_metadata": {
+    "name": "mystery-repo",
+    "branch": "main",
+    "commit_sha": "aaa111bbb222",
+    "total_files": 5,
+    "loc": 40,
+    "language_breakdown": { "unknown": 40 }
+  },
+  "stack_detection": {
+    "primary_language": "unknown",
+    "frameworks": [],
+    "database": null,
+    "build_tool": null,
+    "container": {
+      "detected": false,
+      "base_image": null,
+      "dockerfile_path": null,
+      "compose_detected": false
+    },
+    "confidence": 0.31,
+    "detected_files": ["README.md"]
+  },
+  "security_score": { "score": 50, "grade": "F", "recommendations": [] }
+}

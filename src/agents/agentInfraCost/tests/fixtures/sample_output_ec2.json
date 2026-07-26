@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "job_id": "job-example-ec2-001",
+  "compute_type": "ec2",
+  "artifacts": {
+    "terraform": {
+      "files": {
+        "main.tf": "resource \"aws_instance\" \"app\" { ami = \"ami-0abcdef1234567890\" instance_type = \"t3.small\" }",
+        "variables.tf": "variable \"region\" { default = \"us-east-1\" }",
+        "outputs.tf": "output \"instance_ips\" { value = aws_instance.app[*].public_ip }"
+      },
+      "variables": { "region": "us-east-1", "environment": "dev" }
+    },
+    "dockerfile": "FROM ubuntu:22.04\nWORKDIR /app\nCOPY . .\nRUN ./install.sh\nCMD [\"./run.sh\"]",
+    "docker_image": { "name": "legacy-monolith-app", "tag": "c9d8e7f6a5b4" },
+    "source_code": "/tmp/repo_job-example-ec2-001"
+  },
+  "aws_config": {
+    "region": "us-east-1",
+    "ecs": null,
+    "lambda": null,
+    "ec2": {
+      "instance_type": "t3.small",
+      "ami_id": "ami-0abcdef1234567890",
+      "instance_count": 2,
+      "key_pair_name": "devguard-keypair"
+    },
+    "estimated_monthly_cost": {
+      "amount": 30.35,
+      "currency": "USD",
+      "range_min": 24.28,
+      "range_max": 36.42
+    }
+  },
+  "deployment_config": {
+    "ecs": null,
+    "lambda": null,
+    "ec2": {
+      "strategy": "rolling",
+      "health_check_path": "/status",
+      "health_check_port": 80,
+      "timeout_minutes": 10
+    }
+  },
+  "approval": { "status": "rejected", "approved_by": "mohamedkarim.moalla@ensi-uma.tn" },
+  "enrichment": {
+    "architecture_explanation": "This workload requires low-level OS access and long-lived local state incompatible with ECS or Lambda's ephemeral filesystems, so a self-managed EC2 fleet was chosen instead.",
+    "cost_summary": "Two t3.small instances running continuously are estimated at $30.35/month (range: $24.28-$36.42).",
+    "finops_justification": "Reserved Instances are recommended over Spot because the deployment has no automated instance replacement logic to tolerate Spot interruptions.",
+    "enrichment_source": "gemini"
+  }
+}

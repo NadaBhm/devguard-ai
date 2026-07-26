@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "job_id": "job-variant-001",
+  "compute_type": "lambda",
+  "artifacts": {
+    "terraform": {
+      "files": {
+        "main.tf": "resource \"aws_lambda_function\" \"app\" { function_name = \"small-cli-tool\" runtime = \"python3.12\" }",
+        "variables.tf": "variable \"region\" { default = \"us-east-1\" }",
+        "outputs.tf": "output \"function_arn\" { value = aws_lambda_function.app.arn }"
+      },
+      "variables": { "region": "us-east-1", "environment": "dev" }
+    },
+    "dockerfile": null,
+    "docker_image": null,
+    "source_code": "/tmp/repo_job-variant-001"
+  },
+  "aws_config": {
+    "region": "us-east-1",
+    "ecs": null,
+    "lambda": {
+      "function_name": "small-cli-tool",
+      "runtime": "python3.12",
+      "memory_mb": 256,
+      "timeout_seconds": 30,
+      "handler": "handler.handler"
+    },
+    "ec2": null,
+    "estimated_monthly_cost": {
+      "amount": 0.85,
+      "currency": "USD",
+      "range_min": 0.68,
+      "range_max": 1.02
+    }
+  },
+  "deployment_config": {
+    "ecs": null,
+    "lambda": {
+      "strategy": "rolling",
+      "reserved_concurrency": null
+    },
+    "ec2": null
+  },
+  "approval": { "status": "pending", "approved_by": null },
+  "enrichment": {
+    "architecture_explanation": "No container was detected and the codebase is a small, single-entrypoint script, which fits AWS Lambda's event-driven model far better than a continuously running service.",
+    "cost_summary": "At an assumed light, intermittent invocation pattern this function is estimated at $0.85/month (range: $0.68-$1.02), well within typical serverless budgets.",
+    "finops_justification": "No Spot/Reserved/Graviton recommendation applies to Lambda pricing directly; Graviton (arm64) architecture is suggested to reduce per-millisecond compute cost at no operational risk.",
+    "enrichment_source": "fallback"
+  }
+}

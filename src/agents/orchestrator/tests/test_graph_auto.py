@@ -1,7 +1,6 @@
 """
 Test rapide de graph.py - Auto-approve les gates pour tester le flow complet
-Place dans: src/subgroup2/orchestrator/tests/test_graph_auto.py
-"""
+Place dans: src/agents/orchestrator/tests/test_graph.py"""
 
 import sys
 from pathlib import Path

@@ -1,7 +1,6 @@
 """
 Tests unitaires pour graph.py - Sprint 1
-Place dans: src/subgroup2/orchestrator/tests/test_graph.py
-"""
+Place dans: src/agents/orchestrator/tests/test_graph.py"""
 
 import sys
 from pathlib import Path

@@ -46,5 +46,14 @@ class RAGConfig:
 
 
 def get_rag_config() -> RAGConfig:
-    """Load RAG configuration from environment."""
-    return RAGConfig()
+    """Load RAG configuration from environment (reads env vars at call time)."""
+    return RAGConfig(
+        qdrant_url=os.getenv("QDRANT_URL", DEFAULT_QDRANT_URL),
+        qdrant_collection=os.getenv("QDRANT_COLLECTION", DEFAULT_QDRANT_COLLECTION),
+        hf_model=os.getenv("HF_MODEL", DEFAULT_HF_MODEL),
+        embedding_dim=int(os.getenv("EMBEDDING_DIM", str(DEFAULT_EMBEDDING_DIM))),
+        gemini_api_key=os.getenv("GEMINI_API_KEY"),
+        gemini_model=os.getenv("GEMINI_MODEL", DEFAULT_GEMINI_MODEL),
+        chunk_size=int(os.getenv("CHUNK_SIZE", str(DEFAULT_CHUNK_SIZE))),
+        chunk_overlap=int(os.getenv("CHUNK_OVERLAP", str(DEFAULT_CHUNK_OVERLAP))),
+    )

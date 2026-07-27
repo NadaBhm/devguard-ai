@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lib.rag.retrieval import similarity_search, retrieve_context, ask_repo
+from lib.rag.models import SearchResult
 from lib.rag.config import RAGConfig
 
 
@@ -47,7 +48,7 @@ class TestRetrieveContext:
     @patch("lib.rag.retrieval.similarity_search")
     def test_retrieve_formats_context(self, mock_search):
         mock_search.return_value = [
-            MagicMock(score=0.9, payload={"text": "FastAPI docs", "path": "README.md"})
+            SearchResult(text="FastAPI docs", path="README.md", score=0.9, type="documentation")
         ]
 
         context = retrieve_context("what framework?", job_id="test-job")

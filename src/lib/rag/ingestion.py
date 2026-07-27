@@ -16,6 +16,7 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from .config import RAGConfig, get_rag_config
 from .embeddings import EmbeddingClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,8 @@ def _read_repo_files(repo_path: Path) -> list[dict[str, Any]]:
     # Sample code files (limit 20)
     code_count = 0
     for ext in code_extensions:
+        if code_count >= 20:
+            break
         for file_path in repo_path.rglob(f"*{ext}"):
             if code_count >= 20:
                 break
@@ -132,8 +135,12 @@ def ingest_repo(
             ),
         )
         logger.info("Created Qdrant collection: %s", collection_name)
-    except Exception:
-        logger.info("Collection %s may already exist", collection_name)
+    except UnexpectedResponse as exc:
+        if "already exists" in str(exc).lower():
+            logger.info("Collection %s already exists", collection_name)
+        else:
+            logger.error("Qdrant error creating collection: %s", exc)
+            raise  # Relève si c'est un vrai problème
 
     files = _read_repo_files(repo_path)
     all_chunks: list[dict[str, Any]] = []

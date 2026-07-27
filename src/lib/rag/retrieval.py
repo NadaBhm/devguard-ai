@@ -7,22 +7,23 @@ Semantic search + Gemini response generation.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from qdrant_client import QdrantClient
 
 from .config import RAGConfig, get_rag_config
 from .embeddings import EmbeddingClient
 from .llm import GeminiClient
+from .models import SearchResult
 
 logger = logging.getLogger(__name__)
+
 
 def similarity_search(
     query: str,
     job_id: str,
     top_k: int = 5,
     config: RAGConfig | None = None,
-) -> list[Any]:
+) -> list[SearchResult]:
     """Search for relevant chunks."""
     config = config or get_rag_config()
     collection_name = f"{config.qdrant_collection}_{job_id}"
@@ -39,10 +40,19 @@ def similarity_search(
             limit=top_k,
             with_payload=True,
         )
-        return result.points
+        return [
+            SearchResult(
+                text=point.payload.get("text", "") if point.payload else "",
+                path=point.payload.get("path", "unknown") if point.payload else "unknown",
+                score=point.score,
+                type=point.payload.get("type", "unknown") if point.payload else "unknown",
+            )
+            for point in result.points
+        ]
     except Exception as exc:
         logger.error("Search failed: %s", exc)
         return []
+
 
 def retrieve_context(
     query: str,
@@ -57,13 +67,10 @@ def retrieve_context(
         return ""
 
     parts: list[str] = []
-    for point in results:
-        payload = point.payload or {}
-        text = payload.get("text", "")
-        path = payload.get("path", "unknown")
-        score = point.score
-
-        parts.append(f"[Source: {path} | Relevance: {score:.3f}]\n{text}\n")
+    for result in results:
+        parts.append(
+            f"[Source: {result.path} | Relevance: {result.score:.3f}]\n{result.text}\n"
+        )
 
     return "\n---\n".join(parts)
 

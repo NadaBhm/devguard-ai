@@ -131,6 +131,7 @@ class TestAnalyze:
     @patch("codesec.agent.detect_stack")
     @patch("codesec.agent.calculate_score")
     @patch("codesec.agent.CodeSecAgent._clone_repo")
+    @pytest.mark.asyncio 
     async def test_analyze_success(
         self, mock_clone, mock_score, mock_stack, mock_sbom, mock_docker,
         mock_deps, mock_secrets, mock_sast, tmp_path: Path
@@ -156,6 +157,7 @@ class TestAnalyze:
         assert result.security_score is not None
 
     @patch("codesec.agent.CodeSecAgent._validate_github_url")
+    @pytest.mark.asyncio 
     async def test_analyze_invalid_url(self, mock_validate, tmp_path: Path):
         mock_validate.side_effect = ValueError("Invalid URL")
 
@@ -167,6 +169,7 @@ class TestAnalyze:
         assert result.error is not None
 
     @patch("codesec.agent.CodeSecAgent._clone_repo")
+    @pytest.mark.asyncio 
     async def test_analyze_clone_failure(self, mock_clone, tmp_path: Path):
         mock_clone.side_effect = RuntimeError("Clone failed")
 

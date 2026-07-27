@@ -33,6 +33,7 @@ class TestEndToEndAnalysis:
     @patch("codesec.agent.generate_sbom")
     @patch("codesec.agent.detect_stack")
     @patch("codesec.agent.calculate_score")
+    @pytest.mark.asyncio 
     async def test_full_analysis_pipeline(
         self, mock_score, mock_stack, mock_sbom, mock_docker,
         mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
@@ -89,6 +90,7 @@ class TestEndToEndAnalysis:
     @patch("codesec.agent.generate_sbom")
     @patch("codesec.agent.detect_stack")
     @patch("codesec.agent.calculate_score")
+    @pytest.mark.asyncio 
     async def test_perfect_repo_analysis(
         self, mock_score, mock_stack, mock_sbom, mock_docker,
         mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
@@ -120,6 +122,7 @@ class TestEndToEndAnalysis:
     @patch("codesec.agent.generate_sbom")
     @patch("codesec.agent.detect_stack")
     @patch("codesec.agent.calculate_score")
+    @pytest.mark.asyncio 
     async def test_high_risk_repo(
         self, mock_score, mock_stack, mock_sbom, mock_docker,
         mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
@@ -171,7 +174,7 @@ class TestResultSerialization:
             security_score=SecurityScore(score=85, grade=Grade.B),
         )
 
-        json_str = result.json()
+        json_str = result.model_dump_json()
         assert isinstance(json_str, str)
 
         parsed = json.loads(json_str)
@@ -189,7 +192,7 @@ class TestResultSerialization:
             security_score=SecurityScore(score=85, grade=Grade.B),
         )
 
-        result_dict = result.dict()
+        result_dict = result.model_dump()
         assert isinstance(result_dict, dict)
         assert result_dict["job_id"] == "test-job"
 

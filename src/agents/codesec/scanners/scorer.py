@@ -140,7 +140,7 @@ def _generate_recommendations(
     if critical_sast:
         by_rule: dict[str, list[SASTFinding]] = {}
         for f in critical_sast:
-            by_rule.setdefault(f.rule_id, []).append(f)
+            by_rule.setdefault(f.rule_id or "unknown", []).append(f)
         for rule_id, findings in by_rule.items():
             locations = ", ".join(f"{f.file}:{f.line}" for f in findings[:3])
             if len(findings) > 3:
@@ -149,7 +149,7 @@ def _generate_recommendations(
     if high_sast:
         by_rule = {}
         for f in high_sast:
-            by_rule.setdefault(f.rule_id, []).append(f)
+            by_rule.setdefault(f.rule_id or "unknown", []).append(f)
         for rule_id, findings in by_rule.items():
             locations = ", ".join(f"{f.file}:{f.line}" for f in findings[:3])
             if len(findings) > 3:
@@ -246,6 +246,15 @@ def calculate_score(
     )
     if has_no_findings and has_complete_stack:
         total_score = 100
+        # Sync breakdown to max weighted values so they sum to 100
+        breakdown = ScoreBreakdown(
+            sast=SCORING_WEIGHTS["sast"],
+            secrets=SCORING_WEIGHTS["secrets"],
+            dependencies=SCORING_WEIGHTS["dependencies"],
+            dockerfile=SCORING_WEIGHTS["dockerfile"],
+            sbom=SCORING_WEIGHTS["sbom"],
+            stack_detection=SCORING_WEIGHTS["stack_detection"],
+        )
 
     # Determine grade
     grade = Grade.F

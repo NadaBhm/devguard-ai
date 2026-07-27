@@ -7,6 +7,8 @@ Queries Gemini with RAG-retrieved context.
 from __future__ import annotations
 
 import logging
+from typing import Any
+
 from .config import RAGConfig, get_rag_config
 from .gemini_client import GeminiClientFactory
 
@@ -18,14 +20,14 @@ class GeminiClient:
 
     def __init__(self, config: RAGConfig | None = None) -> None:
         self.config = config or get_rag_config()
-        # ✅ No more genai.configure() here — factory handles it centrally
-        self.model = GeminiClientFactory.create(self.config)
+        # Factory handles global configure() centrally
+        self.model: Any = GeminiClientFactory.create(self.config)
 
     def query(self, prompt: str) -> str:
         """Send prompt to Gemini and return response."""
         try:
-            response = self.model.generate_content(prompt)  # type: ignore[reportAttributeAccessIssue]
-            return response.text or ""  # type: ignore[reportAttributeAccessIssue]
+            response = self.model.generate_content(prompt)
+            return response.text or ""
         except Exception as exc:
             logger.error("Gemini query failed: %s", exc)
             return f"Error: {exc}"

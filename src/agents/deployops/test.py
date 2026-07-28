@@ -7,10 +7,11 @@
 
 
 # tests/test_deployops.py
+import asyncio
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 import httpx
@@ -101,8 +102,9 @@ def test_sanitize_and_validate_invalid_region(agent, sample_payload):
 
 # ---------- Artifact Writing Tests ----------
 
-def test_write_artifacts(agent, sample_payload, workspace):
-    agent._write_artifacts(sample_payload["artifacts"], workspace)
+@pytest.mark.asyncio
+async def test_write_artifacts(agent, sample_payload, workspace):
+    await agent._write_artifacts(sample_payload["artifacts"], workspace)
 
     # Check files exist
     tf_dir = workspace / "terraform"
@@ -122,43 +124,48 @@ def test_write_artifacts(agent, sample_payload, workspace):
 
 # ---------- Health Check Tests ----------
 
-@patch("httpx.get")
-def test_health_check_success(mock_get, agent):
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient.get", new_callable=AsyncMock)
+async def test_health_check_success(mock_get, agent):
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_get.return_value = mock_response
 
-    result = agent.health_check("http://localhost:8080", max_retries=2, timeout=1)
+    result = await agent.health_check("http://localhost:8080", max_retries=2, timeout=1)
     assert result is True
-    mock_get.assert_called_with("http://localhost:8080/health", timeout=1)
+    mock_get.assert_called_with("http://localhost:8080/health")
 
 
-@patch("httpx.get")
-def test_health_check_fails_http_error(mock_get, agent):
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient.get", new_callable=AsyncMock)
+async def test_health_check_fails_http_error(mock_get, agent):
     mock_response = MagicMock()
     mock_response.status_code = 500
     mock_get.return_value = mock_response
 
-    result = agent.health_check("http://localhost:8080", max_retries=1)
+    result = await agent.health_check("http://localhost:8080", max_retries=1)
     assert result is False
 
 
-@patch("httpx.get")
-def test_health_check_timeout(mock_get, agent):
+@pytest.mark.asyncio
+@patch("httpx.AsyncClient.get", new_callable=AsyncMock)
+async def test_health_check_timeout(mock_get, agent):
     mock_get.side_effect = httpx.TimeoutException("timeout")
-    result = agent.health_check("http://localhost:8080", max_retries=1)
+    result = await agent.health_check("http://localhost:8080", max_retries=1)
     assert result is False
 
 
-def test_health_check_missing_url(agent):
-    result = agent.health_check(None)
+@pytest.mark.asyncio
+async def test_health_check_missing_url(agent):
+    result = await agent.health_check(None)
     assert result is False
 
 
 # ---------- Rollback Tests (using moto) ----------
 
+@pytest.mark.asyncio
 @patch("src.agents.deployops.agent.AWSClient")
-def test_rollback_success(mock_aws_client, agent, sample_payload):
+async def test_rollback_success(mock_aws_client, agent, sample_payload):
     """Test rollback uses previous task definition."""
     
     # Mock ECS response with 2 deployments
@@ -191,7 +198,7 @@ def test_rollback_success(mock_aws_client, agent, sample_payload):
     mock_aws_client.return_value = aws_instance
     
     # Call rollback
-    result = agent.rollback("test_job_123", sample_payload)
+    result = await agent.rollback("test_job_123", sample_payload)
     
     assert result["status"] == "success"
     assert "Rolled back" in result["message"]
@@ -202,45 +209,56 @@ def test_rollback_success(mock_aws_client, agent, sample_payload):
         forceNewDeployment=True
     )
 
-@mock_aws
-def test_rollback_no_previous(agent, sample_payload):
+@patch("src.agents.deployops.agent.AWSClient")
+@pytest.mark.asyncio
+async def test_rollback_no_previous(mock_aws_client, agent, sample_payload):
     """Rollback fails if only one deployment exists."""
-    ecs = boto3.client("ecs", region_name="us-east-1")
-    cluster = sample_payload["aws_config"]["ecs_cluster"]
-    service = sample_payload["aws_config"]["service_name"]
-
-    ecs.create_cluster(clusterName=cluster)
-    td = ecs.register_task_definition(
-        family="app-task",
-        containerDefinitions=[{"name": "app", "image": "app:v1", "cpu": 256, "memory": 512}],
-    )["taskDefinition"]["taskDefinitionArn"]
-
-    ecs.create_service(
-        cluster=cluster,
-        serviceName=service,
-        taskDefinition=td,
-        desiredCount=1,
-    )
-
-    result = agent.rollback("test_job_123", sample_payload)
+    # Mock ECS response with only 1 deployment
+    mock_ecs = MagicMock()
+    mock_ecs.describe_services.return_value = {
+        "services": [{
+            "deployments": [
+                {
+                    "taskDefinition": "arn:aws:ecs:us-east-1:123:task-definition/app-task:3",
+                    "status": "PRIMARY"
+                }
+            ]
+        }]
+    }
+    
+    aws_instance = MagicMock()
+    aws_instance.ecs.return_value = mock_ecs
+    mock_aws_client.return_value = aws_instance
+    
+    result = await agent.rollback("test_job_123", sample_payload)
     assert result["status"] == "failed"
     assert "No previous deployment" in result["error"]
 
 
-@mock_aws
-def test_rollback_service_not_found(agent, sample_payload):
+@patch("src.agents.deployops.agent.AWSClient")
+@pytest.mark.asyncio
+async def test_rollback_service_not_found(mock_aws_client, agent, sample_payload):
     """Rollback fails if service doesn't exist."""
-    result = agent.rollback("test_job_123", sample_payload)
+    mock_ecs = MagicMock()
+    mock_ecs.describe_services.side_effect = Exception("Service not found")
+    
+    aws_instance = MagicMock()
+    aws_instance.ecs.return_value = mock_ecs
+    mock_aws_client.return_value = aws_instance
+    
+    result = await agent.rollback("test_job_123", sample_payload)
     assert result["status"] == "failed"
     assert "error" in result
 
 
 # ---------- Mocked Deploy Test (full flow with mocks) ----------
 
-@patch("subprocess.run")
+@pytest.mark.asyncio
+@patch("asyncio.create_subprocess_shell")
+@patch("asyncio.create_subprocess_exec")
 @patch("src.agents.deployops.agent.AWSClient")
 @patch("src.agents.deployops.agent.TerraformRunner")
-def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_subprocess_run, agent, sample_payload):
+async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
     """Test full deploy with all steps mocked to success."""
     # Mock TerraformRunner methods
     tf_instance = MagicMock()
@@ -255,32 +273,31 @@ def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_subprocess_ru
     aws_instance.get_account_id.return_value = "123456789012"
     mock_aws_client.return_value = aws_instance
 
-    def subprocess_side_effect(cmd, **kwargs):
-        mock = MagicMock()
-        mock.returncode = 0
-        mock.stdout = ""
-        mock.stderr = ""
-        return mock
-
-    mock_subprocess_run.side_effect = subprocess_side_effect
+    # Mock subprocess calls
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    mock_create_subprocess_shell.return_value = mock_proc
+    mock_create_subprocess_exec.return_value = mock_proc
 
     # CREATE THE DIRECTORY FIRST
     workspace_dir = Path("/tmp/deployops/test_job_123")
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    with patch.object(agent, "health_check", return_value=True):
-        agent.payload = sample_payload
-        result = agent.deploy()
+    with patch.object(agent, "health_check", new_callable=AsyncMock, return_value=True):
+        result = await agent.deploy(sample_payload)
 
     assert result["status"] == "success"
     assert result["job_id"] == "test_job_123"
     assert result["deployed_url"] == "http://test.com"
 
 
-@patch("subprocess.run")
+@pytest.mark.asyncio
+@patch("asyncio.create_subprocess_shell")
+@patch("asyncio.create_subprocess_exec")
 @patch("src.agents.deployops.agent.AWSClient")
 @patch("src.agents.deployops.agent.TerraformRunner")
-def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws_client, mock_subprocess_run, agent, sample_payload):
+async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
     """Test deploy when health check fails -> rollback called."""
     # Setup similar mocks
     tf_instance = MagicMock()
@@ -294,30 +311,31 @@ def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws_clien
     aws_instance.get_account_id.return_value = "123456789012"
     mock_aws_client.return_value = aws_instance
 
-    def subprocess_side_effect(cmd, **kwargs):
-        mock = MagicMock()
-        mock.returncode = 0
-        return mock
-    mock_subprocess_run.side_effect = subprocess_side_effect
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    mock_create_subprocess_shell.return_value = mock_proc
+    mock_create_subprocess_exec.return_value = mock_proc
 
-    # Health check returns False
-    with patch.object(agent, "health_check", return_value=False):
-        # Mock rollback to avoid actual AWS calls (though rollback has its own mocks)
-        with patch.object(agent, "rollback", return_value={"status": "success"}) as mock_rollback:
-            agent.payload = sample_payload
-            result = agent.deploy()
+    workspace_dir = Path("/tmp/deployops/test_job_123")
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch.object(agent, "health_check", new_callable=AsyncMock, return_value=False):
+        with patch.object(agent, "rollback", new_callable=AsyncMock, return_value={"status": "success", "message": "rolled back"}) as mock_rollback:
+            result = await agent.deploy(sample_payload)
 
     assert result["status"] == "failed"
-    assert "health check failed" in result["error"]
+    assert result["error"] == "health check failed"
     mock_rollback.assert_called_once()
+
 
 # ---------- Additional Edge Cases ----------
 
-def test_deploy_not_approved(agent, sample_payload):
+@pytest.mark.asyncio
+async def test_deploy_not_approved(agent, sample_payload):
     """Deploy returns early if not approved."""
     payload = sample_payload.copy()
     payload["approval"]["deploy_approved"] = False
-    agent.payload = payload
-    result = agent.deploy()
+    result = await agent.deploy(payload)
     assert result["status"] == "failed"
     assert "not approved" in result["error"]

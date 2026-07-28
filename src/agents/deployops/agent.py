@@ -6,6 +6,7 @@ must : terraform file,
 
 
 """
+import asyncio
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -28,9 +29,9 @@ class DeployOpsAgent:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
 
-    def deploy(self):
-        """use tf runner funcs"""
-        clean_payload = self.sanitize_and_validate(self.payload)
+    async def deploy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy infrastructure using Terraform and ECS"""
+        clean_payload = self.sanitize_and_validate(payload)
         if not clean_payload["approval"]["deploy_approved"]:
             self.logger.warning("Deployment not approved by user")
             return {"status": "failed", "error": "deployment not approved"}
@@ -41,10 +42,10 @@ class DeployOpsAgent:
         workspace_dir = Path(f"/tmp/deployops/{job_id}")
         workspace_dir.mkdir(parents=True, exist_ok=True)
         
-        self._write_artifacts(clean_payload["artifacts"], workspace_dir)
+        await self._write_artifacts(clean_payload["artifacts"], workspace_dir)
         
         tf_runner = TerraformRunner(workspace_dir)
-        if not tf_runner.init() :
+        if not tf_runner.init():
             self.logger.error("Terraform init failed")
             return {"status": "failed", "error": "terraform init failed"}
         
@@ -52,45 +53,38 @@ class DeployOpsAgent:
         if not plan:
             self.logger.error("Terraform plan failed")
             return {"status": "failed", "error": "terraform plan failed"}
-        docker_image_uri = self._build_and_push_image(clean_payload["artifacts"], clean_payload["aws_config"])
+        
+        docker_image_uri = await self._build_and_push_image(clean_payload["artifacts"], clean_payload["aws_config"])
         
         if not docker_image_uri:
             self.logger.error("Docker image build/push failed")
             return {"status": "failed", "error": "docker image build/push failed"}
+        
         if not tf_runner.apply():
             self.logger.error("Terraform apply failed")
             return {"status": "failed", "error": "terraform apply failed"}
+        
         output = tf_runner.output()
         self.logger.info(f"Deployment successful for job {job_id}")
         deployed_url = output.get("service_url", {}).get("value")
         
-        if not self.health_check(deployed_url):
-            self.rollback(clean_payload["job_id"], clean_payload)
+        if not await self.health_check(deployed_url):
+            await self.rollback(clean_payload["job_id"], clean_payload)
             self.logger.error("Health check failed after deployment")
             return {"status": "failed", "error": "health check failed"}
         
         return {
-        "status": "success",
-        "job_id": job_id,
-        "deployed_url": deployed_url,
-        "resources": output
-    }
+            "status": "success",
+            "job_id": job_id,
+            "deployed_url": deployed_url,
+            "resources": output
+        }
 
-        
-    
-    
-        
-        
-        
-        
-        
-        
-    
-        
-    def status(self):
-        """used to check current agent status for enhanced user experience"""
-        
-    def rollback(self, job_id: str, payload: dict) -> dict:
+    async def status(self) -> Dict[str, Any]:
+        """Check current agent status for enhanced user experience"""
+        return {"status": "ready", "agent": "deployops"}
+
+    async def rollback(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Rollback ECS service to previous task definition"""
         
         aws = AWSClient()
@@ -138,7 +132,7 @@ class DeployOpsAgent:
 
 
         
-    def health_check(self, url: str, max_retries: int = 3, timeout: int = 20) -> bool:
+    async def health_check(self, url: str, max_retries: int = 3, timeout: int = 20) -> bool:
         """
         Check if deployed service is healthy.
         Returns True if /health returns 200 OK within max_retries.
@@ -156,29 +150,30 @@ class DeployOpsAgent:
         
         self.logger.info(f"Starting health check for {health_url}")
         
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = httpx.get(health_url, timeout=timeout)
-                if response.status_code == 200:
-                    self.logger.info(f"Health check passed on attempt {attempt}")
-                    return True
-                else:
-                    self.logger.warning(f"Health check attempt {attempt}: status {response.status_code}")
-            except httpx.TimeoutException:
-                self.logger.warning(f"Health check attempt {attempt}: timeout")
-            except httpx.ConnectError:
-                self.logger.warning(f"Health check attempt {attempt}: connection refused")
-            except Exception as e:
-                self.logger.warning(f"Health check attempt {attempt}: {e}")
-            
-            # Wait before retry
-            time.sleep(3)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = await client.get(health_url)
+                    if response.status_code == 200:
+                        self.logger.info(f"Health check passed on attempt {attempt}")
+                        return True
+                    else:
+                        self.logger.warning(f"Health check attempt {attempt}: status {response.status_code}")
+                except httpx.TimeoutException:
+                    self.logger.warning(f"Health check attempt {attempt}: timeout")
+                except httpx.ConnectError:
+                    self.logger.warning(f"Health check attempt {attempt}: connection refused")
+                except Exception as e:
+                    self.logger.warning(f"Health check attempt {attempt}: {e}")
+                
+                # Wait before retry
+                await asyncio.sleep(3)
         
         self.logger.error(f"Health check failed after {max_retries} attempts")
         return False
         
             
-    def _write_artifacts(self, artifacts: dict, workspace: Path) -> None:
+    async def _write_artifacts(self, artifacts: Dict[str, Any], workspace: Path) -> None:
         """Write terraform files and dockerfile to workspace"""
         
         # Write terraform files
@@ -202,7 +197,7 @@ class DeployOpsAgent:
             self.logger.info(f"Wrote variables to {vars_path}")
 
 
-    def _build_and_push_image(self, artifacts: dict, aws_config: dict) -> Optional[str]:
+    async def _build_and_push_image(self, artifacts: Dict[str, Any], aws_config: Dict[str, Any]) -> Optional[str]:
         """Build Docker image and push to ECR"""
         
         job_id = artifacts.get("job_id", "unknown")
@@ -222,23 +217,38 @@ class DeployOpsAgent:
         
         # Login to ECR
         login_cmd = f"aws ecr get-login-password --region {region} | docker login --username AWS --password-stdin {account_id}.dkr.ecr.{region}.amazonaws.com"
-        result = subprocess.run(login_cmd, shell=True, capture_output=True, text=True)
+        result = await asyncio.create_subprocess_shell(
+            login_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"ECR login failed: {result.stderr}")
+            self.logger.error(f"ECR login failed: {stderr.decode()}")
             return None
         
         # Build Docker image
         build_cmd = ["docker", "build", "-t", image_uri, str(workspace)]
-        result = subprocess.run(build_cmd, capture_output=True, text=True)
+        result = await asyncio.create_subprocess_exec(
+            *build_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Docker build failed: {result.stderr}")
+            self.logger.error(f"Docker build failed: {stderr.decode()}")
             return None
         
         # Push to ECR
         push_cmd = ["docker", "push", image_uri]
-        result = subprocess.run(push_cmd, capture_output=True, text=True)
+        result = await asyncio.create_subprocess_exec(
+            *push_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Docker push failed: {result.stderr}")
+            self.logger.error(f"Docker push failed: {stderr.decode()}")
             return None
         
         self.logger.info(f"Image pushed: {image_uri}")

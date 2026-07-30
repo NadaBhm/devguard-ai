@@ -72,7 +72,23 @@ class TerraformRunner:
         if result.returncode != 0:
             logger.error(f"plan failed: {result.stderr}")
             return None
-        return json.loads(result.stdout)
+        #  finding the change_summary object which indicates success
+        try:
+            lines = result.stdout.strip().split('\n')
+            for line in reversed(lines):
+                line = line.strip()
+                if line and line.startswith('{'):
+                    parsed = json.loads(line)
+                    # Return the change_summary object which indicates plan success
+                    if parsed.get("type") == "change_summary":
+                        return parsed
+                    # Also accept planned_change or outputs as success indicators
+                    if parsed.get("type") in ("planned_change", "outputs"):
+                        return parsed
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse terraform plan JSON: {e}")
+            return None
+        return None
     
     def apply(self, auto_approve: bool = True) -> bool:
         cmd = ["apply"]

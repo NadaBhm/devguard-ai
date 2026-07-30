@@ -44,7 +44,8 @@ class DeployOpsAgent:
         
         await self._write_artifacts(clean_payload["artifacts"], workspace_dir)
         
-        tf_runner = TerraformRunner(workspace_dir)
+        tf_dir = workspace_dir / "terraform"
+        tf_runner = TerraformRunner(tf_dir)
         if not tf_runner.init():
             self.logger.error("Terraform init failed")
             return {"status": "failed", "error": "terraform init failed"}
@@ -54,7 +55,7 @@ class DeployOpsAgent:
             self.logger.error("Terraform plan failed")
             return {"status": "failed", "error": "terraform plan failed"}
         
-        docker_image_uri = await self._build_and_push_image(clean_payload["artifacts"], clean_payload["aws_config"])
+        docker_image_uri = await self._build_and_push_image(clean_payload["artifacts"], clean_payload["aws_config"], job_id)
         
         if not docker_image_uri:
             self.logger.error("Docker image build/push failed")
@@ -66,9 +67,13 @@ class DeployOpsAgent:
         
         output = tf_runner.output()
         self.logger.info(f"Deployment successful for job {job_id}")
-        deployed_url = output.get("service_url", {}).get("value")
+        # Use frontend_url from terraform output for health check
+        deployed_url = output.get("frontend_url", {}).get("value")
         
-        if not await self.health_check(deployed_url):
+        # Get health check path from deployment config
+        health_check_path = clean_payload.get("deployment_config", {}).get("health_check_path", "/health")
+        
+        if not await self.health_check(deployed_url, health_check_path=health_check_path):
             await self.rollback(clean_payload["job_id"], clean_payload)
             self.logger.error("Health check failed after deployment")
             return {"status": "failed", "error": "health check failed"}
@@ -132,10 +137,10 @@ class DeployOpsAgent:
 
 
         
-    async def health_check(self, url: str, max_retries: int = 3, timeout: int = 20) -> bool:
+    async def health_check(self, url: str, max_retries: int = 3, timeout: int = 20, health_check_path: str = "/health") -> bool:
         """
         Check if deployed service is healthy.
-        Returns True if /health returns 200 OK within max_retries.
+        Returns True if health_check_path returns 200 OK within max_retries.
         """
         if not url:
             self.logger.error("No URL provided for health check")
@@ -146,7 +151,7 @@ class DeployOpsAgent:
         
         # Remove trailing slash if present
         url = url.rstrip("/")
-        health_url = f"{url}/health"
+        health_url = f"{url}{health_check_path}"
         
         self.logger.info(f"Starting health check for {health_url}")
         
@@ -190,6 +195,21 @@ class DeployOpsAgent:
         dockerfile_path.write_text(artifacts["dockerfile"])
         self.logger.info(f"Wrote Dockerfile to {dockerfile_path}")
         
+        # Copy frontend source code to workspace for Docker build context
+        frontend_src = Path("testing/three-tier-app/frontend")
+        if frontend_src.exists():
+            import shutil
+            frontend_dest = workspace / "frontend"
+            if frontend_dest.exists():
+                shutil.rmtree(frontend_dest)
+            shutil.copytree(frontend_src, frontend_dest)
+            self.logger.info(f"Copied frontend source to {frontend_dest}")
+            
+            # Also copy Dockerfile to frontend directory for build context
+            frontend_dockerfile = frontend_dest / "Dockerfile"
+            frontend_dockerfile.write_text(artifacts["dockerfile"])
+            self.logger.info(f"Copied Dockerfile to {frontend_dockerfile}")
+        
         # Write terraform variables if provided
         if artifacts["terraform"].get("variables"):
             vars_path = tf_dir / "terraform.tfvars.json"
@@ -197,10 +217,9 @@ class DeployOpsAgent:
             self.logger.info(f"Wrote variables to {vars_path}")
 
 
-    async def _build_and_push_image(self, artifacts: Dict[str, Any], aws_config: Dict[str, Any]) -> Optional[str]:
+    async def _build_and_push_image(self, artifacts: Dict[str, Any], aws_config: Dict[str, Any], job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
         
-        job_id = artifacts.get("job_id", "unknown")
         workspace = Path(f"/tmp/deployops/{job_id}")
         
         image_name = artifacts["docker_image"]["name"]
@@ -227,8 +246,10 @@ class DeployOpsAgent:
             self.logger.error(f"ECR login failed: {stderr.decode()}")
             return None
         
-        # Build Docker image
-        build_cmd = ["docker", "build", "-t", image_uri, str(workspace)]
+        # Build Docker image with platform for Fargate compatibility
+        # Use frontend directory as build context
+        build_context = workspace / "frontend"
+        build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", image_uri, str(build_context)]
         result = await asyncio.create_subprocess_exec(
             *build_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -252,7 +273,54 @@ class DeployOpsAgent:
             return None
         
         self.logger.info(f"Image pushed: {image_uri}")
+        
+        # Also build and push backend image if specified in terraform variables
+        backend_image = artifacts["terraform"]["variables"].get("backend_image")
+        if backend_image:
+            await self._build_and_push_backend_image(backend_image, region, account_id, job_id)
+        
         return image_uri
+    
+    async def _build_and_push_backend_image(self, backend_image_uri: str, region: str, account_id: str, job_id: str) -> bool:
+        """Build and push backend Docker image to ECR"""
+        
+        # Extract repo name from URI
+        # Format: account.dkr.ecr.region.amazonaws.com/repo:tag
+        repo_name = backend_image_uri.split('/')[-1].split(':')[0]
+        ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{repo_name}"
+        
+        # Check if backend Dockerfile exists in testing/three-tier-app/backend
+        backend_dockerfile = Path("testing/three-tier-app/backend/Dockerfile")
+        if not backend_dockerfile.exists():
+            self.logger.warning(f"Backend Dockerfile not found at {backend_dockerfile}")
+            return False
+        
+        # Build backend image with platform
+        build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", backend_image_uri, str(backend_dockerfile.parent)]
+        result = await asyncio.create_subprocess_exec(
+            *build_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
+        if result.returncode != 0:
+            self.logger.error(f"Backend Docker build failed: {stderr.decode()}")
+            return False
+        
+        # Push backend image
+        push_cmd = ["docker", "push", backend_image_uri]
+        result = await asyncio.create_subprocess_exec(
+            *push_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await result.communicate()
+        if result.returncode != 0:
+            self.logger.error(f"Backend Docker push failed: {stderr.decode()}")
+            return False
+        
+        self.logger.info(f"Backend image pushed: {backend_image_uri}")
+        return True
 
 
     def sanitize_and_validate(self, payload: Dict[str, Any]) -> Dict[str, Any]:         

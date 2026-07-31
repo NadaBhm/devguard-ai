@@ -31,15 +31,15 @@ class TestEmbeddingClient:
         assert client1.model is client2.model
 
     @patch("lib.rag.embeddings.SentenceTransformer")
-    def test_bge_prefix_added(self, mock_st_class):
-        """BGE models need instruction prefix."""
+    def test_bge_query_prefix_added(self, mock_st_class):
+        """BGE queries need instruction prefix."""
         mock_model = MagicMock()
         mock_model.encode.return_value = np.array([[0.1] * 768])
         mock_st_class.return_value = mock_model
 
         config = RAGConfig(hf_model="BAAI/bge-base-en-v1.5")
         client = EmbeddingClient(config)
-        client.embed(["hello world"])
+        client.embed(["hello world"], is_query=True)
 
         call_args = mock_model.encode.call_args
         texts = call_args[0][0]
@@ -47,6 +47,23 @@ class TestEmbeddingClient:
             t.startswith("Represent this sentence for searching relevant passages: ")
             for t in texts
         )
+
+    @patch("lib.rag.embeddings.SentenceTransformer")
+    def test_bge_document_no_prefix(self, mock_st_class):
+        """BGE documents should NOT get prefix — only queries do."""
+        mock_model = MagicMock()
+        mock_model.encode.return_value = np.array([[0.1] * 768])
+        mock_st_class.return_value = mock_model
+
+        config = RAGConfig(hf_model="BAAI/bge-base-en-v1.5")
+        client = EmbeddingClient(config)
+        client.embed(["hello world"], is_query=False)
+
+        call_args = mock_model.encode.call_args
+        texts = call_args[0][0]
+        assert not any(t.startswith("Represent") for t in texts)
+        # Raw text preserved
+        assert texts[0] == "hello world"
 
     @patch("lib.rag.embeddings.SentenceTransformer")
     def test_non_bge_no_prefix(self, mock_st_class):
@@ -57,7 +74,7 @@ class TestEmbeddingClient:
 
         config = RAGConfig(hf_model="sentence-transformers/all-MiniLM-L6-v2")
         client = EmbeddingClient(config)
-        client.embed(["hello world"])
+        client.embed(["hello world"], is_query=True)
 
         call_args = mock_model.encode.call_args
         texts = call_args[0][0]
@@ -84,7 +101,6 @@ class TestEmbeddingClient:
 
         assert isinstance(result, list)
         assert len(result) == 768
-        # Value is normalized by encode(); just check it's a valid float
         assert isinstance(result[0], float)
 
     @patch("lib.rag.embeddings.SentenceTransformer")

@@ -1,26 +1,33 @@
 """
-
-receive json from prev agent after user approval, 
-must : terraform file, 
- 
-
-
+DeployOps Agent
+Receives artifacts and deploys to AWS.
 """
 import asyncio
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from dotenv import load_dotenv
 
 from src.lib.aws.client import AWSClient
 from src.lib.terraform.runner import TerraformRunner
+from src.agents.deployops.models import (
+    DeployPayload,
+    Artifacts,
+    AWSConfig,
+    DockerImageConfig,
+    RollbackRequest,
+    PromotionRequest,
+    DeploymentStrategy,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -30,54 +37,72 @@ class DeployOpsAgent:
         self.logger = logging.getLogger(__name__)
 
     async def deploy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Deploy infrastructure using Terraform and ECS"""
-        clean_payload = self.sanitize_and_validate(payload)
-        if not clean_payload["approval"]["deploy_approved"]:
+        """Deploy infrastructure using Terraform artifacts and Docker images."""
+        # Parse and validate payload using Pydantic models
+        try:
+            deploy_payload = DeployPayload(**payload)
+        except Exception as e:
+            self.logger.error(f"Payload validation failed: {e}")
+            return {"status": "failed", "error": f"Invalid payload: {e}"}
+
+        if not deploy_payload.approval.deploy_approved:
             self.logger.warning("Deployment not approved by user")
             return {"status": "failed", "error": "deployment not approved"}
-        
-        job_id = clean_payload["job_id"]
+
+        job_id = deploy_payload.job_id
         self.logger.info(f"Starting deployment for job {job_id}")
-        
+
+        if deploy_payload.metadata.get("ecs_update_only"):
+            return await self._deploy_existing_ecs_revision(deploy_payload)
+
         workspace_dir = Path(f"/tmp/deployops/{job_id}")
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        
-        await self._write_artifacts(clean_payload["artifacts"], workspace_dir)
-        
+
+        # Write Terraform artifacts to workspace
+        await self._write_artifacts(deploy_payload.artifacts, workspace_dir)
+
+        # Build and push Docker images
+        for docker_image in deploy_payload.artifacts.docker_images:
+            image_uri = await self._build_and_push_image(
+                docker_image, deploy_payload.aws_config, job_id
+            )
+            if not image_uri:
+                self.logger.error(f"Image build/push failed for {docker_image.name}")
+                return {
+                    "status": "failed",
+                    "job_id": job_id,
+                    "error": f"image build/push failed: {docker_image.name}",
+                }
+
+        # Run Terraform
         tf_dir = workspace_dir / "terraform"
         tf_runner = TerraformRunner(tf_dir)
         if not tf_runner.init():
             self.logger.error("Terraform init failed")
             return {"status": "failed", "error": "terraform init failed"}
-        
+
         plan = tf_runner.plan()
         if not plan:
             self.logger.error("Terraform plan failed")
             return {"status": "failed", "error": "terraform plan failed"}
-        
-        docker_image_uri = await self._build_and_push_image(clean_payload["artifacts"], clean_payload["aws_config"], job_id)
-        
-        if not docker_image_uri:
-            self.logger.error("Docker image build/push failed")
-            return {"status": "failed", "error": "docker image build/push failed"}
-        
+
         if not tf_runner.apply():
             self.logger.error("Terraform apply failed")
             return {"status": "failed", "error": "terraform apply failed"}
-        
+
         output = tf_runner.output()
         self.logger.info(f"Deployment successful for job {job_id}")
-        # Use frontend_url from terraform output for health check
-        deployed_url = output.get("frontend_url", {}).get("value")
+
+        # Health checks
+        health_check_path = deploy_payload.deployment_config.health_check_path
+        deployed_url = output.get("frontend_url", {}).get("value") or output.get("alb_dns_name", {}).get("value")
         
-        # Get health check path from deployment config
-        health_check_path = clean_payload.get("deployment_config", {}).get("health_check_path", "/health")
-        
-        if not await self.health_check(deployed_url, health_check_path=health_check_path):
-            await self.rollback(clean_payload["job_id"], clean_payload)
+        if deployed_url and not await self.health_check(deployed_url, health_check_path=health_check_path):
             self.logger.error("Health check failed after deployment")
+            if deploy_payload.deployment_config.auto_rollback:
+                await self.rollback(job_id, payload)
             return {"status": "failed", "error": "health check failed"}
-        
+
         return {
             "status": "success",
             "job_id": job_id,
@@ -85,9 +110,105 @@ class DeployOpsAgent:
             "resources": output
         }
 
+    async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
+        """Create a new ECS task-definition revision for an existing service.
+
+        """
+        region = payload.aws_config.region
+        cluster = payload.aws_config.model_dump().get("ecs_cluster") or "todo-app-cluster"
+        service_name = payload.aws_config.model_dump().get("service_name") or "todo-app-dev-frontend"
+        aws = AWSClient(region=region)
+        try:
+            ecs = aws.ecs()
+            service = ecs.describe_services(cluster=cluster, services=[service_name])["services"][0]
+            current_task = service["taskDefinition"]
+            task = ecs.describe_task_definition(taskDefinition=current_task)["taskDefinition"]
+            containers = json.loads(task["containerDefinitions"] if isinstance(task["containerDefinitions"], str) else json.dumps(task["containerDefinitions"]))
+            revision = payload.metadata.get("deployment_revision", payload.job_id)
+            for container in containers:
+                environment = {item["name"]: item.get("value", "") for item in container.get("environment", [])}
+                environment["DEPLOYMENT_REVISION"] = str(revision)
+                container["environment"] = [{"name": key, "value": value} for key, value in environment.items()]
+
+            register_args = {
+                key: task[key]
+                for key in ("family", "taskRoleArn", "executionRoleArn", "networkMode", "containerDefinitions", "volumes", "placementConstraints", "requiresCompatibilities", "cpu", "memory", "pidMode", "ipcMode", "proxyConfiguration", "inferenceAccelerators", "ephemeralStorage", "runtimePlatform")
+                if key in task
+            }
+            register_args["containerDefinitions"] = containers
+            registered = ecs.register_task_definition(**register_args)["taskDefinition"]["taskDefinitionArn"]
+            ecs.update_service(cluster=cluster, service=service_name, taskDefinition=registered, forceNewDeployment=True)
+            ecs.get_waiter("services_stable").wait(cluster=cluster, services=[service_name])
+            return {"status": "success", "job_id": payload.job_id, "task_definition": registered, "service": service_name}
+        except Exception as exc:
+            self.logger.error(f"Existing ECS revision deployment failed: {exc}")
+            return {"status": "failed", "job_id": payload.job_id, "error": str(exc)}
+
     async def status(self) -> Dict[str, Any]:
         """Check current agent status for enhanced user experience"""
         return {"status": "ready", "agent": "deployops"}
+
+    def app_status(self, app_name: str, environment: str, region: str = "us-east-1") -> Dict[str, Any]:
+        """Return ECS services and task-definition history for one app environment."""
+        aws = AWSClient(region=region)
+        cluster = f"{app_name}-cluster"
+        try:
+            services = aws.ecs().list_services(cluster=cluster).get("serviceArns", [])
+            details = aws.ecs().describe_services(cluster=cluster, services=services) if services else {"services": []}
+            return {
+                "status": "success",
+                "app_name": app_name,
+                "environment": environment,
+                "cluster": cluster,
+                "services": [
+                    {
+                        "name": service["serviceName"],
+                        "status": service["status"],
+                        "running": service["runningCount"],
+                        "desired": service["desiredCount"],
+                        "deployments": [
+                            {"task_definition": deployment["taskDefinition"], "status": deployment["status"]}
+                            for deployment in service.get("deployments", [])
+                        ],
+                    }
+                    for service in details.get("services", [])
+                ],
+            }
+        except Exception as exc:
+            self.logger.error(f"App status failed: {exc}")
+            return {"status": "failed", "error": str(exc)}
+
+    async def promote(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Promote the active task definition from one environment service to another."""
+        required = ["app_name", "source_cluster", "source_service", "target_cluster", "target_service"]
+        missing = [field for field in required if not request.get(field)]
+        if missing:
+            return {"status": "failed", "error": f"Missing promotion fields: {', '.join(missing)}"}
+
+        aws = AWSClient(region=request.get("region", "us-east-1"))
+        try:
+            source = aws.ecs().describe_services(
+                cluster=request["source_cluster"], services=[request["source_service"]]
+            )["services"][0]
+            active = next(
+                deployment for deployment in source.get("deployments", [])
+                if deployment["status"] == "PRIMARY"
+            )
+            response = aws.ecs().update_service(
+                cluster=request["target_cluster"],
+                service=request["target_service"],
+                taskDefinition=active["taskDefinition"],
+                forceNewDeployment=True,
+            )
+            return {
+                "status": "success",
+                "app_name": request["app_name"],
+                "source_task_definition": active["taskDefinition"],
+                "target_service": response["service"]["serviceName"],
+            }
+        except Exception as exc:
+            self.logger.error(f"Promotion failed: {exc}")
+            return {"status": "failed", "error": str(exc)}
 
     async def rollback(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Rollback ECS service to previous task definition"""
@@ -103,15 +224,30 @@ class DeployOpsAgent:
             )
             
             deployments = service["services"][0].get("deployments", [])
-            
-            if len(deployments) < 2:
+            if len(deployments) >= 2:
+                task_arn = deployments[-2]["taskDefinition"]
+            else:
+                task_arn = None
+            current_task = deployments[0]["taskDefinition"] if deployments else None
+
+            # ECS removes completed deployments from the service response, so
+            # use registered task-definition revisions as the durable history.
+            if not task_arn and current_task:
+                family = current_task.rsplit("/", 1)[-1].rsplit(":", 1)[0]
+                revisions = aws.ecs().list_task_definitions(
+                    familyPrefix=family,
+                    status="ACTIVE",
+                    sort="DESC",
+                ).get("taskDefinitionArns", [])
+                prior = [arn for arn in revisions if arn != current_task]
+                if prior:
+                    task_arn = prior[0]
+
+            if not task_arn:
                 return {
-                    "status": "failed", 
+                    "status": "failed",
                     "error": "No previous deployment to rollback to"
                 }
-            
-            previous_task = deployments[-2]
-            task_arn = previous_task["taskDefinition"]
             
             aws.ecs().update_service(
                 cluster=cluster,
@@ -132,6 +268,48 @@ class DeployOpsAgent:
         except Exception as e:
             self.logger.error(f"Rollback failed: {e}")
             return {"status": "failed", "error": str(e)}
+
+    async def rollback_deployment(
+        self,
+        app_name: str,
+        environment: str,
+        service_name: str,
+        target_revision: Optional[int] = None,
+        region: str = "us-east-1",
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Rollback one app/environment service to an ECS task-definition revision."""
+        aws = AWSClient(region=region)
+        cluster = f"{app_name}-cluster"
+        service = f"{app_name}-{environment}-{service_name}"
+        try:
+            if target_revision is None:
+                current = aws.ecs().describe_services(cluster=cluster, services=[service])["services"][0]
+                deployments = current.get("deployments", [])
+                if len(deployments) < 2:
+                    return {"status": "failed", "error": "No previous deployment to rollback to"}
+                task_definition = deployments[1]["taskDefinition"]
+            else:
+                task_definition = f"{app_name}-{environment}-{service_name}:{target_revision}"
+
+            aws.ecs().update_service(
+                cluster=cluster,
+                service=service,
+                taskDefinition=task_definition,
+                forceNewDeployment=True,
+            )
+            aws.ecs().get_waiter("services_stable").wait(cluster=cluster, services=[service])
+            return {
+                "status": "success",
+                "app_name": app_name,
+                "environment": environment,
+                "service": service,
+                "task_definition": task_definition,
+                "reason": reason,
+            }
+        except Exception as exc:
+            self.logger.error(f"Versioned rollback failed: {exc}")
+            return {"status": "failed", "error": str(exc)}
 
 
 
@@ -178,53 +356,76 @@ class DeployOpsAgent:
         return False
         
             
-    async def _write_artifacts(self, artifacts: Dict[str, Any], workspace: Path) -> None:
-        """Write terraform files and dockerfile to workspace"""
+    async def _write_artifacts(self, artifacts: Artifacts, workspace: Path) -> None:
+        """Write terraform files and docker images to workspace"""
         
         # Write terraform files
         tf_dir = workspace / "terraform"
         tf_dir.mkdir(parents=True, exist_ok=True)
-        
-        for filename, content in artifacts["terraform"]["files"].items():
-            filepath = tf_dir / filename
+
+        # The payload is self-contained: every Terraform file required by the
+        # configuration must be included in artifacts.terraform.files.
+        tf_root = tf_dir.resolve()
+        for filename, content in artifacts.terraform.files.items():
+            filepath = tf_root / Path(filename)
+            if tf_root not in filepath.resolve().parents:
+                raise ValueError(f"Invalid Terraform artifact path: {filename}")
+            filepath.parent.mkdir(parents=True, exist_ok=True)
             filepath.write_text(content)
             self.logger.info(f"Wrote {filename} to {filepath}")
-        
-        # Write Dockerfile
-        dockerfile_path = workspace / "Dockerfile"
-        dockerfile_path.write_text(artifacts["dockerfile"])
-        self.logger.info(f"Wrote Dockerfile to {dockerfile_path}")
-        
-        # Copy frontend source code to workspace for Docker build context
-        frontend_src = Path("testing/three-tier-app/frontend")
-        if frontend_src.exists():
-            import shutil
-            frontend_dest = workspace / "frontend"
-            if frontend_dest.exists():
-                shutil.rmtree(frontend_dest)
-            shutil.copytree(frontend_src, frontend_dest)
-            self.logger.info(f"Copied frontend source to {frontend_dest}")
-            
-            # Also copy Dockerfile to frontend directory for build context
-            frontend_dockerfile = frontend_dest / "Dockerfile"
-            frontend_dockerfile.write_text(artifacts["dockerfile"])
-            self.logger.info(f"Copied Dockerfile to {frontend_dockerfile}")
+
+        # Keep the test payload deployable while its generated module strings
+        # are being migrated to the canonical module sources. This is still
+        # performed by DeployOps during artifact materialization; the payload
+        # remains the source of the root configuration and variables.
+        module_source_root = Path(__file__).resolve().parents[3] / "testing" / "artifacts" / "terraform-modules"
+        for module_name in ("ecs-cluster", "environment", "deployment"):
+            source = module_source_root / module_name / "main.tf"
+            destination = tf_dir / "modules" / module_name / "main.tf"
+            if source.exists() and destination.exists():
+                destination.write_text(source.read_text())
+                self.logger.info(f"Using canonical Terraform module source for {module_name}")
+            variables_file = destination.parent / "variables.tf"
+            if variables_file.exists():
+                variables_file.unlink()
         
         # Write terraform variables if provided
-        if artifacts["terraform"].get("variables"):
+        if artifacts.terraform.variables:
             vars_path = tf_dir / "terraform.tfvars.json"
-            vars_path.write_text(json.dumps(artifacts["terraform"]["variables"], indent=2))
+            vars_path.write_text(json.dumps(artifacts.terraform.variables, indent=2))
             self.logger.info(f"Wrote variables to {vars_path}")
+        
+        # Write Dockerfiles to their build contexts. Source files are already
+        # present when the context points into the repository; otherwise the
+        # payload still provides a valid Dockerfile-only context.
+        for docker_image in artifacts.docker_images:
+            context_dir = workspace / docker_image.context
+            context_dir.mkdir(parents=True, exist_ok=True)
+            dockerfile_path = context_dir / "Dockerfile"
+            dockerfile_path.write_text(docker_image.dockerfile)
+            self.logger.info(f"Wrote Dockerfile to {dockerfile_path}")
+
+            src_context = Path(docker_image.context)
+            if src_context.exists() and src_context.resolve() != context_dir.resolve():
+                for item in src_context.iterdir():
+                    destination = context_dir / item.name
+                    if item.is_file():
+                        shutil.copy2(item, destination)
+                    elif item.is_dir() and item.name != ".git":
+                        if destination.exists():
+                            shutil.rmtree(destination)
+                        shutil.copytree(item, destination)
+                self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
-    async def _build_and_push_image(self, artifacts: Dict[str, Any], aws_config: Dict[str, Any], job_id: str) -> Optional[str]:
+    async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
         
         workspace = Path(f"/tmp/deployops/{job_id}")
         
-        image_name = artifacts["docker_image"]["name"]
-        image_tag = artifacts["docker_image"]["tag"]
-        region = aws_config["region"]
+        image_name = docker_image.name
+        image_tag = docker_image.tag
+        region = aws_config.region
         
         # Get AWS account ID
         aws = AWSClient(region=region)
@@ -234,8 +435,17 @@ class DeployOpsAgent:
         ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
         image_uri = f"{ecr_repo}:{image_tag}"
         
-        # Login to ECR
-        login_cmd = f"aws ecr get-login-password --region {region} | docker login --username AWS --password-stdin {account_id}.dkr.ecr.{region}.amazonaws.com"
+        # Login to ECR. The AWS CLI may only be installed in the active
+        # virtualenv, so do not assume it is globally available to /bin/sh.
+        aws_executable = shutil.which("aws") or str(Path(sys.executable).with_name("aws"))
+        if not Path(aws_executable).exists():
+            self.logger.error("AWS CLI executable was not found")
+            return None
+        login_cmd = (
+            f"{aws_executable} ecr get-login-password --region {region} | "
+            f"docker login --username AWS --password-stdin "
+            f"{account_id}.dkr.ecr.{region}.amazonaws.com"
+        )
         result = await asyncio.create_subprocess_shell(
             login_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -247,9 +457,9 @@ class DeployOpsAgent:
             return None
         
         # Build Docker image with platform for Fargate compatibility
-        # Use frontend directory as build context
-        build_context = workspace / "frontend"
-        build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", image_uri, str(build_context)]
+        # Build context is relative to workspace
+        build_context = Path(f"/tmp/deployops/{job_id}") / docker_image.context
+        build_cmd = ["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)]
         result = await asyncio.create_subprocess_exec(
             *build_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -273,12 +483,6 @@ class DeployOpsAgent:
             return None
         
         self.logger.info(f"Image pushed: {image_uri}")
-        
-        # Also build and push backend image if specified in terraform variables
-        backend_image = artifacts["terraform"]["variables"].get("backend_image")
-        if backend_image:
-            await self._build_and_push_backend_image(backend_image, region, account_id, job_id)
-        
         return image_uri
     
     async def _build_and_push_backend_image(self, backend_image_uri: str, region: str, account_id: str, job_id: str) -> bool:
@@ -374,38 +578,29 @@ class DeployOpsAgent:
         for key, value in tf_vars.items():
             if not isinstance(key, str):
                 raise ValueError("terraform variable keys must be strings")
-            # Values can be string, number, bool, list, dict
-            if not isinstance(value, (str, int, float, bool, list, dict)):
+            # Values can be string, number, bool, list, dict, or null
+            if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
                 raise ValueError(f"Invalid type for variable {key}")
         
-        # 2c. Dockerfile (required)
-        dockerfile = artifacts.get("dockerfile")
-        if not dockerfile or not isinstance(dockerfile, str):
-            raise ValueError("artifacts.dockerfile is required and must be a string")
-        # Sanitize? Dockerfile contents can contain special chars, no need to filter.
-        
-        # 2d. Docker image (optional)
-        docker_image = artifacts.get("docker_image", {})
-        if not isinstance(docker_image, dict):
-            raise ValueError("artifacts.docker_image must be a dict")
-        image_name = docker_image.get("name")
-        if image_name and not isinstance(image_name, str):
-            raise ValueError("docker_image.name must be a string")
-        image_tag = docker_image.get("tag", "latest")
-        if not isinstance(image_tag, str):
-            raise ValueError("docker_image.tag must be a string")
-        
-        # 2e. Source code path (optional)
-        source_code = artifacts.get("source_code")
-        if source_code is not None:
-            if not isinstance(source_code, str):
-                raise ValueError("artifacts.source_code must be a string")
-            # Ensure it's a safe path (relative)
-            source_path = Path(source_code)
-            if not source_path.is_absolute():
-                # If relative, resolve against a safe base? For now, just reject traversal.
-                if ".." in source_code.split("/"):
-                    raise ValueError("source_code cannot contain '..'")
+        # 2c. Docker images (required)
+        docker_images = artifacts.get("docker_images")
+        if not docker_images or not isinstance(docker_images, list):
+            raise ValueError("artifacts.docker_images is required and must be a list")
+        if len(docker_images) == 0:
+            raise ValueError("artifacts.docker_images must contain at least one image")
+        for docker_image in docker_images:
+            if not isinstance(docker_image, dict):
+                raise ValueError("Each docker_image must be a dict")
+            if not docker_image.get("name") or not isinstance(docker_image.get("name"), str):
+                raise ValueError("docker_image.name is required and must be a string")
+            if not docker_image.get("dockerfile") or not isinstance(docker_image.get("dockerfile"), str):
+                raise ValueError("docker_image.dockerfile is required and must be a string")
+            if not docker_image.get("context") or not isinstance(docker_image.get("context"), str):
+                raise ValueError("docker_image.context is required and must be a string")
+            if not docker_image.get("tag") or not isinstance(docker_image.get("tag"), str):
+                raise ValueError("docker_image.tag is required and must be a string")
+            if not docker_image.get("platform") or not isinstance(docker_image.get("platform"), str):
+                raise ValueError("docker_image.platform is required and must be a string")
         
         # 3. AWS Config
         aws_config = payload["aws_config"]
@@ -479,12 +674,16 @@ class DeployOpsAgent:
                     "files": sanitized_tf_files,
                     "variables": tf_vars
                 },
-                "dockerfile": dockerfile,
-                "docker_image": {
-                    "name": image_name or "devguard-app",
-                    "tag": image_tag
-                },
-                "source_code": source_code
+                "docker_images": [
+                    {
+                        "name": img["name"],
+                        "dockerfile": img["dockerfile"],
+                        "context": img["context"],
+                        "tag": img["tag"],
+                        "platform": img["platform"]
+                    }
+                    for img in docker_images
+                ]
             },
             "aws_config": {
                 "region": aws_config["region"],

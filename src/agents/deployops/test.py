@@ -37,8 +37,15 @@ def sample_payload():
                 },
                 "variables": {"region": "us-east-1"},
             },
-            "dockerfile": "FROM python:3.12-slim\nCOPY . /app",
-            "docker_image": {"name": "test-app", "tag": "latest"},
+            "docker_images": [
+                {
+                    "name": "test-app",
+                    "dockerfile": "FROM python:3.12-slim\nCOPY . /app",
+                    "context": "test_context",
+                    "tag": "latest",
+                    "platform": "linux/amd64"
+                }
+            ],
         },
         "aws_config": {
             "region": "us-east-1",
@@ -76,7 +83,8 @@ def test_sanitize_and_validate_valid(agent, sample_payload):
     result = agent.sanitize_and_validate(sample_payload)
     assert result["job_id"] == "test_job_123"
     assert "main.tf" in result["artifacts"]["terraform"]["files"]
-    assert result["artifacts"]["dockerfile"] == sample_payload["artifacts"]["dockerfile"]
+    assert len(result["artifacts"]["docker_images"]) == 1
+    assert result["artifacts"]["docker_images"][0]["name"] == "test-app"
     assert result["aws_config"]["region"] == "us-east-1"
 
 
@@ -104,13 +112,22 @@ def test_sanitize_and_validate_invalid_region(agent, sample_payload):
 
 @pytest.mark.asyncio
 async def test_write_artifacts(agent, sample_payload, workspace):
-    await agent._write_artifacts(sample_payload["artifacts"], workspace)
+    from src.agents.deployops.models import Artifacts
+    artifacts = Artifacts(**sample_payload["artifacts"])
+    
+    # Mock the modules copy to avoid overwriting test files
+    with patch("shutil.copytree") as mock_copytree:
+        # Make copytree do nothing
+        mock_copytree.return_value = None
+        
+        await agent._write_artifacts(artifacts, workspace)
 
     # Check files exist
     tf_dir = workspace / "terraform"
     assert (tf_dir / "main.tf").exists()
     assert (tf_dir / "variables.tf").exists()
-    assert (workspace / "Dockerfile").exists()
+    # Dockerfile should be in the context directory
+    assert (workspace / "test_context" / "Dockerfile").exists()
 
     # Check content
     content = (tf_dir / "main.tf").read_text()
@@ -265,7 +282,7 @@ async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_
     tf_instance.init.return_value = True
     tf_instance.plan.return_value = {"planned": "changes"}
     tf_instance.apply.return_value = True
-    tf_instance.output.return_value = {"service_url": {"value": "http://test.com"}}
+    tf_instance.output.return_value = {"frontend_url": {"value": "http://test.com"}}
     mock_tf_runner.return_value = tf_instance
 
     # Mock AWSClient
@@ -304,7 +321,7 @@ async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws
     tf_instance.init.return_value = True
     tf_instance.plan.return_value = {"planned": "changes"}
     tf_instance.apply.return_value = True
-    tf_instance.output.return_value = {"service_url": {"value": "http://test.com"}}
+    tf_instance.output.return_value = {"frontend_url": {"value": "http://test.com"}}
     mock_tf_runner.return_value = tf_instance
 
     aws_instance = MagicMock()

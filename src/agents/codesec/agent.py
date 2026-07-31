@@ -245,19 +245,17 @@ class CodeSecAgent:
             language_breakdown=lang_breakdown,
         )
 
-    async def _run_scanners(self, repo_path: Path) -> dict[str, Any]:
+    async def _run_scanners(self, repo_path: Path, stack_result: StackDetection) -> dict[str, Any]:
         """
-        Run all scanners. Stack detection runs first, then the rest in parallel.
+        Run all scanners. Stack detection is already done, passed as parameter.
 
         Args:
             repo_path: Path to cloned repository.
+            stack_result: Pre-computed stack detection result.
 
         Returns:
             Dictionary of scanner results.
         """
-        # Phase 1: Stack detection (needed for metadata and downstream consumers)
-        stack_result = detect_stack(repo_path)
-
         # Phase 2: Run remaining scanners in parallel
         loop = asyncio.get_event_loop()
 
@@ -352,7 +350,7 @@ class CodeSecAgent:
         # Get metadata
         repo_metadata = self._get_repo_metadata(repo_path, validated_url)
 
-        # Run stack detection
+        # Run stack detection (ONCE — result passed to _run_scanners)
         stack_start = datetime.now(timezone.utc)
         _add_phase("stack_detection", PhaseStatus.RUNNING, started=stack_start)
         try:
@@ -364,13 +362,13 @@ class CodeSecAgent:
             _add_phase("stack_detection", PhaseStatus.FAILED, started=stack_start, completed=stack_end, err=str(exc))
             stack_result = StackDetection(primary_language="unknown", confidence=0.0)
 
-        # Run remaining scanners in parallel
+        # Run remaining scanners in parallel (stack_result passed, not re-detected)
         scan_start = datetime.now(timezone.utc)
         for name in ["sast", "secrets", "dependencies", "dockerfile_scan", "sbom"]:
             _add_phase(name, PhaseStatus.RUNNING, started=scan_start)
 
         try:
-            results = await self._run_scanners(repo_path)
+            results = await self._run_scanners(repo_path, stack_result)
             scan_end = datetime.now(timezone.utc)
             for name in ["sast", "secrets", "dependencies", "dockerfile_scan", "sbom"]:
                 _add_phase(name, PhaseStatus.COMPLETED, started=scan_start, completed=scan_end)

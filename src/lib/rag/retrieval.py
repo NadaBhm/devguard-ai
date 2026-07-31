@@ -31,7 +31,8 @@ def similarity_search(
     client = QdrantClient(url=config.qdrant_url)
     embedder = EmbeddingClient(config)
 
-    query_vector = embedder.embed_single(query)
+    # Use query-specific embedding for better retrieval quality
+    query_vector = embedder.embed_single(query, is_query=True)
 
     try:
         result = client.query_points(

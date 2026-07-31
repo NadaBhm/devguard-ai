@@ -14,7 +14,7 @@ DEFAULT_QDRANT_URL: Final[str] = os.getenv("QDRANT_URL", "http://localhost:6333"
 DEFAULT_QDRANT_COLLECTION: Final[str] = os.getenv("QDRANT_COLLECTION", "devguard_repos")
 
 # Hugging Face embeddings (local, free)
-DEFAULT_HF_MODEL: Final[str] = os.getenv("HF_MODEL", "BAAI/bge-base-en-v1.5")
+DEFAULT_HF_MODEL: Final[str] = os.getenv("HF_MODEL", "BAAI/bge-large-en-v1.5")
 DEFAULT_EMBEDDING_DIM: Final[int] = int(os.getenv("EMBEDDING_DIM", "768"))
 
 # Gemini LLM (free tier)

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
+from aws_xray_sdk.core import xray_recorder
 from dotenv import load_dotenv
 
 from src.lib.aws.client import AWSClient
@@ -36,6 +37,7 @@ class DeployOpsAgent:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
 
+    @xray_recorder.capture("deploy")
     async def deploy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy infrastructure using Terraform artifacts and Docker images."""
         # Parse and validate payload using Pydantic models
@@ -110,6 +112,7 @@ class DeployOpsAgent:
             "resources": output
         }
 
+    @xray_recorder.capture("_deploy_existing_ecs_revision")
     async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
         """Create a new ECS task-definition revision for an existing service.
 
@@ -210,6 +213,7 @@ class DeployOpsAgent:
             self.logger.error(f"Promotion failed: {exc}")
             return {"status": "failed", "error": str(exc)}
 
+    @xray_recorder.capture("rollback")
     async def rollback(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Rollback ECS service to previous task definition"""
         
@@ -269,6 +273,7 @@ class DeployOpsAgent:
             self.logger.error(f"Rollback failed: {e}")
             return {"status": "failed", "error": str(e)}
 
+    @xray_recorder.capture("rollback_deployment")
     async def rollback_deployment(
         self,
         app_name: str,
@@ -315,6 +320,7 @@ class DeployOpsAgent:
 
 
         
+    @xray_recorder.capture("health_check")
     async def health_check(self, url: str, max_retries: int = 3, timeout: int = 20, health_check_path: str = "/health") -> bool:
         """
         Check if deployed service is healthy.
@@ -363,8 +369,8 @@ class DeployOpsAgent:
         tf_dir = workspace / "terraform"
         tf_dir.mkdir(parents=True, exist_ok=True)
 
-        # The payload is self-contained: every Terraform file required by the
-        # configuration must be included in artifacts.terraform.files.
+        """ The payload is self-contained: every Terraform file required by the
+         configuration must be included in artifacts.terraform.files. """
         tf_root = tf_dir.resolve()
         for filename, content in artifacts.terraform.files.items():
             filepath = tf_root / Path(filename)
@@ -374,10 +380,11 @@ class DeployOpsAgent:
             filepath.write_text(content)
             self.logger.info(f"Wrote {filename} to {filepath}")
 
-        # Keep the test payload deployable while its generated module strings
-        # are being migrated to the canonical module sources. This is still
-        # performed by DeployOps during artifact materialization; the payload
-        # remains the source of the root configuration and variables.
+        """ Keep the test payload deployable while its generated module strings
+         are being migrated to the canonical module sources. This is still
+         performed by DeployOps during artifact materialization; the payload
+         remains the source of the root configuration and variables."""
+         
         module_source_root = Path(__file__).resolve().parents[3] / "testing" / "artifacts" / "terraform-modules"
         for module_name in ("ecs-cluster", "environment", "deployment"):
             source = module_source_root / module_name / "main.tf"
@@ -418,6 +425,7 @@ class DeployOpsAgent:
                 self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
+    @xray_recorder.capture("_build_and_push_image")
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
         

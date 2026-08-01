@@ -19,8 +19,9 @@ Example usage:
 import subprocess
 import json
 import logging
+import time
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Callable, Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,22 @@ class TerraformRunner:
     def __init__(self, working_dir: Path):
         self.working_dir = working_dir
         self.working_dir.mkdir(parents=True, exist_ok=True)
+    
+    def _retry_with_backoff(self, func: Callable[[], Any], max_attempts: int = 3, base_delay: float = 2.0) -> Any:
+        """Execute a function with exponential backoff retry."""
+        last_exception = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return func()
+            except Exception as e:
+                last_exception = e
+                if attempt < max_attempts:
+                    delay = base_delay * (2 ** (attempt - 1))
+                    logger.warning(f"Attempt {attempt} failed: {e}. Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"All {max_attempts} attempts failed")
+        raise last_exception
     
     def _sanitize_cmd(self, cmd: List[str]) -> List[str]:
         allowed_commands = {
@@ -61,54 +78,57 @@ class TerraformRunner:
         )
     
     def init(self) -> bool:
-        result = self._run(["init"])
-        if result.returncode != 0:
-            logger.error(f"init failed: {result.stderr}")
-            return False
-        return True
+        def _init():
+            result = self._run(["init"])
+            if result.returncode != 0:
+                raise RuntimeError(f"init failed: {result.stderr}")
+            return True
+        return self._retry_with_backoff(_init)
     
     def plan(self) -> Optional[Dict]:
-        result = self._run(["plan", "-json"])
-        if result.returncode != 0:
-            logger.error(f"plan failed: {result.stderr}")
+        def _plan():
+            result = self._run(["plan", "-json"])
+            if result.returncode != 0:
+                raise RuntimeError(f"plan failed: {result.stderr}")
+            # finding the change_summary object which indicates success
+            try:
+                lines = result.stdout.strip().split('\n')
+                for line in reversed(lines):
+                    line = line.strip()
+                    if line and line.startswith('{'):
+                        parsed = json.loads(line)
+                        # Return the change_summary object which indicates plan success
+                        if parsed.get("type") == "change_summary":
+                            return parsed
+                        # Also accept planned_change or outputs as success indicators
+                        if parsed.get("type") in ("planned_change", "outputs"):
+                            return parsed
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"Failed to parse terraform plan JSON: {e}")
             return None
-        #  finding the change_summary object which indicates success
-        try:
-            lines = result.stdout.strip().split('\n')
-            for line in reversed(lines):
-                line = line.strip()
-                if line and line.startswith('{'):
-                    parsed = json.loads(line)
-                    # Return the change_summary object which indicates plan success
-                    if parsed.get("type") == "change_summary":
-                        return parsed
-                    # Also accept planned_change or outputs as success indicators
-                    if parsed.get("type") in ("planned_change", "outputs"):
-                        return parsed
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse terraform plan JSON: {e}")
-            return None
-        return None
+        return self._retry_with_backoff(_plan)
     
     def apply(self, auto_approve: bool = True) -> bool:
-        cmd = ["apply"]
-        if auto_approve:
-            cmd.append("-auto-approve")
-        result = self._run(cmd)
-        if result.returncode != 0:
-            logger.error(f"apply failed: {result.stderr}")
-            return False
-        return True
+        def _apply():
+            cmd = ["apply"]
+            if auto_approve:
+                cmd.append("-auto-approve")
+            result = self._run(cmd)
+            if result.returncode != 0:
+                raise RuntimeError(f"apply failed: {result.stderr}")
+            return True
+        return self._retry_with_backoff(_apply)
     
     def destroy(self, auto_approve: bool = True) -> bool:
-        cmd = ["destroy"]
-        if auto_approve:
-            cmd.append("-auto-approve")
-        result = self._run(cmd)
-        if result.returncode != 0:
-            logger.error(f"destroy failed: {result.stderr}")
-            return False
-        return True
+        def _destroy():
+            cmd = ["destroy"]
+            if auto_approve:
+                cmd.append("-auto-approve")
+            result = self._run(cmd)
+            if result.returncode != 0:
+                raise RuntimeError(f"destroy failed: {result.stderr}")
+            return True
+        return self._retry_with_backoff(_destroy)
     
     def output(self) -> Dict:
         result = self._run(["output", "-json"])

@@ -4,6 +4,7 @@ import os
 
 import boto3
 import logging
+from botocore.config import Config
 from typing import Optional, Dict, Any
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
@@ -12,6 +13,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+RETRY_CONFIG = Config(
+    retries={
+        "max_attempts": 3,
+        "mode": "adaptive",
+    }
+)
 
 class AWSClient:
     def __init__(self, region: str = "us-east-1"):
@@ -23,28 +31,28 @@ class AWSClient:
         )
 
     def ecs(self):
-        return self.session.client("ecs")
+        return self.session.client("ecs", config=RETRY_CONFIG)
     
     def ec2(self):
-        return self.session.client("ec2")
+        return self.session.client("ec2", config=RETRY_CONFIG)
     
     def s3(self):
-        return self.session.client("s3")
+        return self.session.client("s3", config=RETRY_CONFIG)
     
     def iam(self):
-        return self.session.client("iam")
+        return self.session.client("iam", config=RETRY_CONFIG)
     
     def cloudwatch(self):
-        return self.session.client("cloudwatch")
+        return self.session.client("cloudwatch", config=RETRY_CONFIG)
     
     def acm(self):
-        return self.session.client("acm")
+        return self.session.client("acm", config=RETRY_CONFIG)
     
     def elbv2(self):
-        return self.session.client("elbv2")
+        return self.session.client("elbv2", config=RETRY_CONFIG)
     
     def get_account_id(self) -> str:
-        sts = self.session.client("sts")
+        sts = self.session.client("sts", config=RETRY_CONFIG)
         return sts.get_caller_identity()["Account"]
     
     def check_permissions(self) -> bool:

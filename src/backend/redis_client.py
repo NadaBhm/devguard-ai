@@ -30,7 +30,7 @@ class RedisClient:
 def get_redis():
     return RedisClient.get_client()
 
-# Progress pub/sub: Celery tasks / the API publish job progress on channel "progress:{job_id}"; the WebSocket relay subscribes and forwards to connected clients.
+# Progress pub/sub: the API publishes job progress on channel "progress:{job_id}"; the WebSocket relay subscribes and forwards to connected clients.
 
 PROGRESS_CHANNEL = "progress:{job_id}"
 

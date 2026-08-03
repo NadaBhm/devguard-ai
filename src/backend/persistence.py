@@ -1,10 +1,9 @@
 """
 Database persistence helpers for orchestrator state.
 
-The API and the Celery tasks share these functions. The light writes
-(status + run_metadata on analysis_runs) happen in the request path; the
-heavier materialization into the child tables runs on a Celery worker via
-persist_run_results.
+The light writes (status + run_metadata on analysis_runs) and the heavier
+materialization into the child tables both happen in the request path, since
+the orchestrator runs in-process inside the API.
 """
 import json
 import logging

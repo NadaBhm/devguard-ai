@@ -5,9 +5,7 @@ The FastAPI process drives the LangGraph orchestrator in-process
 (get_orchestrator_graph built once at startup), because the orchestrator
 currently uses an in-memory MemorySaver checkpointer (graph.py). Each call to
 run_workflow / resume_workflow returns at the next human gate; the API persists
-the resulting state to Postgres and dispatches the heavy result writes to a
-Celery worker when the run reaches a terminal state.
-
+the resulting state to Postgres when the run reaches a terminal state.
 """
 
 """
@@ -179,11 +177,8 @@ def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)
 
     if state.get("status") in ("completed", "rolled_back", "failed", "rejected"):
         # The orchestrator runs in-process, so write results synchronously to
-        # the schema tables (persist_results is idempotent). Also enqueue the
-        # Celery task so a worker can re-run/flatten if configured.
+        # the schema tables (persist_results is idempotent).
         persist_results(db, job_id, state)
-        from ..tasks.security_scans import persist_run_results
-        persist_run_results.delay(job_id, serialize_state(state))
         _publish(state, 100, f"Run finished: {state.get('status')}")
     else:
         _publish(state, 60, f"Orchestrator status: {state.get('status')}")

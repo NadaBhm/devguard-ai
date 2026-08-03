@@ -77,7 +77,7 @@ async def redis_progress_relay():
 
     Subscribes to the Redis progress channel pattern and forwards every
     message to the WebSocket ConnectionManager, so progress published by
-    Celery workers / the API reaches connected clients.
+    the API reaches connected clients.
     """
     from .config import settings
 

@@ -7,7 +7,25 @@ currently uses an in-memory MemorySaver checkpointer (graph.py). Each call to
 run_workflow / resume_workflow returns at the next human gate; the API persists
 the resulting state to Postgres and dispatches the heavy result writes to a
 Celery worker when the run reaches a terminal state.
+
 """
+
+"""
+functions : 
+- get/create system user
+- get/create project
+- create run
+- publish progress to redis
+- create job
+- approve job
+- get job
+- list jobs
+- current gate
+
+
+"""
+
+
 import logging
 from datetime import datetime
 

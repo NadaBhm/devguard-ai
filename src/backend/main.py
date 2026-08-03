@@ -57,6 +57,8 @@ def on_shutdown():
 # REST API routes
 app.include_router(auth.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
+
+#main functionalities are found here
 app.include_router(jobs.router, prefix="/api")
 
 # WebSocket endpoint for real-time progress + RAG chat

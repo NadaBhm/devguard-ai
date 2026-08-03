@@ -8,7 +8,7 @@ import pytest
 
 from core.cost_estimator import estimate_cost
 from core.decision_engine import DecisionResult, decide_architecture
-from core.output_builder import _resolve_docker_artifacts, build_output
+from core.output_builder import resolve_docker_artifacts, build_output
 from core.terraform_generator import TerraformContext, generate_terraform
 from models.input_schema import RepoAnalysisInput
 from models.output_schema import (
@@ -115,7 +115,7 @@ def test_docker_tag_falls_back_to_latest_with_warning(caplog: pytest.LogCaptureF
     decision = decide_architecture(analysis)
 
     with caplog.at_level(logging.WARNING, logger="core.output_builder"):
-        dockerfile, docker_image = _resolve_docker_artifacts(analysis, decision)
+        dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
 
     assert docker_image.tag == "latest"
     assert dockerfile is not None
@@ -128,7 +128,7 @@ def test_lambda_without_container_has_no_dockerfile() -> None:
     assert analysis.stack_detection.container.detected is False
     decision = decide_architecture(analysis)
 
-    dockerfile, docker_image = _resolve_docker_artifacts(analysis, decision)
+    dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
 
     assert dockerfile is None
     assert docker_image is None
@@ -151,28 +151,20 @@ def test_output_is_json_serializable_with_correct_alias_keys() -> None:
 
 
 def test_unknown_compute_type_raises_key_error() -> None:
+    """DecisionResult's own Literal type prevents this in practice, but the
+    dispatch dict must fail loudly, not silently, if it ever happened."""
     analysis = _load_analysis("sample_input.json")
     decision = decide_architecture(analysis)
     decision.compute_type = "serverless-mystery"  # type: ignore[assignment]
-
     context = TerraformContext(job_id=analysis.job_id)
-    with pytest.raises(KeyError):
-        build_output(
-            analysis,
-            DecisionResult(
-                compute_type="ecs",
-                sizing=decision.sizing,
-                score_breakdown=decision.score_breakdown,
-            ),
-            generate_terraform(decision.__class__(compute_type="ecs", sizing=decision.sizing, score_breakdown=decision.score_breakdown), context),
-            Money(amount=1.0, currency="USD", range_min=0.8, range_max=1.2),
-            _FALLBACK_ENRICHMENT,
-        ) if False else None
-    # Simpler, direct check on the dispatch itself:
-    with pytest.raises(KeyError):
-        from core.output_builder import _BUILDERS
+    terraform_files = generate_terraform(
+        DecisionResult(compute_type="ecs", sizing=decision.sizing, score_breakdown=decision.score_breakdown),
+        context,
+    )
+    cost = Money(amount=1.0, currency="USD", range_min=0.8, range_max=1.2)
 
-        _BUILDERS["serverless-mystery"]
+    with pytest.raises(KeyError):
+        build_output(analysis, decision, terraform_files, cost, _FALLBACK_ENRICHMENT)
 
 
 def test_missing_required_sizing_key_raises_key_error() -> None:

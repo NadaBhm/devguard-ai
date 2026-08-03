@@ -219,13 +219,16 @@ class Approval(BaseModel):
     approved_by: Optional[str] = None
 
 
+EnrichmentSource = Literal["gemini", "fallback"]
+
+
 class Enrichment(BaseModel):
     """LLM-generated explanatory text. Never influences decisions or numbers."""
 
     architecture_explanation: str
     cost_summary: str
     finops_justification: str
-    enrichment_source: Literal["gemini", "fallback"]
+    enrichment_source: EnrichmentSource
 
 
 # --------------------------------------------------------------------------

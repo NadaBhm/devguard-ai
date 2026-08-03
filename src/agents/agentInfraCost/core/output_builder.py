@@ -62,13 +62,19 @@ _EC2_AMI_ID: Final[str] = "ami-0000000000000000"
 _EC2_KEY_PAIR_NAME: Final[str] = "devguard-key"
 
 
-def _resolve_docker_artifacts(
+def resolve_docker_artifacts(
     analysis: RepoAnalysisInput, decision: DecisionResult
 ) -> tuple[str | None, DockerImage | None]:
     """Decide ``dockerfile`` / ``docker_image`` — ``None`` for a Lambda zip
     deploy (no container detected upstream), otherwise a real Dockerfile
     and image tag, falling back to ``"latest"`` with a warning if
     ``commit_sha`` is unavailable — never silently.
+
+    Public (not ``_``-prefixed): module 3 (``terraform_generator``) needs
+    the resolved image string *before* rendering ECS/EC2 templates, so the
+    caller (today, ``main.py``; later, module 9's ``pipeline.py``) must be
+    able to call this ahead of ``build_output`` rather than only getting it
+    buried inside the final assembly.
     """
     is_lambda_zip = (
         decision.compute_type == "lambda"
@@ -92,9 +98,11 @@ def _resolve_docker_artifacts(
 
 
 def _build_artifacts(
-    analysis: RepoAnalysisInput, decision: DecisionResult, terraform_files: TerraformFiles
+    analysis: RepoAnalysisInput,
+    terraform_files: TerraformFiles,
+    dockerfile: str | None,
+    docker_image: DockerImage | None,
 ) -> Artifacts:
-    dockerfile, docker_image = _resolve_docker_artifacts(analysis, decision)
     terraform = TerraformArtifacts(
         files=terraform_files,
         variables={"region": "us-east-1", "environment": "dev"},
@@ -223,6 +231,8 @@ def build_output(
     terraform_files: TerraformFiles,
     cost: Money,
     enrichment: Enrichment,
+    dockerfile: str | None = None,
+    docker_image: DockerImage | None = None,
     approval_status: ApprovalStatus = "pending",
 ) -> InfraCostOutput:
     """Assemble the final contract from already-computed module outputs.
@@ -233,6 +243,12 @@ def build_output(
         terraform_files: Module 3's output.
         cost: Module 4's output.
         enrichment: Module 10's output (or a fallback), never computed here.
+        dockerfile: Pre-resolved via ``resolve_docker_artifacts`` — passed
+            in rather than recomputed here, since module 3 already needed
+            the same value to render ECS/EC2 templates. If omitted, it is
+            resolved on the spot (convenient for callers, like tests, that
+            don't already have it from a prior ``generate_terraform`` call).
+        docker_image: Same as ``dockerfile``, resolved together.
         approval_status: Defaults to "pending" — module 8 owns the real
             state machine; this is just what gets stamped on assembly.
 
@@ -240,6 +256,8 @@ def build_output(
         One of the three ``InfraCostOutput`` variants, with the other two
         ``aws_config``/``deployment_config`` blocks explicitly ``null``.
     """
-    artifacts = _build_artifacts(analysis, decision, terraform_files)
+    if dockerfile is None and docker_image is None:
+        dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+    artifacts = _build_artifacts(analysis, terraform_files, dockerfile, docker_image)
     builder = _BUILDERS[decision.compute_type]
     return builder(analysis, decision, artifacts, cost, enrichment, approval_status)

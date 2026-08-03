@@ -204,7 +204,7 @@ def mock_codesec_result():
         },
         "security_score": {
             "score": 68,
-            "grade": "C",
+            "grade": "D",
             "breakdown": {
                 "sast": 20,
                 "secrets": 15,

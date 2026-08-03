@@ -179,7 +179,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
     # --- Confidence Calculation ---
     # Confidence is a heuristic based on how many signals we found
     signal_count = sum(1 for v in [primary_language, frameworks, database, build_tool, container.detected] if v)
-    confidence = min(0.95, 0.3 + (signal_count / 6) * 0.7)
+    confidence = min(0.95, 0.3 + (signal_count / 5) * 0.7)
 
     # Detected files that contributed
     detected_files: list[str] = []

@@ -209,10 +209,13 @@ class DeploymentConfigEc2(BaseModel):
 # --------------------------------------------------------------------------
 
 
+ApprovalStatus = Literal["pending", "approved", "rejected"]
+
+
 class Approval(BaseModel):
     """State of the human-approval gate that sits between this agent and Agent 3."""
 
-    status: Literal["pending", "approved", "rejected"]
+    status: ApprovalStatus
     approved_by: Optional[str] = None
 
 

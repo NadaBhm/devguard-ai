@@ -31,5 +31,11 @@
   "optimization_discounts": {
     "spot_avg_pct": 0.65, "reserved_1yr_pct": 0.42, "reserved_3yr_pct": 0.60, "graviton_pct": 0.20,
     "_note": "Pourcentages moyens observés, utilisés par finops_optimizer.py pour projeter une économie estimée. Ne remplacent pas un devis AWS réel."
+  },
+  "region_multipliers": {
+    "us-east-1": 1.0,
+    "eu-west-1": 1.12,
+    "ap-southeast-1": 1.09,
+    "_note": "Multiplicateurs appliqués au coût us-east-1 (la seule région entièrement tarifée ci-dessus) pour approximer le coût dans d'autres régions, utilisés par region_comparator.py. Ratios cohérents avec l'écart historiquement observé sur ce projet (cf. l'ancien mock de l'orchestrateur : 145.32/162.80/158.45 $ pour us-east-1/eu-west-1/ap-southeast-1) et avec les écarts généralement publiés par AWS. Approximation, pas un devis région par région réel — à affiner si une vraie tarification par région est ajoutée plus tard."
   }
 }

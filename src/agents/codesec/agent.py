@@ -386,6 +386,18 @@ class CodeSecAgent:
             }
             error_message = str(exc)
 
+        if results["dependencies"].vulnerable_packages:
+            # Map: name of the package (lowercase) → VulnerablePackage
+            vuln_map = {
+                v.package.lower(): v 
+                for v in results["dependencies"].vulnerable_packages
+            }
+            for comp in results["sbom"].components:
+                if comp.name.lower() in vuln_map:
+                    cve = vuln_map[comp.name.lower()].cve_id
+                    if cve and cve not in comp.cve_ids:
+                        comp.cve_ids.append(cve)
+
         # Calculate security score
         score_start = datetime.now(timezone.utc)
         _add_phase("scoring", PhaseStatus.RUNNING, started=score_start)

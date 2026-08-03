@@ -267,6 +267,7 @@ class SbomComponent(BaseModel):
     purl: str | None = Field(default=None, description="Package URL")
     licenses: list[LicenseInfo] = Field(default_factory=list)
     source_file: str | None = Field(default=None)
+    cve_ids: list[str] = Field(default_factory=list, description="Known CVEs affecting this component") 
 
 
 class SBOM(BaseModel):

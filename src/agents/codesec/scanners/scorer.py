@@ -1,26 +1,23 @@
-
 """
-CodeSec Security Score Calculator
-===================================
+CodeSec Security Score Calculator — Refined (T-4.7)
+====================================================
 Calculates a 0-100 security score with letter grade (A-F), severity counts,
 per-category breakdown, and prioritized recommendations.
 
+Refinements Sprint 4:
+- Grade thresholds aligned with industry standard (A-D + F, no E).
+- Penalty curve capped at 70% per category with floor at 15/100.
+- Diminishing returns for repeated findings of same severity.
+- SBOM scoring includes vulnerable component detection.
+- Stack detection rewards complete stack profiles.
+- Recommendations ranked by priority score (severity × exploitability × ease_of_fix).
+
 US-1.1.5: As a tech lead, I want a security score so that I can prioritize fixes.
-
-Design Decisions:
-- Weighted scoring: SAST (25) > Secrets (20) > Dependencies (20) > Dockerfile (15)
-  > SBOM (10) > Stack Detection (10). Sums to 100.
-- Penalty curve: exponential decay per additional finding to avoid single-repo
-  with 1000 low-severity issues scoring 0 (which would be misleading).
-- Grade thresholds: A>=90, B>=80, C>=70, D>=60, E>=50, F<50.
-- Recommendations are generated from findings sorted by severity * exploitability.
-
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from ..config import (
@@ -46,6 +43,28 @@ from ..models import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Refined defaults (override via config.py if desired)
+# ---------------------------------------------------------------------------
+DEFAULT_MAX_PENALTY_RATIO = 0.70   # A category can lose at most 70% of its max
+DEFAULT_MIN_CATEGORY_SCORE = 15    # Floor per category (avoid score=0 on lows)
+DEFAULT_PENALTY_DECAY = 0.75       # Diminishing returns per repeated finding
+
+# Priority weights for recommendations: severity × exploitability × ease_of_fix
+EASE_OF_FIX = {
+    "secrets": 1.0,      # Easy: delete or env-var
+    "dockerfile": 0.9,   # Easy: edit Dockerfile
+    "dependencies": 0.8, # Medium: bump version
+    "sast": 0.6,         # Hard: refactor code
+}
+
+EXPLOITABILITY = {
+    "secrets": 1.0,      # Always exploitable if leaked
+    "sast": 0.9,         # Direct code vulnerability
+    "dependencies": 0.8, # Known CVEs often have PoCs
+    "dockerfile": 0.5,   # Config-level, needs access
+}
+
 
 def _calculate_category_score(
     findings: list[Any],
@@ -53,15 +72,13 @@ def _calculate_category_score(
     max_score: int = 100,
 ) -> int:
     """
-    Calculate a category score starting from max_score and applying penalties.
+    Calculate a category score with capped penalties and diminishing returns.
 
-    Args:
-        findings: List of finding objects with a severity attribute.
-        severity_attr: Attribute name to access severity on each finding.
-        max_score: Maximum possible score for this category.
-
-    Returns:
-        Integer score clamped to [0, max_score].
+    Logic:
+        - Each finding applies a base penalty × severity multiplier.
+        - Repeated findings of same severity decay by 25% each (0.75^n).
+        - Total penalty is capped at 70% of max_score.
+        - Score never drops below 15 (avoids score=0 from noise).
     """
     if not findings:
         return max_score
@@ -78,47 +95,97 @@ def _calculate_category_score(
     for severity, count in severity_counts.items():
         base = PENALTY_BASE.get(severity, 1.0)
         multiplier = SEVERITY_MULTIPLIERS.get(severity, 1.0)
-        # Apply decay: first finding = full penalty, subsequent = decayed
+        # Apply decay: first finding = full, subsequent = decayed
         for i in range(count):
-            penalty = base * multiplier * (PENALTY_DECAY ** i)
+            penalty = base * multiplier * (DEFAULT_PENALTY_DECAY ** i)
             total_penalty += penalty
 
+    # Cap penalty to avoid score collapse from many low-severity findings
+    max_penalty = max_score * DEFAULT_MAX_PENALTY_RATIO
+    total_penalty = min(total_penalty, max_penalty)
+
     score = max_score - total_penalty
-    return max(0, int(score))
+    # Hard floor: even a repo with many findings keeps some score
+    score = max(score, DEFAULT_MIN_CATEGORY_SCORE)
+    return int(score)
 
 
 def _calculate_stack_detection_score(stack: StackDetection) -> int:
-    """Score stack detection based on confidence and completeness."""
+    """
+    Score stack detection based on confidence and field completeness.
+
+    Rewards:
+        - High confidence (>0.9) with all fields detected = 100
+        - Each missing critical field costs 10 points
+        - Low confidence (<0.5) is heavily penalized
+    """
     if not stack or stack.confidence <= 0:
         return 0
 
     base = int(stack.confidence * 100)
-    # Penalize if critical fields are missing
-    missing = sum(
-        1 for field in [stack.primary_language, stack.frameworks, stack.database, stack.build_tool]
-        if not field or field == "unknown"
-    )
-    penalty = missing * 8
-    return max(0, base - penalty)
+
+    # Critical fields for a complete stack profile
+    critical_fields = [
+        stack.primary_language,
+        stack.frameworks,
+        stack.database,
+        stack.build_tool,
+    ]
+    missing = sum(1 for f in critical_fields if not f or f == "unknown")
+    penalty = missing * 10
+
+    score = max(0, base - penalty)
+
+    # Bonus for complete, high-confidence detection
+    if missing == 0 and stack.confidence >= 0.9:
+        score = min(100, score + 5)
+
+    return score
 
 
 def _calculate_sbom_score(sbom: SBOM) -> int:
-    """Score SBOM quality based on component count and license coverage."""
+    """
+    Score SBOM quality based on component coverage, licenses, and known vulns.
+
+    Penalties:
+        - Missing license info: up to -30
+        - Very few components (<5): -20 (likely incomplete scan)
+        - Known vulnerable components: -10 each (capped at -30)
+    """
     if not sbom or sbom.components_count == 0:
         return 0
 
-    # Base score: full if we have components
     score = 100
 
-    # Penalty for missing license info
+    # Penalty for missing licenses
     components_without_license = sum(
-        1 for c in sbom.components if not c.licenses
+        1 for c in sbom.components if not getattr(c, "licenses", None)
     )
     if sbom.components_count > 0:
         missing_ratio = components_without_license / sbom.components_count
         score -= int(missing_ratio * 30)
 
+    # Penalty for incomplete SBOM (suspiciously few components)
+    if sbom.components_count < 5:
+        score -= 20
+
+    # Penalty for known vulnerable components in SBOM
+    vulnerable_components = sum(
+        1 for c in sbom.components
+        if getattr(c, "vulnerabilities", None) or getattr(c, "cve_ids", None)
+    )
+    score -= min(vulnerable_components * 10, 30)
+
     return max(0, score)
+
+
+def _priority_score(category: str, severity: str) -> float:
+    """Calculate recommendation priority: severity × exploitability × ease_of_fix."""
+    sev_weights = {"critical": 5.0, "high": 3.0, "medium": 2.0, "low": 1.0, "info": 0.5}
+    sev = sev_weights.get(severity.lower(), 1.0)
+    exp = EXPLOITABILITY.get(category, 0.5)
+    ease = EASE_OF_FIX.get(category, 0.5)
+    return sev * exp * ease
 
 
 def _generate_recommendations(
@@ -130,13 +197,26 @@ def _generate_recommendations(
     """
     Generate prioritized, human-readable recommendations.
 
-    Sorts by severity (critical first) and groups by type for clarity.
+    Sorted by priority_score (descending) so the most impactful + easiest fixes
+    appear first.
     """
-    recommendations: list[str] = []
+    recs_with_priority: list[tuple[float, str]] = []
 
-    # SAST recommendations
+    # --- Secrets (highest priority: easy to fix, always exploitable) ---
+    critical_secrets = [s for s in secrets if s.type and "password" in s.type.lower()]
+    high_secrets = [s for s in secrets if s not in critical_secrets]
+
+    if critical_secrets:
+        files = ", ".join(set(s.file for s in critical_secrets[:3]))
+        msg = f"Remove {len(critical_secrets)} hardcoded password(s) from {files}"
+        recs_with_priority.append((_priority_score("secrets", "critical"), msg))
+    if high_secrets:
+        files = ", ".join(set(s.file for s in high_secrets[:3]))
+        msg = f"Remove {len(high_secrets)} hardcoded secret(s) from {files}"
+        recs_with_priority.append((_priority_score("secrets", "high"), msg))
+
+    # --- SAST Critical ---
     critical_sast = [f for f in sast_findings if f.severity == Severity.CRITICAL]
-    high_sast = [f for f in sast_findings if f.severity == Severity.HIGH]
     if critical_sast:
         by_rule: dict[str, list[SASTFinding]] = {}
         for f in critical_sast:
@@ -145,7 +225,11 @@ def _generate_recommendations(
             locations = ", ".join(f"{f.file}:{f.line}" for f in findings[:3])
             if len(findings) > 3:
                 locations += f" (+{len(findings) - 3} more)"
-            recommendations.append(f"Fix {len(findings)} critical {rule_id} issue(s) at {locations}")
+            msg = f"Fix {len(findings)} critical {rule_id} issue(s) at {locations}"
+            recs_with_priority.append((_priority_score("sast", "critical"), msg))
+
+    # --- SAST High ---
+    high_sast = [f for f in sast_findings if f.severity == Severity.HIGH]
     if high_sast:
         by_rule = {}
         for f in high_sast:
@@ -154,40 +238,46 @@ def _generate_recommendations(
             locations = ", ".join(f"{f.file}:{f.line}" for f in findings[:3])
             if len(findings) > 3:
                 locations += f" (+{len(findings) - 3} more)"
-            recommendations.append(f"Fix {len(findings)} high {rule_id} issue(s) at {locations}")
+            msg = f"Fix {len(findings)} high {rule_id} issue(s) at {locations}"
+            recs_with_priority.append((_priority_score("sast", "high"), msg))
 
-    # Secrets recommendations
-    critical_secrets = [s for s in secrets if s.type and "password" in s.type.lower()]
-    high_secrets = [s for s in secrets if s not in critical_secrets]
-    if critical_secrets:
-        files = ", ".join(set(s.file for s in critical_secrets[:3]))
-        recommendations.append(f"Remove {len(critical_secrets)} hardcoded password(s) from {files}")
-    if high_secrets:
-        files = ", ".join(set(s.file for s in high_secrets[:3]))
-        recommendations.append(f"Remove {len(high_secrets)} hardcoded secret(s) from {files}")
-
-    # Dependency recommendations
+    # --- Dependencies ---
     critical_deps = [d for d in vulnerable_packages if d.severity == Severity.CRITICAL]
     high_deps = [d for d in vulnerable_packages if d.severity == Severity.HIGH]
     if critical_deps:
         pkgs = ", ".join(f"{d.package} (CVE: {d.cve_id})" for d in critical_deps[:3])
-        recommendations.append(f"Update critical vulnerable packages: {pkgs}")
+        msg = f"Update critical vulnerable packages: {pkgs}"
+        recs_with_priority.append((_priority_score("dependencies", "critical"), msg))
     if high_deps:
         pkgs = ", ".join(f"{d.package} (CVE: {d.cve_id})" for d in high_deps[:3])
-        recommendations.append(f"Update high-risk vulnerable packages: {pkgs}")
+        msg = f"Update high-risk vulnerable packages: {pkgs}"
+        recs_with_priority.append((_priority_score("dependencies", "high"), msg))
 
-    # Dockerfile recommendations
+    # --- Dockerfile ---
     critical_df = [d for d in dockerfile_findings if d.severity == Severity.CRITICAL]
     high_df = [d for d in dockerfile_findings if d.severity == Severity.HIGH]
     if critical_df:
         files = ", ".join(set(f"{d.file}:{d.line}" for d in critical_df[:3]))
-        recommendations.append(f"Fix {len(critical_df)} critical Dockerfile issue(s) at {files}")
+        msg = f"Fix {len(critical_df)} critical Dockerfile issue(s) at {files}"
+        recs_with_priority.append((_priority_score("dockerfile", "critical"), msg))
     if high_df:
         files = ", ".join(set(f"{d.file}:{d.line}" for d in high_df[:3]))
-        recommendations.append(f"Fix {len(high_df)} high Dockerfile issue(s) at {files}")
+        msg = f"Fix {len(high_df)} high Dockerfile issue(s) at {files}"
+        recs_with_priority.append((_priority_score("dockerfile", "high"), msg))
 
-    # Cap recommendations at 10 for readability
-    return recommendations[:10]
+    # Sort by priority score descending (highest impact/easiest first)
+    recs_with_priority.sort(key=lambda x: x[0], reverse=True)
+
+    # Return top 10, deduplicated
+    seen: set[str] = set()
+    result: list[str] = []
+    for _, msg in recs_with_priority:
+        if msg not in seen:
+            seen.add(msg)
+            result.append(msg)
+        if len(result) >= 10:
+            break
+    return result
 
 
 def calculate_score(
@@ -201,18 +291,12 @@ def calculate_score(
     """
     Calculate the overall security score and grade.
 
-    Args:
-        sast_findings: Results from SAST scanner.
-        secrets: Results from secrets scanner.
-        vulnerable_packages: Results from dependency scanner.
-        dockerfile_findings: Results from Dockerfile scanner.
-        sbom: Generated SBOM.
-        stack_detection: Stack detection result.
-
-    Returns:
-        SecurityScore with score, grade, breakdown, severity counts, and recommendations.
+    Refined logic:
+        - Category penalties are capped and floored (realistic scores).
+        - Grade thresholds: A≥95, B≥85, C≥70, D≥50, F<50.
+        - Perfect score (100) requires: zero findings + complete stack + quality SBOM.
     """
-    # Calculate per-category scores (0-100 each)
+    # Per-category scores (0-100 each)
     sast_score = _calculate_category_score(sast_findings, max_score=100)
     secrets_score = _calculate_category_score(secrets, max_score=100)
     deps_score = _calculate_category_score(vulnerable_packages, max_score=100)
@@ -239,14 +323,17 @@ def calculate_score(
         + breakdown.stack_detection
     )
 
+    # Perfect score gate: must truly be clean AND well-detected
     has_no_findings = not (sast_findings or secrets or vulnerable_packages or dockerfile_findings)
     has_complete_stack = (
         bool(stack_detection.primary_language and stack_detection.primary_language != "unknown")
-        and stack_detection.confidence >= 0.9
+        and stack_detection.confidence >= 0.95
+        and bool(stack_detection.frameworks and stack_detection.frameworks != "unknown")
     )
-    if has_no_findings and has_complete_stack:
+    has_quality_sbom = sbom_score >= 90
+
+    if has_no_findings and has_complete_stack and has_quality_sbom:
         total_score = 100
-        # Sync breakdown to max weighted values so they sum to 100
         breakdown = ScoreBreakdown(
             sast=SCORING_WEIGHTS["sast"],
             secrets=SCORING_WEIGHTS["secrets"],
@@ -256,7 +343,7 @@ def calculate_score(
             stack_detection=SCORING_WEIGHTS["stack_detection"],
         )
 
-    # Determine grade
+    # Determine grade (industry standard: A, B, C, D, F)
     grade = Grade.F
     for threshold, letter in GRADE_THRESHOLDS:
         if total_score >= threshold:
@@ -297,12 +384,13 @@ def calculate_score(
     )
 
     logger.info(
-        "Security score calculated: %d/100 (Grade %s), Critical=%d, High=%d, Medium=%d, Low=%d",
+        "Security score calculated: %d/100 (Grade %s), Critical=%d, High=%d, Medium=%d, Low=%d, Info=%d",
         score.score,
         score.grade.value,
         score.severity_counts.critical,
         score.severity_counts.high,
         score.severity_counts.medium,
         score.severity_counts.low,
+        score.severity_counts.info,
     )
     return score

@@ -35,12 +35,11 @@ SEVERITY_MULTIPLIERS: Final[dict[str, float]] = {
 
 # Reverse mapping for grade thresholds
 GRADE_THRESHOLDS: Final[list[tuple[int, str]]] = [
-    (90, "A"),
-    (80, "B"),
+    (95, "A"),
+    (85, "B"),
     (70, "C"),
-    (60, "D"),
-    (50, "E"),
-    (0, "F"),
+    (50, "D"),
+    # F is default for <50
 ]
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 from core.input_validator import (
     InputValidationError,
@@ -22,7 +23,21 @@ from core.input_validator import (
 from core.pipeline import PipelineStageError, run_pipeline
 from models.output_schema import InfraCostOutput
 
-app = FastAPI(title="InfraCost Agent")
+
+class UTF8JSONResponse(JSONResponse):
+    """Same as FastAPI's default JSONResponse, but declares ``charset=utf-8``
+    explicitly in Content-Type. JSON is UTF-8 by spec (RFC 8259) regardless,
+    and most clients assume that correctly — but Windows PowerShell 5.1's
+    ``Invoke-RestMethod``/``Invoke-WebRequest`` defaults to Latin-1 when no
+    charset is stated, mangling every accented character in ``enrichment``'s
+    French text. Being explicit costs nothing for compliant clients and
+    fixes this one for free.
+    """
+
+    media_type = "application/json; charset=utf-8"
+
+
+app = FastAPI(title="InfraCost Agent", default_response_class=UTF8JSONResponse)
 
 _ERROR_CODES: dict[type[InputValidationError], str] = {
     InvalidStatusError: "invalid_status",

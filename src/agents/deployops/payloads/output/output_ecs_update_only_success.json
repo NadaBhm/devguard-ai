@@ -1,0 +1,13 @@
+{
+  "status": "success",
+  "job_id": "deploy-three-tier-revision-003",
+  "task_definition": "arn:aws:ecs:us-east-1:420435662988:task-definition/todo-backend-dev-backend:27",
+  "service": "todo-app-dev-frontend",
+  "cluster": "todo-app-cluster",
+  "metadata": {
+    "ecs_update_only": true,
+    "deployment_revision": "revision-003",
+    "deprecated_desired_count": false,
+    "service_name": "todo-app-dev-frontend"
+  }
+}

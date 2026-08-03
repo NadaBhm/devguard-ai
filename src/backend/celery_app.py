@@ -5,8 +5,13 @@ from celery.schedules import crontab
 celery_app = Celery(
     "devguard",
     broker=settings.CELERY_BROKER_URL,
-    backend=settings.BACKEND_URL,
-    include=["src.backend.tasks.security_scans"]
+    backend=settings.CELERY_RESULT_BACKEND,
+    include=[
+        "src.backend.tasks.security_scans",
+        "src.backend.tasks.cost_estimation",
+        "src.backend.tasks.deployments",
+        "src.backend.tasks.notifications",
+    ]
 )
 
 
@@ -39,19 +44,12 @@ celery_app.conf.update(
     
     # cron jobs
     beat_schedule={
-        "scan-all-projects-daily": {
-            "task": "src.backend.tasks.security_scans.scan_all_projects",
-            "schedule": crontab(hour=2, minute=0),
-            "args": (),
-        },
+        # NOTE: only schedules tasks that actually exist. `scan_all_projects`
+        # and `check_cost_alerts` are not implemented yet, so they've been
+        # removed to avoid the beat scheduler crashing on missing tasks.
         "cleanup-old-results": {
-            "task": "src.backend.tasks.cleanup_old_results",
+            "task": "src.backend.tasks.security_scans.cleanup_old_results",
             "schedule": crontab(hour=3, minute=0),
-            "args": (),
-        },
-        "check-cost-alerts": {
-            "task": "src.backend.tasks.cost_estimation.check_cost_alerts",
-            "schedule": crontab(minute="*/30"),
             "args": (),
         },
     },

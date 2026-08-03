@@ -1,10 +1,12 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from ..celery_app import celery_app
 from . import DatabaseTask
 from ..models import AnalysisRun, Project
+from ..persistence import update_run_state, persist_results
+from ..redis_client import publish_progress
 
 logger = logging.getLogger(__name__)
 
@@ -12,83 +14,57 @@ logger = logging.getLogger(__name__)
 @celery_app.task(base=DatabaseTask, bind=True)
 def run_security_scan(self, run_id: UUID, project_id: UUID) -> dict:
     """
-    Trigger the orchestrator for a security scan.
+    Thin kick-off task for a job.
 
-    This task is the entry point for the entire analysis pipeline.
-    It updates the run status, calls the orchestrator, and persists results.
-
-    Args:
-        run_id: UUID of the AnalysisRun record
-        project_id: UUID of the Project to scan
-
-    Returns:
-        dict: Status and metadata of the orchestration result
+    It no longer runs the orchestrator (the API drives run_workflow /
+    resume_workflow in-process so the MemorySaver checkpoints survive).
+    This task only flips the run to "running" and publishes a progress event.
     """
-    logger.info(f"Starting security scan orchestration for run {run_id}")
+    logger.info(f"Kicking off security scan orchestration for run {run_id}")
 
-    # Fetch run and project
-    run = self.db.query(AnalysisRun).filter(AnalysisRun.id == run_id).first()
+    run = self.db.query(AnalysisRun).filter(AnalysisRun.id == str(run_id)).first()
     if not run:
         raise ValueError(f"AnalysisRun {run_id} not found")
 
-    project = self.db.query(Project).filter(Project.id == project_id).first()
-    if not project:
-        raise ValueError(f"Project {project_id} not found")
-
-    # Update status to running
     run.status = "running"
     run.started_at = datetime.utcnow()
     self.db.commit()
 
-    try:
-        # Importing the orchestrator
-        try:
-            from src.agents.orchestrator.graph import run_workflow
-        except ImportError:
-            logger.warning("Orchestrator not yet implemented, using mock")
-            # Mock result for development
-            result = {
-                "status": "completed",
-                "job_id": str(run_id),
-                "final_report": {
-                    "summary": {
-                        "total_vulnerabilities": 3,
-                        "critical_count": 1,
-                        "estimated_monthly_cost_usd": 145.32,
-                        "deployment_status": "completed",
-                        "recommendations": ["Fix critical SQL injection"],
-                        "pipeline_duration_seconds": 45.2,
-                    }
-                },
-            }
-        else:
-            # Call the real orchestrator
-            result = run_workflow(
-                repo_url=project.github_url,
-                thread_id=str(run_id)
-            )
+    publish_progress(
+        str(run_id),
+        phase="start",
+        progress=5,
+        message="Job started. Running CodeSec analysis.",
+    )
 
-        # Update run with success
-        run.status = result.get("status", "completed")
-        run.completed_at = datetime.utcnow()
-        if run.started_at:
-            run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())
-        run.metadata = {"orchestrator_result": result}
-        self.db.commit()
+    return {"status": "success", "run_id": str(run_id), "orchestrator_status": run.status}
 
-        logger.info(f"Security scan completed for run {run_id} with status {run.status}")
-        return {
-            "status": "success",
-            "run_id": str(run_id),
-            "orchestrator_status": run.status,
-        }
 
-    except Exception as e:
-        logger.error(f"Security scan failed for run {run_id}: {str(e)}", exc_info=True)
-        run.status = "failed"
-        run.completed_at = datetime.utcnow()
-        run.metadata = {"error": str(e)}
-        self.db.commit()
-        # Re-raise for Celery retry
-        raise
+@celery_app.task(base=DatabaseTask, bind=True)
+def persist_run_state(self, run_id: UUID, state: dict) -> dict:
+    """Persist coarse status + full orchestrator state JSON (light write)."""
+    run = update_run_state(self.db, str(run_id), state)
+    return {"status": "success", "run_id": str(run_id), "run_status": run.status}
 
+
+@celery_app.task(base=DatabaseTask, bind=True)
+def persist_run_results(self, run_id: UUID, state: dict) -> dict:
+    """Materialize a completed run into the child result tables (heavy write)."""
+    written = persist_results(self.db, str(run_id), state)
+    return {"status": "success", "run_id": str(run_id), "rows_written": written}
+
+
+@celery_app.task(base=DatabaseTask, bind=True)
+def cleanup_old_results(self, days: int = 30) -> dict:
+    """Beat task: purge completed/failed runs older than `days`."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    old = self.db.query(AnalysisRun).filter(
+        AnalysisRun.completed_at.isnot(None),
+        AnalysisRun.completed_at < cutoff,
+    ).all()
+    count = len(old)
+    for run in old:
+        self.db.delete(run)
+    self.db.commit()
+    logger.info(f"Cleanup removed {count} old runs")
+    return {"status": "success", "removed": count}

@@ -1,4 +1,5 @@
 # src/backend/redis_client.py
+import json
 import redis
 from typing import Optional
 from .config import settings
@@ -28,3 +29,23 @@ class RedisClient:
 # Convenience function
 def get_redis():
     return RedisClient.get_client()
+
+# Progress pub/sub: Celery tasks / the API publish job progress on channel "progress:{job_id}"; the WebSocket relay subscribes and forwards to connected clients.
+
+PROGRESS_CHANNEL = "progress:{job_id}"
+
+
+def publish_progress(job_id: str, phase: str, progress: int, message: str = "") -> bool:
+    """Publish a progress event for a job. Safe no-op if Redis is down."""
+    try:
+        payload = json.dumps({
+            "type": "progress",
+            "job_id": job_id,
+            "phase": phase,
+            "progress": progress,
+            "message": message,
+        })
+        RedisClient.get_client().publish(PROGRESS_CHANNEL.format(job_id=job_id), payload)
+        return True
+    except Exception:
+        return False

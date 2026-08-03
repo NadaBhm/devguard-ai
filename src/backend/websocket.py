@@ -1,6 +1,10 @@
+import asyncio
 import json
+import logging
 from fastapi import WebSocket, WebSocketDisconnect
 from typing import Dict, Set
+
+logger = logging.getLogger(__name__)
 
 class ConnectionManager:
     def __init__(self):
@@ -65,6 +69,47 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+async def redis_progress_relay():
+    """
+    Long-running background task (started at app startup).
+
+    Subscribes to the Redis progress channel pattern and forwards every
+    message to the WebSocket ConnectionManager, so progress published by
+    Celery workers / the API reaches connected clients.
+    """
+    from .config import settings
+
+    try:
+        import redis.asyncio as aioredis
+    except Exception as exc:  # pragma: no cover - redis missing
+        logger.warning(f"Redis async client unavailable, progress relay disabled: {exc}")
+        return
+
+    client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    while True:
+        try:
+            pubsub = client.pubsub()
+            await pubsub.psubscribe("progress:*")
+            async for message in pubsub.listen():
+                if message.get("type") != "pmessage":
+                    continue
+                try:
+                    payload = json.loads(message["data"])
+                    await manager.send_progress(
+                        payload["job_id"],
+                        payload.get("phase", "unknown"),
+                        payload.get("progress", 0),
+                        payload.get("message", ""),
+                    )
+                except Exception:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - reconnect on failure
+            logger.warning(f"Progress relay disconnected: {exc}, reconnecting in 3s")
+            await asyncio.sleep(3)
 
 
 async def websocket_endpoint(websocket: WebSocket, job_id: str):

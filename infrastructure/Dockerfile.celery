@@ -13,6 +13,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 
 # NOTE: entrypoint assumes the Celery app object lives at
-# src/subgroup2/backend/celery_app.py as "celery_app" (per the CDC folder
-# tree, section 8). Adjust once T-1.4/T-2.14 land.
-CMD ["celery", "-A", "src.subgroup2.backend.celery_app", "worker", "--loglevel=info"]
+# src/backend/celery_app.py as "celery_app".
+CMD ["celery", "-A", "src.backend.celery_app", "worker", "--loglevel=info"]

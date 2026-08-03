@@ -25,17 +25,17 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_DEFAULT_REGION: str = "us-east-1"
     
-    #redis
-    REDIS_URL: str = "redis://localhost:6379/0"
+    # Redis roles (separate DBs):
+    #   0 = Celery broker, 1 = Celery result backend, 2 = app cache / progress pub-sub
+    REDIS_URL: str = "redis://localhost:6379/2"
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
+
+    # Backend result store (FastAPI -> where backend stores results)
+    BACKEND_URL: str = CELERY_RESULT_BACKEND
 
     # Qdrant
     QDRANT_URL: str = "http://localhost:6333"
-    
-    # Celery
-    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
-    
-    #backend
-    BACKEND_URL: str = "redis://localhost:6379/1"
     
     
     model_config = SettingsConfigDict(env_file='.env', extra='allow', case_sensitive=True)

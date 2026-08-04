@@ -99,6 +99,10 @@ def decide_architecture_via_llm(analysis: RepoAnalysisInput) -> DecisionResult:
     if choice is None:
         return deterministic
 
+    logger.info(
+        "LLM chose compute_type=%s (deterministic scoring would have picked %s): %s",
+        choice.compute_type, deterministic.compute_type, choice.reasoning,
+    )
     sizing = compute_sizing(choice.compute_type, analysis)
     return DecisionResult(
         compute_type=choice.compute_type,

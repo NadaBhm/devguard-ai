@@ -111,6 +111,10 @@ def decide_deployment_context(
         choice = _parse_llm_choice(raw_text)
         if choice is not None:
             region, environment = choice.region, choice.environment
+            logger.info(
+                "LLM chose region=%s environment=%s: %s",
+                region, environment, choice.reasoning,
+            )
 
     return TerraformContext(
         job_id=job_id,

@@ -8,6 +8,7 @@ LLM enrichment if ``GEMINI_API_KEY`` is unset). All business logic lives in
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException
@@ -22,6 +23,13 @@ from core.input_validator import (
 )
 from core.pipeline import PipelineStageError, run_pipeline
 from models.output_schema import InfraCostOutput
+
+# INFO is off by default in Python (root logger starts at WARNING); without
+# this, core.llm_architecture_advisor's and core.llm_deployment_advisor's
+# "an LLM chose ..." log lines would silently never appear anywhere,
+# leaving no way to see -- while the server runs -- whether a request
+# actually used the LLM or fell back to the deterministic path.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 class UTF8JSONResponse(JSONResponse):

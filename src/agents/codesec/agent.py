@@ -171,7 +171,7 @@ class CodeSecAgent:
             )
             if result.returncode != 0:
                 # Try default branch if main fails
-                cmd[5] = "--branch=master"
+                cmd[4] = "--branch=master"
                 result = subprocess.run(
                     cmd,
                     capture_output=True,

@@ -535,10 +535,115 @@ class DeployOpsAgent:
         return True
 
 
+    def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize payload to DeployOps-native shape for validation and deployment."""
+        if "compute_type" not in payload:
+            return payload
+
+        compute = payload.get("compute_type", "ecs")
+        artifacts = payload.get("artifacts", {})
+        aws_config = payload.get("aws_config", {})
+        dep_config = payload.get("deployment_config", {})
+        approval = payload.get("approval", {})
+
+        # Map the nested compute-specific block onto the flat shape.
+        if compute == "ecs":
+            ecs_aws = aws_config.get("ecs") or {}
+            ecs_dep = dep_config.get("ecs") or {}
+            flat_aws = {
+                "region": aws_config.get("region", "us-east-1"),
+                "ecs_cluster": ecs_aws.get("cluster"),
+                "service_name": ecs_aws.get("service_name"),
+                "task_cpu": str(ecs_aws.get("task_cpu", "256")),
+                "task_memory": str(ecs_aws.get("task_memory", "512")),
+            }
+            flat_dep = {
+                "strategy": ecs_dep.get("strategy", "rolling"),
+                "health_check_path": ecs_dep.get("health_check_path", "/health"),
+                "health_check_port": ecs_dep.get("health_check_port", 8080),
+                "timeout_minutes": ecs_dep.get("timeout_minutes", 15),
+                "min_healthy_percent": ecs_dep.get("min_healthy_percent", 50),
+                "max_percent": ecs_dep.get("max_percent", 200),
+                "auto_rollback": True,
+                "rollback_on_alarm": True,
+            }
+        elif compute == "ec2":
+            ec2_aws = aws_config.get("ec2") or {}
+            ec2_dep = dep_config.get("ec2") or {}
+            flat_aws = {
+                "region": aws_config.get("region", "us-east-1"),
+                "ecs_cluster": None,
+                "service_name": None,
+            }
+            flat_dep = {
+                "strategy": ec2_dep.get("strategy", "rolling"),
+                "health_check_path": ec2_dep.get("health_check_path", "/health"),
+                "health_check_port": ec2_dep.get("health_check_port", 8080),
+                "timeout_minutes": ec2_dep.get("timeout_minutes", 15),
+                "auto_rollback": True,
+                "rollback_on_alarm": True,
+            }
+        else:  # lambda
+            lambda_dep = dep_config.get("lambda") or {}
+            flat_aws = {
+                "region": aws_config.get("region", "us-east-1"),
+                "ecs_cluster": None,
+                "service_name": None,
+            }
+            flat_dep = {
+                "strategy": "rolling",
+                "health_check_path": "/health",
+                "health_check_port": 80,
+                "timeout_minutes": lambda_dep.get("timeout_minutes", 15),
+                "auto_rollback": True,
+                "rollback_on_alarm": True,
+            }
+
+        # Build the docker_images list from the singular image + dockerfile.
+        docker_images: List[Dict[str, Any]] = []
+        image = artifacts.get("docker_image")
+        if image:
+            dockerfile = artifacts.get("dockerfile")
+            if not dockerfile:
+                self.logger.warning(
+                    "No Dockerfile content in InfraCost payload for %s; "
+                    "DeployOps will read it from the checked-out source.",
+                    image.get("name"),
+                )
+                dockerfile = "FROM scratch\n"
+            docker_images.append(
+                {
+                    "name": image.get("name", "app"),
+                    "dockerfile": dockerfile,
+                    "context": ".",
+                    "tag": image.get("tag", "latest"),
+                    "platform": "linux/amd64",
+                }
+            )
+
+        status = approval.get("status", "pending")
+        return {
+            "job_id": payload.get("job_id"),
+            "artifacts": {
+                "terraform": artifacts.get("terraform", {"files": {}, "variables": {}}),
+                "docker_images": docker_images,
+            },
+            "aws_config": flat_aws,
+            "deployment_config": flat_dep,
+            "approval": {
+                "deploy_approved": status == "approved",
+                "approved_by": approval.get("approved_by"),
+            },
+        }
+
     def sanitize_and_validate(self, payload: Dict[str, Any]) -> Dict[str, Any]:         
         """
         Validate and sanitize incoming payload. will return a cleaned payload with defaults for missing optional fields.
+        Accepts both the DeployOps-native shape and the InfraCost output format
+        (which is normalized to the native shape first).
         """
+        payload = self._normalize_payload(payload)
+
         # 1. Check top-level required fields
         required_top = ["job_id", "artifacts", "aws_config", "deployment_config", "approval"]
         for field in required_top:

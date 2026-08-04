@@ -4,7 +4,10 @@ Architecture decision (module 2) now goes through
 ``decide_architecture_via_llm`` (Phase B): an LLM picks ``compute_type``
 when ``OPENROUTER_API_KEY`` is set and the call succeeds, otherwise it
 transparently falls back to ``decide_architecture``'s deterministic scoring
-— see ``core/llm_architecture_advisor.py`` for the full contract.
+— see ``core/llm_architecture_advisor.py`` for the full contract. The
+Terraform deployment context (region/environment, module 3's inputs) goes
+through ``decide_deployment_context`` (Phase C) the same way — see
+``core/llm_deployment_advisor.py``.
 
 A single synchronous entry point, ``run_pipeline``, calling every module in
 order. Deliberately a plain function, not ``async def``: the shared
@@ -29,9 +32,10 @@ from core.cost_estimator import estimate_cost
 from core.finops_optimizer import optimize_finops
 from core.input_validator import InputValidationError, validate_input
 from core.llm_architecture_advisor import decide_architecture_via_llm
+from core.llm_deployment_advisor import decide_deployment_context
 from core.llm_enrichment import build_enrichment
 from core.output_builder import build_output, resolve_docker_artifacts
-from core.terraform_generator import TerraformContext, generate_terraform
+from core.terraform_generator import generate_terraform
 from models.output_schema import InfraCostOutput
 
 
@@ -73,7 +77,8 @@ def run_pipeline(raw: dict) -> InfraCostOutput:
 
     try:
         dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
-        terraform_context = TerraformContext(
+        terraform_context = decide_deployment_context(
+            analysis,
             job_id=analysis.job_id,
             docker_image=f"{docker_image.name}:{docker_image.tag}" if docker_image else None,
         )

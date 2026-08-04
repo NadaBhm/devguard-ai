@@ -1,15 +1,19 @@
 """Step 4 of the InfraCost pipeline: estimate the monthly AWS cost.
 
-Reads static, offline pricing data from ``data/aws_pricing.json`` (loaded
-once and cached — no network call, ever) and applies a different formula
-per ``compute_type``. A stack detection and a sizing decision can only ever
-produce an estimate, never an exact bill, so this always returns a range
-(``amount`` ± 20%), never a single figure.
+Prices come from the live AWS Pricing API when it's reachable (module
+``aws_pricing_client``, cached ~24h), falling back to the static, offline
+table in ``data/aws_pricing.json`` whenever it isn't — missing credentials,
+no network, boto3 not installed, a transient AWS error. Either way, the
+formulas below apply a different one per ``compute_type``. A stack
+detection and a sizing decision can only ever produce an estimate, never
+an exact bill, so this always returns a range (``amount`` ± 20%), never a
+single figure.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -18,6 +22,8 @@ from pydantic import BaseModel
 
 from core.decision_engine import DecisionResult
 from models.output_schema import Money
+
+logger = logging.getLogger(__name__)
 
 _PRICING_FILE: Final[Path] = Path(__file__).resolve().parent.parent / "data" / "aws_pricing.json"
 
@@ -62,9 +68,35 @@ class CostEstimationContext(BaseModel):
 
 
 @lru_cache(maxsize=1)
-def _load_pricing_data() -> dict[str, Any]:
-    """Load and cache aws_pricing.json — read from disk exactly once per process."""
+def _load_static_pricing_data() -> dict[str, Any]:
+    """The offline, manually-maintained table — read from disk exactly once
+    per process, always available, never a network call."""
     return json.loads(_PRICING_FILE.read_text(encoding="utf-8"))
+
+
+def _load_pricing_data() -> dict[str, Any]:
+    """Live AWS prices when reachable, the static table otherwise.
+
+    Deliberately NOT ``@lru_cache``-d itself: the live path manages its own
+    ~24h cache internally (``aws_pricing_client``), so calling this again
+    later in a long-running process can pick up a refreshed price. The
+    static path underneath is still cached (see
+    ``_load_static_pricing_data``), so falling back never re-reads the file
+    from disk.
+
+    Never raises: any failure in the live path — boto3 not installed, no
+    AWS credentials, no network, an AWS-side error — logs a warning and
+    returns the static table instead, exactly as this function behaved
+    before the live integration existed.
+    """
+    static = _load_static_pricing_data()
+    try:
+        from core.aws_pricing_client import fetch_live_pricing_data
+
+        return fetch_live_pricing_data(fallback=static)
+    except Exception:
+        logger.warning("Live AWS pricing unavailable; using the static table.", exc_info=True)
+        return static
 
 
 def _get_pricing(data: dict[str, Any], *path: str) -> Any:

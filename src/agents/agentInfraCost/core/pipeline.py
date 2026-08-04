@@ -1,5 +1,11 @@
 """Step 9 of the InfraCost pipeline: orchestrate modules 1-4, 6, 7 and 10.
 
+Architecture decision (module 2) now goes through
+``decide_architecture_via_llm`` (Phase B): an LLM picks ``compute_type``
+when ``OPENROUTER_API_KEY`` is set and the call succeeds, otherwise it
+transparently falls back to ``decide_architecture``'s deterministic scoring
+— see ``core/llm_architecture_advisor.py`` for the full contract.
+
 A single synchronous entry point, ``run_pipeline``, calling every module in
 order. Deliberately a plain function, not ``async def``: the shared
 orchestrator (``src/subgroup2/orchestrator/graph.py``) integrates every
@@ -20,9 +26,9 @@ bare, ambiguous traceback.
 from __future__ import annotations
 
 from core.cost_estimator import estimate_cost
-from core.decision_engine import decide_architecture
 from core.finops_optimizer import optimize_finops
 from core.input_validator import InputValidationError, validate_input
+from core.llm_architecture_advisor import decide_architecture_via_llm
 from core.llm_enrichment import build_enrichment
 from core.output_builder import build_output, resolve_docker_artifacts
 from core.terraform_generator import TerraformContext, generate_terraform
@@ -61,7 +67,7 @@ def run_pipeline(raw: dict) -> InfraCostOutput:
     analysis = validate_input(raw)  # not wrapped: already typed + carries job_id
 
     try:
-        decision = decide_architecture(analysis)
+        decision = decide_architecture_via_llm(analysis)
     except Exception as exc:
         raise PipelineStageError("decision_engine", exc) from exc
 

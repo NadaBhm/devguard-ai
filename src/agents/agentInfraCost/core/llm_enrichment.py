@@ -69,17 +69,31 @@ def explain_architecture_decision(decision: DecisionResult) -> tuple[str, Enrich
     """Explain, in prose, why ``decision.compute_type`` won — using only
     the already-computed ``score_breakdown`` (module 2), never re-deciding."""
     scores = decision.score_breakdown
-    fallback = (
-        f"Architecture recommandée : {decision.compute_type}. "
-        f"Scores calculés — ecs: {scores['ecs']:.1f}, lambda: {scores['lambda']:.1f}, "
-        f"ec2: {scores['ec2']:.1f}. Le type retenu a obtenu le score le plus élevé."
-    )
-    text = _call_gemini(
-        prompt=(
+
+    if decision.decision_source == "llm" and decision.llm_reasoning:
+        # The score breakdown here is informational only (kept for context,
+        # see decide_architecture_via_llm's docstring) — it did NOT decide
+        # compute_type here, so the fallback text must not claim it did.
+        fallback = f"Architecture recommandée : {decision.compute_type}. {decision.llm_reasoning}"
+        prompt = (
+            f"Reformule en 2-3 phrases, en français, cette explication déjà donnée par un agent "
+            f"de décision pour le choix d'architecture '{decision.compute_type}' : "
+            f"{decision.llm_reasoning} N'invente aucune information nouvelle."
+        )
+    else:
+        fallback = (
+            f"Architecture recommandée : {decision.compute_type}. "
+            f"Scores calculés — ecs: {scores['ecs']:.1f}, lambda: {scores['lambda']:.1f}, "
+            f"ec2: {scores['ec2']:.1f}. Le type retenu a obtenu le score le plus élevé."
+        )
+        prompt = (
             f"Explique en 2-3 phrases, en français, pourquoi l'architecture '{decision.compute_type}' "
             f"a été choisie, à partir de ces scores déjà calculés : {scores}. "
             "N'invente aucun chiffre, utilise seulement ceux fournis."
-        ),
+        )
+
+    text = _call_gemini(
+        prompt=prompt,
         system_instruction=(
             "Tu écris une explication factuelle et concise pour un rapport DevOps. "
             "Tu ne prends aucune décision, tu expliques seulement une décision déjà prise."

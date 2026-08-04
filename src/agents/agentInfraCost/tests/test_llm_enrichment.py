@@ -51,6 +51,24 @@ def test_explain_architecture_decision_falls_back_without_key() -> None:
     assert "7.0" in text
 
 
+def test_explain_architecture_decision_uses_llm_reasoning_when_source_is_llm() -> None:
+    """When decision_source is "llm", the fallback text must use the LLM's
+    own reasoning -- not claim the (informational-only) scores decided it."""
+    llm_decision = DecisionResult(
+        compute_type="lambda",
+        sizing={"memory_mb": 256},
+        score_breakdown={"ecs": 7.0, "lambda": -5.0, "ec2": 2.0},  # ecs is highest here
+        decision_source="llm",
+        llm_reasoning="Projet petit et sans état, une fonction suffit.",
+    )
+
+    text, source = explain_architecture_decision(llm_decision)
+
+    assert source == "fallback"
+    assert "Projet petit et sans état, une fonction suffit." in text
+    assert "score le plus élevé" not in text
+
+
 def test_summarize_cost_estimation_falls_back_without_key() -> None:
     text, source = summarize_cost_estimation(_DECISION, _COST)
     assert source == "fallback"

@@ -60,7 +60,7 @@ def test_pipeline_stage_error_names_decision_engine(monkeypatch: pytest.MonkeyPa
     def _boom(analysis):
         raise ValueError("simulated decision_engine crash")
 
-    monkeypatch.setattr("core.pipeline.decide_architecture", _boom)
+    monkeypatch.setattr("core.pipeline.decide_architecture_via_llm", _boom)
 
     with pytest.raises(PipelineStageError) as excinfo:
         run_pipeline(_load_raw("sample_input.json"))

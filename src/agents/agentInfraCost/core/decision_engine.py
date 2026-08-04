@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from models.input_schema import RepoAnalysisInput
 
 ComputeType = Literal["ecs", "lambda", "ec2"]
+DecisionSource = Literal["deterministic", "llm"]
 
 # Below this many lines of code, an un-containerized project is considered
 # small enough to run as a single stateless function rather than needing a
@@ -61,6 +62,13 @@ class DecisionResult(BaseModel):
     compute_type: ComputeType
     sizing: dict[str, int | str]
     score_breakdown: dict[str, float]
+
+    # Both default so every existing caller of decide_architecture() (and
+    # every existing test constructing a DecisionResult directly) is
+    # unaffected. Only core.llm_architecture_advisor sets these to record
+    # that an LLM, not this module's scoring, picked compute_type.
+    decision_source: DecisionSource = "deterministic"
+    llm_reasoning: str | None = None
 
 
 def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
@@ -142,6 +150,18 @@ _SIZERS = {
     "lambda": _size_lambda,
     "ec2": _size_ec2,
 }
+
+
+def compute_sizing(compute_type: ComputeType, analysis: RepoAnalysisInput) -> dict[str, int | str]:
+    """Run the deterministic sizing rules for an already-chosen compute_type.
+
+    Public entry point for callers that pick compute_type some other way
+    than decide_architecture()'s scoring (currently:
+    core.llm_architecture_advisor) but still want the exact same tested
+    sizing tiers — never a second, possibly-drifting implementation of
+    "how big should this ECS task / Lambda / EC2 instance be".
+    """
+    return _SIZERS[compute_type](analysis)
 
 
 def decide_architecture(analysis: RepoAnalysisInput) -> DecisionResult:

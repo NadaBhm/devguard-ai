@@ -65,3 +65,30 @@ def test_run_persisted_to_schema_tables(_clean_db):
     assert con.execute("select count(*) from projects").fetchone()[0] >= 1
     assert con.execute("select count(*) from deployments").fetchone()[0] == 1
     con.close()
+
+
+def test_results_endpoint_returns_normalized_tables(_clean_db):
+    client = _clean_db
+    r = client.post(
+        "/api/jobs/",
+        json={"repo_url": "https://github.com/NadaBhm/devguard-ai", "commit_sha": "x"},
+    )
+    job_id = r.json()["job_id"]
+    client.post(
+        f"/api/jobs/{job_id}/approve", json={"approved": True, "approved_by": "x@y.z"}
+    )
+    r = client.post(
+        f"/api/jobs/{job_id}/approve", json={"approved": True, "approved_by": "x@y.z"}
+    )
+    assert r.json()["orchestrator_status"] == "completed"
+
+    res = client.get(f"/api/jobs/{job_id}/results")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["job_id"] == job_id
+    assert len(data["agent_tasks"]) == 3
+    assert len(data["deployments"]) == 1
+    # Every row has its uuid PK rendered as a string and the money as numbers.
+    for row in data["infracost_estimates"]:
+        assert "monthly_cost_usd" in row
+    assert client.get("/api/jobs/does-not-exist/results").status_code == 404

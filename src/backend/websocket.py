@@ -1,8 +1,9 @@
 import asyncio
 import json
 import logging
-from fastapi import WebSocket, WebSocketDisconnect
 from typing import Dict, Set
+
+from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,24 @@ class ConnectionManager:
             "phase": phase,
             "progress": progress,
             "message": message,
+        }
+        disconnected = set()
+        for ws in self.active_connections[job_id]:
+            try:
+                await ws.send_text(json.dumps(payload))
+            except Exception:
+                disconnected.add(ws)
+        for ws in disconnected:
+            self.disconnect(ws, job_id)
+
+    async def send_event(self, job_id: str, event_type: str, data: dict):
+        """Send an arbitrary typed live event (gate, results_ready, ...) to clients."""
+        if job_id not in self.active_connections:
+            return
+        payload = {
+            "type": event_type,
+            "job_id": job_id,
+            **data,
         }
         disconnected = set()
         for ws in self.active_connections[job_id]:
@@ -97,12 +116,17 @@ async def redis_progress_relay():
                     continue
                 try:
                     payload = json.loads(message["data"])
-                    await manager.send_progress(
-                        payload["job_id"],
-                        payload.get("phase", "unknown"),
-                        payload.get("progress", 0),
-                        payload.get("message", ""),
-                    )
+                    event_type = payload.pop("type", "progress")
+                    job_id = payload.pop("job_id", "")
+                    if event_type == "progress":
+                        await manager.send_progress(
+                            job_id,
+                            payload.get("phase", "unknown"),
+                            payload.get("progress", 0),
+                            payload.get("message", ""),
+                        )
+                    else:
+                        await manager.send_event(job_id, event_type, payload)
                 except Exception:
                     continue
         except asyncio.CancelledError:

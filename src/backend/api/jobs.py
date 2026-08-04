@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..database import get_db
 from ..persistence import persist_results, serialize_state, update_run_state
-from ..redis_client import publish_progress
+from ..redis_client import publish_gate, publish_progress, publish_results_ready
 
 logger = logging.getLogger(__name__)
 
@@ -145,11 +145,15 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
     run = update_run_state(db, str(run.id), state)
     _publish(state, 30, f"Orchestrator status: {state.get('status')}")
 
+    gate = _current_gate(state)
+    if gate:
+        publish_gate(str(run.id), gate, "awaiting_approval")
+
     return {
         "job_id": str(run.id),
         "status": run.status,
         "orchestrator_status": state.get("status"),
-        "gate": _current_gate(state),
+        "gate": gate,
         "state": serialize_state(state),
     }
 
@@ -180,8 +184,12 @@ def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)
         # the schema tables (persist_results is idempotent).
         persist_results(db, job_id, state)
         _publish(state, 100, f"Run finished: {state.get('status')}")
+        publish_results_ready(job_id)
     else:
         _publish(state, 60, f"Orchestrator status: {state.get('status')}")
+        gate = _current_gate(state)
+        if gate:
+            publish_gate(job_id, gate, "awaiting_approval")
 
     return {
         "job_id": job_id,
@@ -189,6 +197,47 @@ def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)
         "orchestrator_status": state.get("status"),
         "gate": _current_gate(state),
         "state": serialize_state(state),
+    }
+
+
+@router.get("/{job_id}/results")
+def get_job_results(job_id: str, db: Session = Depends(get_db)):
+    """Return the normalized result tables for a run (findings, cost, IaC, deploy)."""
+    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    def _rows(query):
+        return [dict((c.name, getattr(r, c.name)) for c in r.__table__.columns) for r in query]
+
+    findings = _rows(
+        db.query(models.CodeSecFinding)
+        .filter(models.CodeSecFinding.run_id == job_id)
+        .order_by(models.CodeSecFinding.severity.desc())
+    )
+    estimates = _rows(
+        db.query(models.InfracostEstimate)
+        .filter(models.InfracostEstimate.run_id == job_id)
+        .order_by(models.InfracostEstimate.monthly_cost_usd.desc())
+    )
+    artifacts = _rows(
+        db.query(models.TerraformArtifact).filter(models.TerraformArtifact.run_id == job_id)
+    )
+    deployments = _rows(
+        db.query(models.Deployment).filter(models.Deployment.run_id == job_id)
+    )
+    agent_tasks = _rows(
+        db.query(models.AgentTask).filter(models.AgentTask.run_id == job_id)
+    )
+
+    return {
+        "job_id": job_id,
+        "status": run.status,
+        "agent_tasks": agent_tasks,
+        "codesec_findings": findings,
+        "infracost_estimates": estimates,
+        "terraform_artifacts": artifacts,
+        "deployments": deployments,
     }
 
 

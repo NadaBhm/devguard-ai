@@ -1,0 +1,7 @@
+{
+  "status": "failed",
+  "error": "No previous deployment to rollback to",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "service_name": "app-service",
+  "current_task_definition": "arn:aws:ecs:us-east-1:123456789012:task-definition/app-service:3"
+}

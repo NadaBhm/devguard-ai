@@ -1,24 +1,19 @@
-from fastapi import FastAPI
+import asyncio
+import logging
+from typing import Optional
+
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+
+from .api import auth, chat, jobs
 from .database import init_db
-from .api import auth, chat
-from .websocket import websocket_endpoint
-from fastapi import WebSocket
+from .websocket import redis_progress_relay, websocket_endpoint
 
-# Try to import jobs and results, but don't fail if they're empty
-try:
-    from .api import jobs
-    jobs_router = jobs.router
-except (AttributeError, ImportError):
-    jobs_router = None
-
-try:
-    from .api import results
-    results_router = results.router
-except (AttributeError, ImportError):
-    results_router = None
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="DevGuard AI", version="0.1.0")
+
+_relay_task: Optional[asyncio.Task] = None
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,19 +23,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.on_event("startup")
 def on_startup():
-    # init_db()  # Commented out for local testing
-    pass  
+    # Create tables for local dev (Postgres migrations run via alembic in prod).
+    init_db()
+
+    # Build the shared orchestrator graph ONCE so the MemorySaver checkpoints
+    # survive across run_workflow / resume_workflow calls in this process.
+    try:
+        from src.agents.orchestrator.graph import get_orchestrator_graph
+        get_orchestrator_graph()
+        logger.info("Orchestrator graph built at startup")
+    except Exception as exc:
+        logger.warning(f"Orchestrator graph unavailable at startup: {exc}")
+
+    # Redis progress relay -> WebSocket clients.
+    global _relay_task
+    try:
+        _relay_task = asyncio.create_task(redis_progress_relay())
+    except RuntimeError:
+        logger.warning("No running event loop; progress relay started lazily")
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    global _relay_task
+    if _relay_task is not None:
+        _relay_task.cancel()
+        _relay_task = None
+
 
 # REST API routes
 app.include_router(auth.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 
-if jobs_router:
-    app.include_router(jobs_router, prefix="/api")
-if results_router:
-    app.include_router(results_router, prefix="/api")
+#main functionalities are found here
+app.include_router(jobs.router, prefix="/api")
 
 # WebSocket endpoint for real-time progress + RAG chat
 @app.websocket("/ws/jobs/{job_id}")

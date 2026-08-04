@@ -4,12 +4,18 @@ from typing import Optional
 from uuid import uuid4
 
 from sqlalchemy import (
-    Column, String, Boolean, DateTime, Text, Float, Integer, ForeignKey, Enum, CheckConstraint, Index, JSON
+    Column, String, Boolean, DateTime, Text, Integer, ForeignKey, Enum, CheckConstraint, Index, Numeric,
+    JSON,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
 Base = declarative_base()
+
+# Portable JSONB: stores as native Postgres JSONB, falls back to plain JSON
+# on SQLite (dev). Use for columns you want to query/index by path.
+Json = JSON().with_variant(JSONB(), "postgresql")
 
 
 class UserRole(str, PyEnum):
@@ -158,7 +164,7 @@ class AnalysisRun(Base):
     started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
     duration_seconds = Column(Integer, nullable=True)
-    run_metadata = Column("run_metadata", JSON, nullable=True)  # FIX: JSON instead of JSONB
+    run_metadata = Column("run_metadata", Json, nullable=True)  # FIX: JSON instead of JSONB
 
     # Relationships
     project = relationship("Project", back_populates="analysis_runs")
@@ -184,7 +190,7 @@ class AgentTask(Base):
     finished_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, nullable=False, default=0)
-    raw_result = Column(JSON, nullable=True)  # FIX: JSON instead of JSONB
+    raw_result = Column(Json, nullable=True)  # FIX: JSON instead of JSONB
 
     # Relationships
     run = relationship("AnalysisRun", back_populates="agent_tasks")
@@ -214,7 +220,7 @@ class CodeSecFinding(Base):
     rule_title = Column(String, nullable=False)
     description = Column(Text, nullable=False)
     remediation_hint = Column(Text, nullable=True)
-    raw_json = Column(JSON, nullable=True)  # FIX: JSON instead of JSONB
+    raw_json = Column(Json, nullable=True)  # FIX: JSON instead of JSONB
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
@@ -241,10 +247,10 @@ class InfracostEstimate(Base):
     run_id = Column(String, ForeignKey("analysis_runs.id", ondelete="CASCADE"), nullable=False, index=True)
     resource_type = Column(String, nullable=False)
     resource_name = Column(String, nullable=False)
-    monthly_cost_usd = Column(Float, nullable=False)
-    annual_cost_usd = Column(Float, nullable=False)
-    usage_assumptions = Column(JSON, nullable=True)  # FIX: JSON instead of JSONB
-    cost_drivers = Column(JSON, nullable=True)  # FIX: JSON instead of JSONB
+    monthly_cost_usd = Column(Numeric(12, 2), nullable=False)
+    annual_cost_usd = Column(Numeric(12, 2), nullable=False)
+    usage_assumptions = Column(Json, nullable=True)
+    cost_drivers = Column(Json, nullable=True)
     confidence_level = Column(String(50), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
@@ -295,8 +301,8 @@ class Deployment(Base):
     status = Column(String(50), nullable=False, default=DeploymentStatus.PENDING.value)
     applied_at = Column(DateTime, nullable=True)
     rollback_reason = Column(Text, nullable=True)
-    infrastructure_json = Column(JSON, nullable=True)  # FIX: JSON instead of JSONB
-    cost_total_monthly = Column(Float, nullable=True)
+    infrastructure_json = Column(Json, nullable=True)
+    cost_total_monthly = Column(Numeric(12, 2), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
@@ -358,8 +364,8 @@ class CostAlert(Base):
     project_id = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     alert_type = Column(String(50), nullable=False)
-    threshold_usd = Column(Float, nullable=False)
-    actual_cost_usd = Column(Float, nullable=False)
+    threshold_usd = Column(Numeric(12, 2), nullable=False)
+    actual_cost_usd = Column(Numeric(12, 2), nullable=False)
     severity = Column(String(50), nullable=False)
     is_resolved = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -394,7 +400,7 @@ class RAGDocument(Base):
     content_preview = Column(Text, nullable=True)
     qdrant_point_id = Column(String, unique=True, nullable=False)
     embedding_model = Column(String, nullable=False)
-    tags = Column(JSON, nullable=True)  # FIX: JSON instead of JSONB
+    tags = Column(Json, nullable=True)
     indexed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

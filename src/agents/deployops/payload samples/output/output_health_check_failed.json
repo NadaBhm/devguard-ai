@@ -1,0 +1,19 @@
+{
+  "status": "failed",
+  "error": "health check failed",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "deployed_url": "http://app-service-123456789.us-east-1.elb.amazonaws.com",
+  "health_check": {
+    "status": "unhealthy",
+    "endpoint": "http://app-service-123456789.us-east-1.elb.amazonaws.com/health",
+    "last_status_code": 503,
+    "attempts": 3,
+    "max_attempts": 3,
+    "checked_at": "2026-08-03T10:18:00Z"
+  },
+  "auto_rollback": true,
+  "rollback": {
+    "status": "success",
+    "message": "Rolled back to arn:aws:ecs:us-east-1:123456789012:task-definition/app-service:2"
+  }
+}

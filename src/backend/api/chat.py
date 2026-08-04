@@ -1,8 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from pathlib import Path
-from ...lib.rag.retrieval import ask_repo
-from ...lib.rag.ingestion import ingest_repo
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -22,6 +20,7 @@ class IngestRequest(BaseModel):
 async def ask_question(req: ChatRequest):
     """Ask a question about an ingested repository."""
     try:
+        from ...lib.rag.retrieval import ask_repo
         result = ask_repo(req.query, req.job_id)
         
         # Handle both (answer, sources) and just answer
@@ -41,6 +40,7 @@ async def ask_question(req: ChatRequest):
 async def ingest_repository(req: IngestRequest):
     """Ingest a repository into the RAG vector store."""
     try:
+        from ...lib.rag.ingestion import ingest_repo
         count = ingest_repo(Path(req.repo_path), req.job_id)
         return {"status": "success", "chunks_ingested": count}
     except Exception as e:

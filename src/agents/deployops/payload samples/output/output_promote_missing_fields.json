@@ -1,0 +1,4 @@
+{
+  "status": "failed",
+  "error": "Missing promotion fields: target_cluster, target_service"
+}

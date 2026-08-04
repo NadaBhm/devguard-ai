@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.1",
+  "job_id": "job-variant-001",
+  "compute_type": "lambda",
+  "artifacts": {
+    "terraform": {
+      "files": {
+        "main.tf": "terraform {\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"\n    }\n  }\n}\n\nprovider \"aws\" {\n  region = var.region\n}\n\nresource \"aws_iam_role\" \"lambda_exec\" {\n  name = \"app-handler-role\"\n\n  assume_role_policy = jsonencode({\n    Version = \"2012-10-17\"\n    Statement = [\n      {\n        Action    = \"sts:AssumeRole\"\n        Effect    = \"Allow\"\n        Principal = { Service = \"lambda.amazonaws.com\" }\n      }\n    ]\n  })\n}\n\nresource \"aws_iam_role_policy_attachment\" \"lambda_basic_execution\" {\n  role       = aws_iam_role.lambda_exec.name\n  policy_arn = \"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole\"\n}\n\nresource \"aws_lambda_function\" \"this\" {\n  function_name = \"app-handler\"\n  runtime       = \"python3.12\"\n  handler       = \"handler.main\"\n  memory_size   = 256\n  timeout       = 30\n  role          = aws_iam_role.lambda_exec.arn\n  filename      = \"/tmp/repo_job-variant-001\"\n}",
+        "variables.tf": "variable \"region\" {\n  description = \"AWS region to deploy into\"\n  type        = string\n  default     = \"us-east-1\"\n}\n\nvariable \"environment\" {\n  description = \"Deployment environment\"\n  type        = string\n  default     = \"dev\"\n}",
+        "outputs.tf": "output \"function_name\" {\n  value = aws_lambda_function.this.function_name\n}\n\noutput \"function_arn\" {\n  value = aws_lambda_function.this.arn\n}"
+      },
+      "variables": {
+        "region": "us-east-1",
+        "environment": "dev"
+      }
+    },
+    "dockerfile": null,
+    "docker_image": null,
+    "source_code": "/tmp/repo_job-variant-001"
+  },
+  "aws_config": {
+    "region": "us-east-1",
+    "estimated_monthly_cost": {
+      "amount": 0.35,
+      "currency": "USD",
+      "range_min": 0.28,
+      "range_max": 0.42
+    },
+    "ecs": null,
+    "lambda": {
+      "function_name": "app-handler",
+      "runtime": "python3.12",
+      "memory_mb": 256,
+      "timeout_seconds": 30,
+      "handler": "handler.main"
+    },
+    "ec2": null
+  },
+  "deployment_config": {
+    "ecs": null,
+    "lambda": {
+      "strategy": "all_at_once",
+      "reserved_concurrency": null
+    },
+    "ec2": null
+  },
+  "approval": {
+    "status": "pending",
+    "approved_by": null
+  },
+  "enrichment": {
+    "architecture_explanation": "Mock response: modules 5-10 (load scenarios, finops, llm enrichment) are not built yet.",
+    "cost_summary": "estimated_monthly_cost is real (module 4, cost_estimator), but a human-readable summary of it needs module 10 (llm_enrichment), not built yet.",
+    "finops_justification": "Mock response: modules 5-10 (load scenarios, finops, llm enrichment) are not built yet.",
+    "enrichment_source": "fallback"
+  }
+}

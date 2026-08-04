@@ -1,0 +1,13 @@
+{
+  "status": "failed",
+  "error": "terraform apply failed",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "stage": "terraform_apply",
+  "diagnostics": [
+    {
+      "severity": "error",
+      "summary": "Error creating ECS service: InvalidParameterException: The task definition does not support the specified launch type",
+      "detail": "resource 'aws_ecs_service.this' failed to create"
+    }
+  ]
+}

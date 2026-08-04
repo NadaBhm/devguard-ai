@@ -1,6 +1,11 @@
+import asyncio
 import json
-from fastapi import WebSocket, WebSocketDisconnect
+import logging
 from typing import Dict, Set
+
+from fastapi import WebSocket, WebSocketDisconnect
+
+logger = logging.getLogger(__name__)
 
 class ConnectionManager:
     def __init__(self):
@@ -27,6 +32,24 @@ class ConnectionManager:
             "phase": phase,
             "progress": progress,
             "message": message,
+        }
+        disconnected = set()
+        for ws in self.active_connections[job_id]:
+            try:
+                await ws.send_text(json.dumps(payload))
+            except Exception:
+                disconnected.add(ws)
+        for ws in disconnected:
+            self.disconnect(ws, job_id)
+
+    async def send_event(self, job_id: str, event_type: str, data: dict):
+        """Send an arbitrary typed live event (gate, results_ready, ...) to clients."""
+        if job_id not in self.active_connections:
+            return
+        payload = {
+            "type": event_type,
+            "job_id": job_id,
+            **data,
         }
         disconnected = set()
         for ws in self.active_connections[job_id]:
@@ -65,6 +88,52 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+async def redis_progress_relay():
+    """
+    Long-running background task (started at app startup).
+
+    Subscribes to the Redis progress channel pattern and forwards every
+    message to the WebSocket ConnectionManager, so progress published by
+    the API reaches connected clients.
+    """
+    from .config import settings
+
+    try:
+        import redis.asyncio as aioredis
+    except Exception as exc:  # pragma: no cover - redis missing
+        logger.warning(f"Redis async client unavailable, progress relay disabled: {exc}")
+        return
+
+    client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    while True:
+        try:
+            pubsub = client.pubsub()
+            await pubsub.psubscribe("progress:*")
+            async for message in pubsub.listen():
+                if message.get("type") != "pmessage":
+                    continue
+                try:
+                    payload = json.loads(message["data"])
+                    event_type = payload.pop("type", "progress")
+                    job_id = payload.pop("job_id", "")
+                    if event_type == "progress":
+                        await manager.send_progress(
+                            job_id,
+                            payload.get("phase", "unknown"),
+                            payload.get("progress", 0),
+                            payload.get("message", ""),
+                        )
+                    else:
+                        await manager.send_event(job_id, event_type, payload)
+                except Exception:
+                    continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - reconnect on failure
+            logger.warning(f"Progress relay disconnected: {exc}, reconnecting in 3s")
+            await asyncio.sleep(3)
 
 
 async def websocket_endpoint(websocket: WebSocket, job_id: str):

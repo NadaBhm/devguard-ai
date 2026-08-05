@@ -9,8 +9,10 @@ LLM enrichment if ``GEMINI_API_KEY`` is unset). All business logic lives in
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -23,6 +25,18 @@ from core.input_validator import (
 )
 from core.pipeline import PipelineStageError, run_pipeline
 from models.output_schema import InfraCostOutput
+
+# Loads GEMINI_API_KEY / OPENROUTER_API_KEY / OPENROUTER_MODEL / AWS
+# credentials from a .env file sitting next to this script, if one exists
+# -- regardless of which terminal starts the server, so these don't need
+# retyping as $env: variables every session. .env itself is gitignored;
+# never committed, never something Claude is given directly. Silently does
+# nothing if the file is absent -- every one of these is optional, each
+# with its own automatic fallback (see core/llm_provider.py,
+# core/aws_pricing_client.py, core/llm_enrichment.py). Must run before any
+# request comes in, but the modules above only read these vars at call
+# time (never at import time), so it's safe to load after importing them.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # INFO is off by default in Python (root logger starts at WARNING); without
 # this, core.llm_architecture_advisor's and core.llm_deployment_advisor's

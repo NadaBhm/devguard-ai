@@ -5,6 +5,7 @@ httpx.post is always monkeypatched; no test here can reach OpenRouter.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -14,9 +15,12 @@ from core.llm_provider import call_llm
 
 
 class _FakeResponse:
-    def __init__(self, *, status_code: int = 200, payload: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self, *, status_code: int = 200, payload: dict[str, Any] | None = None, text: str = ""
+    ) -> None:
         self.status_code = status_code
         self._payload = payload or {}
+        self.text = text or json.dumps(self._payload)
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:

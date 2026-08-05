@@ -78,6 +78,15 @@ def call_llm(
         )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
+    except httpx.HTTPStatusError as exc:
+        # exc_info alone only logs the status code -- the response body
+        # usually names the real reason (bad model slug, policy setting,
+        # rate limit, ...), so log it explicitly instead of discarding it.
+        logger.warning(
+            "OpenRouter call failed (%s); caller falls back. Response body: %s",
+            exc.response.status_code, exc.response.text,
+        )
+        return None
     except Exception:
         logger.warning("OpenRouter call failed; caller falls back.", exc_info=True)
         return None

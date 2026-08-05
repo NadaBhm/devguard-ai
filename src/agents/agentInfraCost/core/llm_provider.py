@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Final
+from typing import Any, Final
 
 import httpx
 
@@ -33,6 +33,7 @@ def call_llm(
     system_instruction: str,
     *,
     model: str | None = None,
+    provider_order: list[str] | None = None,
     temperature: float = 0.2,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> str | None:
@@ -45,6 +46,14 @@ def call_llm(
             ``"anthropic/claude-3.5-sonnet"``). Defaults to
             ``_DEFAULT_MODEL``, or to the ``OPENROUTER_MODEL`` environment
             variable if set — either way, never hardcoded in a caller.
+        provider_order: Which OpenRouter-side provider(s) may serve the
+            request (e.g. ``["nvidia"]``), in priority order. Defaults to
+            the ``OPENROUTER_PROVIDER`` environment variable if set (comma-
+            separated for more than one), otherwise omitted entirely and
+            OpenRouter's own routing decides. Some accounts have a default
+            provider preference that doesn't match every model — this is
+            how a caller overrides that per-request without needing to
+            change the account's own settings.
         temperature: Passed straight through to the API.
         timeout: Hard ceiling in seconds; a slow LLM must never hang the
             pipeline.
@@ -58,6 +67,20 @@ def call_llm(
         return None
 
     resolved_model = model or os.getenv("OPENROUTER_MODEL") or _DEFAULT_MODEL
+    resolved_provider_order = provider_order or (
+        [p.strip() for p in os.getenv("OPENROUTER_PROVIDER", "").split(",") if p.strip()] or None
+    )
+
+    payload: dict[str, Any] = {
+        "model": resolved_model,
+        "temperature": temperature,
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    if resolved_provider_order:
+        payload["provider"] = {"order": resolved_provider_order, "allow_fallbacks": False}
 
     try:
         response = httpx.post(
@@ -66,14 +89,7 @@ def call_llm(
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": resolved_model,
-                "temperature": temperature,
-                "messages": [
-                    {"role": "system", "content": system_instruction},
-                    {"role": "user", "content": prompt},
-                ],
-            },
+            json=payload,
             timeout=timeout,
         )
         response.raise_for_status()

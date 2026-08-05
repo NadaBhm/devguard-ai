@@ -80,6 +80,46 @@ def test_call_llm_honors_explicit_model_override(monkeypatch: pytest.MonkeyPatch
     assert captured["model"] == "anthropic/claude-3.5-sonnet"
 
 
+def test_call_llm_sends_provider_order_when_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def _fake_post(url, headers, json, timeout):
+        captured["provider"] = json.get("provider")
+        return _FakeResponse(payload={"choices": [{"message": {"content": "x"}}]})
+
+    monkeypatch.setattr("core.llm_provider.httpx.post", _fake_post)
+    call_llm(prompt="p", system_instruction="s", provider_order=["nvidia"])
+
+    assert captured["provider"] == {"order": ["nvidia"], "allow_fallbacks": False}
+
+
+def test_call_llm_omits_provider_field_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def _fake_post(url, headers, json, timeout):
+        captured["has_provider_key"] = "provider" in json
+        return _FakeResponse(payload={"choices": [{"message": {"content": "x"}}]})
+
+    monkeypatch.setattr("core.llm_provider.httpx.post", _fake_post)
+    call_llm(prompt="p", system_instruction="s")
+
+    assert captured["has_provider_key"] is False
+
+
+def test_call_llm_reads_provider_order_from_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_PROVIDER", "nvidia, deepseek")
+    captured = {}
+
+    def _fake_post(url, headers, json, timeout):
+        captured["provider"] = json.get("provider")
+        return _FakeResponse(payload={"choices": [{"message": {"content": "x"}}]})
+
+    monkeypatch.setattr("core.llm_provider.httpx.post", _fake_post)
+    call_llm(prompt="p", system_instruction="s")
+
+    assert captured["provider"] == {"order": ["nvidia", "deepseek"], "allow_fallbacks": False}
+
+
 # --------------------------------------------------------------------------
 # Limit / edge cases
 # --------------------------------------------------------------------------

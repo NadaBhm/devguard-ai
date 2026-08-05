@@ -68,6 +68,12 @@ class TerraformContext(BaseModel):
     environment: str = "dev"
     docker_image: str | None = None
     source_code_path: str | None = None
+    database: str | None = None
+    """The database engine module 1 detected (e.g. "postgresql"), if any —
+    ``analysis.stack_detection.database`` passed straight through. Only used
+    by the ECS template today, to declare (not create) the connection
+    variables a deployer must fill in — see ``_ecs_render_context``.
+    """
 
 
 def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
@@ -81,6 +87,7 @@ def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> 
         "docker_image": context.docker_image or "devguard-app:latest",
         "health_check_port": _ECS_HEALTH_CHECK_PORT,
         "health_check_path": _ECS_HEALTH_CHECK_PATH,
+        "database": context.database,
     }
 
 

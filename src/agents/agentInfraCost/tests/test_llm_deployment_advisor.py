@@ -53,6 +53,15 @@ def test_llm_choice_is_used_when_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert context.docker_image == "devguard-app:job-1"
 
 
+def test_database_is_passed_through_from_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    analysis = _load_analysis("sample_input.json")  # stack_detection.database == "postgresql"
+    _patch_call_llm(monkeypatch, None)  # database isn't LLM-decided; irrelevant here
+
+    context = decide_deployment_context(analysis, job_id="job-1", docker_image=None)
+
+    assert context.database == "postgresql"
+
+
 def test_source_code_path_passes_through_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     analysis = _load_analysis("sample_input.json")
     _patch_call_llm(monkeypatch, None)

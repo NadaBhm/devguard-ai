@@ -40,6 +40,39 @@ def test_generate_terraform_for_ecs_fixture() -> None:
     assert "aws_ecs_cluster.this.name" in files.outputs_tf
 
 
+def test_ecs_database_detected_adds_connection_placeholders() -> None:
+    """Regression test: stack_detection.database used to only influence the
+    architecture score, never reach the generated Terraform at all. Fixed
+    2026-08-05 (option 2: declare connection variables, never auto-create a
+    real, paying database)."""
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(
+        job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d", database="postgresql"
+    )
+
+    files = generate_terraform(decision, context)
+
+    assert 'DB_ENGINE", value = "postgresql"' in files.main_tf
+    assert "var.db_host" in files.main_tf
+    assert "var.db_password" in files.main_tf
+    assert 'variable "db_password"' in files.variables_tf
+    assert "sensitive   = true" in files.variables_tf
+    # never a real database resource -- only variable declarations
+    assert "aws_db_instance" not in files.main_tf
+
+
+def test_ecs_no_database_detected_adds_no_db_placeholders() -> None:
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d")
+
+    files = generate_terraform(decision, context)
+
+    assert "DB_ENGINE" not in files.main_tf
+    assert "db_password" not in files.variables_tf
+
+
 def test_ecs_service_has_working_health_check_and_networking() -> None:
     """Regression test for a real bug: the Fargate service used to have no
     network_configuration block (terraform apply would fail outright) and

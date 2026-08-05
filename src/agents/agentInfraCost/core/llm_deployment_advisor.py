@@ -17,6 +17,12 @@ may only pick from a closed list of known-safe values — the regions
 failure — no ``OPENROUTER_API_KEY``, a failed/timed-out call, malformed
 JSON, a value outside the allowed lists — falls back to today's fixed
 defaults, automatically and silently.
+
+Also passes ``analysis.stack_detection.database`` straight through to
+``TerraformContext.database`` (no LLM involved in this one — it's a plain
+fact from module 1, not a decision). The ECS template uses it to declare
+(never create) database connection variables — see
+``terraform_generator.py``'s docstring.
 """
 
 from __future__ import annotations
@@ -122,4 +128,5 @@ def decide_deployment_context(
         environment=environment,
         docker_image=docker_image,
         source_code_path=source_code_path,
+        database=analysis.stack_detection.database,
     )

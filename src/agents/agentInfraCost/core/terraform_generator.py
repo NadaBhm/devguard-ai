@@ -42,6 +42,7 @@ _TEMPLATE_FILENAMES: Final[tuple[str, ...]] = ("main.tf", "variables.tf", "outpu
 _ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
 _ECS_SERVICE_NAME: Final[str] = "app-service"
 _ECS_HEALTH_CHECK_PORT: Final[int] = 8080
+_ECS_HEALTH_CHECK_PATH: Final[str] = "/health"
 
 _LAMBDA_FUNCTION_NAME: Final[str] = "app-handler"
 _LAMBDA_HANDLER: Final[str] = "handler.main"
@@ -79,6 +80,7 @@ def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> 
         "task_memory": decision.sizing["task_memory"],
         "docker_image": context.docker_image or "devguard-app:latest",
         "health_check_port": _ECS_HEALTH_CHECK_PORT,
+        "health_check_path": _ECS_HEALTH_CHECK_PATH,
     }
 
 

@@ -15,6 +15,87 @@ resource "aws_ecs_cluster" "this" {
   name = "{{ cluster_name }}"
 }
 
+# Fargate tasks use "awsvpc" networking, which requires an explicit VPC/subnet
+# placement (there is no default network for Fargate the way there is for
+# EC2-backed ECS). vpc_id/subnet_ids are declared as required variables in
+# variables.tf.j2 -- this module deploys INTO an existing VPC, it does not
+# create one itself.
+resource "aws_security_group" "alb" {
+  name   = "{{ service_name }}-alb"
+  vpc_id = var.vpc_id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "ecs_tasks" {
+  name   = "{{ service_name }}-tasks"
+  vpc_id = var.vpc_id
+
+  # Only the load balancer, never the open internet, may reach the container
+  # port directly.
+  ingress {
+    from_port       = {{ health_check_port }}
+    to_port         = {{ health_check_port }}
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_lb" "this" {
+  name               = "{{ service_name }}-alb"
+  internal           = false
+  load_balancer_type = "application"
+  subnets            = var.subnet_ids
+  security_groups    = [aws_security_group.alb.id]
+}
+
+resource "aws_lb_target_group" "this" {
+  name        = "{{ service_name }}-tg"
+  port        = {{ health_check_port }}
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip" # required for Fargate tasks (no static EC2 instance to attach)
+
+  health_check {
+    path                = "{{ health_check_path }}"
+    port                = "traffic-port"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 30
+  }
+}
+
+resource "aws_lb_listener" "this" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this.arn
+  }
+}
+
 resource "aws_ecs_task_definition" "this" {
   family                   = "{{ service_name }}"
   requires_compatibilities = ["FARGATE"]
@@ -42,4 +123,23 @@ resource "aws_ecs_service" "this" {
   task_definition = aws_ecs_task_definition.this.arn
   desired_count   = 1
   launch_type     = "FARGATE"
+
+  # Required for Fargate ("awsvpc" mode): without this block, `terraform
+  # apply` fails outright -- Fargate has no default network to fall back to.
+  # assign_public_ip = true assumes var.subnet_ids are public subnets (the
+  # simplest working setup); set it to false and add a NAT gateway if
+  # deploying into private subnets instead.
+  network_configuration {
+    subnets          = var.subnet_ids
+    security_groups  = [aws_security_group.ecs_tasks.id]
+    assign_public_ip = true
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.this.arn
+    container_name   = "{{ service_name }}"
+    container_port   = {{ health_check_port }}
+  }
+
+  depends_on = [aws_lb_listener.this]
 }

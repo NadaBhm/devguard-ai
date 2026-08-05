@@ -40,6 +40,27 @@ def test_generate_terraform_for_ecs_fixture() -> None:
     assert "aws_ecs_cluster.this.name" in files.outputs_tf
 
 
+def test_ecs_service_has_working_health_check_and_networking() -> None:
+    """Regression test for a real bug: the Fargate service used to have no
+    network_configuration block (terraform apply would fail outright) and
+    health_check_path never reached the actual Terraform, only the JSON
+    output. Flagged by a teammate's review (Oussama), fixed 2026-08-05."""
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d")
+
+    files = generate_terraform(decision, context)
+
+    assert "network_configuration" in files.main_tf
+    assert "subnets          = var.subnet_ids" in files.main_tf
+    assert "aws_lb_target_group" in files.main_tf
+    assert 'path                = "/health"' in files.main_tf
+    assert "load_balancer {" in files.main_tf
+    assert 'variable "vpc_id"' in files.variables_tf
+    assert 'variable "subnet_ids"' in files.variables_tf
+    assert "load_balancer_dns_name" in files.outputs_tf
+
+
 def test_generate_terraform_for_lambda_fixture() -> None:
     analysis = _load_analysis("sample_input_variant_lambda_candidate.json")
     decision = decide_architecture(analysis)

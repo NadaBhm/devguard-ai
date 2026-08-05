@@ -9,3 +9,13 @@ variable "environment" {
   type        = string
   default     = "{{ environment }}"
 }
+
+variable "vpc_id" {
+  description = "ID of an existing VPC to deploy the load balancer and ECS tasks into"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "IDs of existing subnets (at least 2, in different availability zones) for the load balancer and ECS tasks"
+  type        = list(string)
+}

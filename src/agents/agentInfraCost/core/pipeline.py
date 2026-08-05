@@ -28,8 +28,11 @@ bare, ambiguous traceback.
 
 from __future__ import annotations
 
+from pydantic import BaseModel
+
 from core.cost_estimator import estimate_cost
-from core.finops_optimizer import optimize_finops
+from core.decision_engine import DecisionResult
+from core.finops_optimizer import FinOpsRecommendation, optimize_finops
 from core.input_validator import InputValidationError, validate_input
 from core.llm_architecture_advisor import decide_architecture_via_llm
 from core.llm_deployment_advisor import decide_deployment_context
@@ -37,6 +40,21 @@ from core.llm_enrichment import build_enrichment
 from core.output_builder import build_output, resolve_docker_artifacts
 from core.terraform_generator import generate_terraform
 from models.output_schema import InfraCostOutput
+
+
+class PipelineContext(BaseModel):
+    """Everything ``run_pipeline()`` computes internally, for callers that
+    need more than the final ``InfraCostOutput`` contract exposes.
+
+    Currently used by ``core.orchestrator_adapter``, which needs
+    ``decision`` and ``finops`` to derive fields (load scenarios, region
+    comparison, FinOps options) that ``InfraCostOutput`` itself never
+    carries — see that module's docstring for why.
+    """
+
+    output: InfraCostOutput
+    decision: DecisionResult
+    finops: FinOpsRecommendation
 
 
 class PipelineStageError(Exception):
@@ -53,20 +71,10 @@ class PipelineStageError(Exception):
         super().__init__(f"Pipeline failed at stage '{stage}': {original_exception}")
 
 
-def run_pipeline(raw: dict) -> InfraCostOutput:
-    """Run the full InfraCost pipeline on a raw Agent 1 payload.
-
-    Args:
-        raw: Agent 1's raw analysis payload (already-decoded JSON).
-
-    Returns:
-        The final ``InfraCostOutput`` contract.
-
-    Raises:
-        InputValidationError: (or a subclass) module 1 rejected the
-            payload — propagates unwrapped, already precisely typed.
-        PipelineStageError: any other stage failed; ``.stage`` names which
-            one, ``.original_exception`` holds the real cause.
+def _run_pipeline_internal(raw: dict) -> PipelineContext:
+    """The actual pipeline. Both public entry points below call this and
+    only differ in how much of the result they hand back — the steps
+    themselves, and every error-handling decision, live here exactly once.
     """
     analysis = validate_input(raw)  # not wrapped: already typed + carries job_id
 
@@ -102,8 +110,40 @@ def run_pipeline(raw: dict) -> InfraCostOutput:
         raise PipelineStageError("llm_enrichment", exc) from exc
 
     try:
-        return build_output(
+        output = build_output(
             analysis, decision, terraform_files, cost, enrichment, dockerfile, docker_image
         )
     except Exception as exc:
         raise PipelineStageError("output_builder", exc) from exc
+
+    return PipelineContext(output=output, decision=decision, finops=finops)
+
+
+def run_pipeline(raw: dict) -> InfraCostOutput:
+    """Run the full InfraCost pipeline on a raw Agent 1 payload.
+
+    Args:
+        raw: Agent 1's raw analysis payload (already-decoded JSON).
+
+    Returns:
+        The final ``InfraCostOutput`` contract.
+
+    Raises:
+        InputValidationError: (or a subclass) module 1 rejected the
+            payload — propagates unwrapped, already precisely typed.
+        PipelineStageError: any other stage failed; ``.stage`` names which
+            one, ``.original_exception`` holds the real cause.
+    """
+    return _run_pipeline_internal(raw).output
+
+
+def run_pipeline_with_context(raw: dict) -> PipelineContext:
+    """Like ``run_pipeline``, but also returns the internal ``DecisionResult``
+    and ``FinOpsRecommendation`` computed for this same job.
+
+    Same arguments and exceptions as ``run_pipeline`` — this is not a
+    different pipeline, just a richer view into the one pipeline that
+    exists. Intended for ``core.orchestrator_adapter``; the HTTP endpoint
+    in ``main.py`` should keep using plain ``run_pipeline``.
+    """
+    return _run_pipeline_internal(raw)

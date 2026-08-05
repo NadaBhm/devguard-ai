@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from core.input_validator import LowConfidenceError
-from core.pipeline import PipelineStageError, run_pipeline
+from core.pipeline import PipelineStageError, run_pipeline, run_pipeline_with_context
 from models.output_schema import Ec2InfraCostOutput, EcsInfraCostOutput, LambdaInfraCostOutput
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -33,8 +33,27 @@ def test_run_pipeline_end_to_end(filename: str, expected_type: type) -> None:
     output = run_pipeline(_load_raw(filename))
 
     assert isinstance(output, expected_type)
-    assert output.aws_config.estimated_monthly_cost.amount > 0
-    assert output.enrichment.enrichment_source == "fallback"  # no GEMINI_API_KEY in tests
+
+
+def test_run_pipeline_with_context_returns_same_output_as_run_pipeline() -> None:
+    """The two entry points must agree — run_pipeline_with_context is a
+    richer view into the same pipeline, never a second implementation."""
+    raw = _load_raw("sample_input.json")
+
+    plain_output = run_pipeline(raw)
+    context = run_pipeline_with_context(raw)
+
+    assert context.output == plain_output
+    assert context.decision.compute_type == plain_output.compute_type
+
+
+def test_run_pipeline_with_context_exposes_decision_and_finops() -> None:
+    context = run_pipeline_with_context(_load_raw("sample_input.json"))
+
+    assert context.decision.compute_type == "ecs"
+    assert context.finops.recommended is not None
+    assert context.output.aws_config.estimated_monthly_cost.amount > 0
+    assert context.output.enrichment.enrichment_source == "fallback"  # no GEMINI_API_KEY in tests
 
 
 def test_run_pipeline_ecs_has_real_terraform() -> None:

@@ -1,0 +1,49 @@
+{
+  "status": "success",
+  "job_id": "job-variant-001",
+  "deployed_url": null,
+  "resources": {
+    "function_name": {
+      "value": "app-handler"
+    },
+    "function_arn": {
+      "value": "arn:aws:lambda:us-east-1:123456789012:function:app-handler"
+    }
+  },
+  "deployment_details": {
+    "function_name": "app-handler",
+    "runtime": "python3.12",
+    "handler": "handler.main",
+    "memory_mb": 256,
+    "timeout_seconds": 30,
+    "function_version": "$LATEST",
+    "last_modified": "2026-08-03T10:12:05Z",
+    "state": "Active"
+  },
+  "health_check": {
+    "status": "healthy",
+    "endpoint": "arn:aws:lambda:us-east-1:123456789012:function:app-handler:1",
+    "invoke_attempts": 2,
+    "response_time_ms": 220,
+    "checked_at": "2026-08-03T10:12:30Z"
+  },
+  "cost_estimate": {
+    "estimated_monthly_cost": 0.35,
+    "currency": "USD",
+    "breakdown": {
+      "lambda_invocations": 0.29,
+      "lambda_duration": 0.06
+    }
+  },
+  "approval": {
+    "status": "approved",
+    "approved_by": "deploy@example.com",
+    "approved_at": "2026-08-03T10:05:00Z"
+  },
+  "metadata": {
+    "deployed_at": "2026-08-03T10:12:05Z",
+    "deployed_by": "deployops-agent",
+    "compute_type": "lambda",
+    "strategy": "all_at_once"
+  }
+}

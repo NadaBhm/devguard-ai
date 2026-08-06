@@ -1,0 +1,289 @@
+# all AWS IAM permissions needed for the DeployOps agent to deploy a 3-tier application
+
+# ECS Permissions
+
+ecs_permissions = [
+    
+    "ecs:CreateCluster",
+    "ecs:DeleteCluster",
+    "ecs:DescribeClusters",
+    "ecs:CreateService",
+    "ecs:DeleteService",
+    "ecs:UpdateService",
+    "ecs:DescribeServices",
+    "ecs:ListServices",
+    "ecs:RegisterTaskDefinition",
+    "ecs:DeregisterTaskDefinition",
+    "ecs:DescribeTaskDefinition",
+    "ecs:ListTaskDefinitions",
+    "ecs:RunTask",
+    "ecs:StopTask",
+    "ecs:DescribeTasks",
+    "ecs:ListTasks",
+    "ecs:TagResource",
+    "ecs:UntagResource",
+    "ecs:ListTagsForResource",
+]
+
+# ECR Permissions
+
+ecr_permissions = [
+    
+    "ecr:CreateRepository",
+    "ecr:DeleteRepository",
+    "ecr:DescribeRepositories",
+    "ecr:GetAuthorizationToken",
+    "ecr:BatchGetImage",
+    "ecr:GetDownloadUrlForLayer",
+    "ecr:PutImage",
+    "ecr:InitiateLayerUpload",
+    "ecr:UploadLayerPart",
+    "ecr:CompleteLayerUpload",
+    "ecr:BatchCheckLayerAvailability",
+    "ecr:DescribeImages",
+    "ecr:DeleteImage",
+    "ecr:ListImages",
+]
+
+# ELBv2 (ALB) Permissions
+
+elbv2_permissions = [
+    
+    "elasticloadbalancing:CreateLoadBalancer",
+    "elasticloadbalancing:DeleteLoadBalancer",
+    "elasticloadbalancing:DescribeLoadBalancers",
+    "elasticloadbalancing:CreateTargetGroup",
+    "elasticloadbalancing:DeleteTargetGroup",
+    "elasticloadbalancing:DescribeTargetGroups",
+    "elasticloadbalancing:ModifyTargetGroup",
+    "elasticloadbalancing:CreateListener",
+    "elasticloadbalancing:DeleteListener",
+    "elasticloadbalancing:DescribeListeners",
+    "elasticloadbalancing:ModifyListener",
+    "elasticloadbalancing:CreateRule",
+    "elasticloadbalancing:DeleteRule",
+    "elasticloadbalancing:DescribeRules",
+    "elasticloadbalancing:ModifyRule",
+    "elasticloadbalancing:RegisterTargets",
+    "elasticloadbalancing:DeregisterTargets",
+    "elasticloadbalancing:DescribeTargetHealth",
+]
+
+# RDS Permissions
+
+rds_permissions = [
+    
+    "rds:CreateDBInstance",
+    "rds:DeleteDBInstance",
+    "rds:DescribeDBInstances",
+    "rds:CreateDBSubnetGroup",
+    "rds:DeleteDBSubnetGroup",
+    "rds:DescribeDBSubnetGroups",
+    "rds:CreateDBParameterGroup",
+    "rds:DeleteDBParameterGroup",
+    "rds:DescribeDBParameterGroups",
+    "rds:ModifyDBInstance",
+    "rds:AddTagsToResource",
+    "rds:ListTagsForResource",
+]
+
+# EC2/VPC Permissions
+
+ec2_permissions = [
+    
+    # VPC
+    "ec2:CreateVpc",
+    "ec2:DeleteVpc",
+    "ec2:DescribeVpcs",
+    "ec2:ModifyVpcAttribute",
+    
+    # Subnets
+    "ec2:CreateSubnet",
+    "ec2:DeleteSubnet",
+    "ec2:DescribeSubnets",
+    "ec2:ModifySubnetAttribute",
+    
+    # Internet Gateway
+    "ec2:CreateInternetGateway",
+    "ec2:DeleteInternetGateway",
+    "ec2:DescribeInternetGateways",
+    "ec2:AttachInternetGateway",
+    "ec2:DetachInternetGateway",
+    
+    # NAT Gateway
+    "ec2:CreateNatGateway",
+    "ec2:DeleteNatGateway",
+    "ec2:DescribeNatGateways",
+    
+    # Elastic IPs
+    "ec2:AllocateAddress",
+    "ec2:ReleaseAddress",
+    "ec2:DescribeAddresses",
+    
+    # Route Tables
+    "ec2:CreateRouteTable",
+    "ec2:DeleteRouteTable",
+    "ec2:DescribeRouteTables",
+    "ec2:CreateRoute",
+    "ec2:DeleteRoute",
+    "ec2:AssociateRouteTable",
+    "ec2:DisassociateRouteTable",
+    
+    # Security Groups
+    "ec2:CreateSecurityGroup",
+    "ec2:DeleteSecurityGroup",
+    "ec2:DescribeSecurityGroups",
+    "ec2:AuthorizeSecurityGroupIngress",
+    "ec2:AuthorizeSecurityGroupEgress",
+    "ec2:RevokeSecurityGroupIngress",
+    "ec2:RevokeSecurityGroupEgress",
+    
+    # Network Interfaces
+    "ec2:CreateNetworkInterface",
+    "ec2:DeleteNetworkInterface",
+    "ec2:DescribeNetworkInterfaces",
+    
+    # Availability Zones
+    "ec2:DescribeAvailabilityZones",
+]
+
+# IAM Permissions (for ECS roles)
+
+iam_permissions = [
+    
+    "iam:CreateRole",
+    "iam:DeleteRole",
+    "iam:GetRole",
+    "iam:PassRole",
+    "iam:AttachRolePolicy",
+    "iam:DetachRolePolicy",
+    "iam:PutRolePolicy",
+    "iam:DeleteRolePolicy",
+    "iam:GetRolePolicy",
+    "iam:ListAttachedRolePolicies",
+    "iam:CreateInstanceProfile",
+    "iam:DeleteInstanceProfile",
+    "iam:AddRoleToInstanceProfile",
+    "iam:RemoveRoleFromInstanceProfile",
+]
+
+# CloudWatch Logs Permissions
+
+logs_permissions = [
+    
+    "logs:CreateLogGroup",
+    "logs:DeleteLogGroup",
+    "logs:DescribeLogGroups",
+    "logs:CreateLogStream",
+    "logs:DescribeLogStreams",
+    "logs:PutLogEvents",
+    "logs:PutRetentionPolicy",
+]
+
+# STS Permissions
+
+sts_permissions = [
+    
+    "sts:GetCallerIdentity",
+    "sts:AssumeRole",
+]
+
+# Complete IAM Policy Document
+
+complete_policy = {
+    
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ECSPermissions",
+            "Effect": "Allow",
+            "Action": ecs_permissions,
+            "Resource": "*"
+        },
+        {
+            "Sid": "ECRPermissions",
+            "Effect": "Allow",
+            "Action": ecr_permissions,
+            "Resource": "*"
+        },
+        {
+            "Sid": "ELBv2Permissions",
+            "Effect": "Allow",
+            "Action": elbv2_permissions,
+            "Resource": "*"
+        },
+        {
+            "Sid": "RDSPermissions",
+            "Effect": "Allow",
+            "Action": rds_permissions,
+            "Resource": "*"
+        },
+        {
+            "Sid": "EC2Permissions",
+            "Effect": "Allow",
+            "Action": ec2_permissions,
+            "Resource": "*"
+        },
+        {
+            "Sid": "IAMPermissions",
+            "Effect": "Allow",
+            "Action": iam_permissions,
+            "Resource": [
+                "arn:aws:iam::*:role/todo-app-*",
+                "arn:aws:iam::*:role/ecs-*",
+                "arn:aws:iam::*:instance-profile/todo-app-*"
+            ]
+        },
+        {
+            "Sid": "LogsPermissions",
+            "Effect": "Allow",
+            "Action": logs_permissions,
+            "Resource": "arn:aws:logs:*:*:log-group:/ecs/todo-app*"
+        },
+        {
+            "Sid": "STSPermissions",
+            "Effect": "Allow",
+            "Action": sts_permissions,
+            "Resource": "*"
+        }
+    ]
+}
+
+# ECS Task Execution Role Policy
+
+task_execution_role_policy = {
+    
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ecr:GetAuthorizationToken",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchGetImage",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+
+# ECS Task Role Policy (for application)
+
+task_role_policy = {
+    
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "rds-db:connect",
+                "secretsmanager:GetSecretValue",
+                "ssm:GetParameters"
+            ],
+            "Resource": "*"
+        }
+    ]
+}

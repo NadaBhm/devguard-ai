@@ -1,0 +1,10 @@
+{
+  "status": "success",
+  "app_name": "todo-app",
+  "environment": "dev",
+  "service": "todo-app-dev-frontend",
+  "task_definition": "arn:aws:ecs:us-east-1:420435662988:task-definition/todo-app-dev-frontend:12",
+  "target_revision": 12,
+  "reason": "p99 latency regression after revision 13",
+  "rolled_back_at": "2026-08-03T10:30:00Z"
+}

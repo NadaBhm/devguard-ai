@@ -1,0 +1,70 @@
+{
+  "status": "success",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "deployed_url": "http://app-service-123456789.us-east-1.elb.amazonaws.com",
+  "resources": {
+    "cluster_name": {
+      "value": "devguard-cluster"
+    },
+    "service_name": {
+      "value": "app-service"
+    },
+    "task_definition_arn": {
+      "value": "arn:aws:ecs:us-east-1:123456789012:task-definition/app-service:3"
+    }
+  },
+  "deployment_details": {
+    "ecs_cluster": "devguard-cluster",
+    "ecs_service": "app-service",
+    "task_definition_revision": 3,
+    "desired_count": 1,
+    "running_count": 1,
+    "launch_type": "FARGATE",
+    "platform_version": "1.4.0",
+    "image_uri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/devguard-app:sha-a1b2c3d",
+    "network_configuration": {
+      "subnets": [
+        "subnet-0123456789abcdef0",
+        "subnet-0123456789abcdef1"
+      ],
+      "security_groups": [
+        "sg-0123456789abcdef0"
+      ],
+      "assign_public_ip": "ENABLED"
+    },
+    "load_balancer": {
+      "dns_name": "app-service-123456789.us-east-1.elb.amazonaws.com",
+      "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/app-service/1234567890abcdef"
+    },
+    "cloudwatch_log_group": "/ecs/devguard/app-service",
+    "deployment_duration_seconds": 187
+  },
+  "health_check": {
+    "status": "healthy",
+    "endpoint": "http://app-service-123456789.us-east-1.elb.amazonaws.com/health",
+    "response_time_ms": 45,
+    "attempts": 1,
+    "checked_at": "2026-08-03T10:15:30Z"
+  },
+  "cost_estimate": {
+    "estimated_monthly_cost": 14.42,
+    "currency": "USD",
+    "breakdown": {
+      "ecs_fargate": 8.5,
+      "alb": 16.2,
+      "cloudwatch_logs": 0.5,
+      "data_transfer": 0.22
+    }
+  },
+  "approval": {
+    "status": "approved",
+    "approved_by": "deploy@example.com",
+    "approved_at": "2026-08-03T10:10:00Z"
+  },
+  "metadata": {
+    "deployed_at": "2026-08-03T10:15:30Z",
+    "deployed_by": "deployops-agent",
+    "compute_type": "ecs",
+    "strategy": "rolling"
+  }
+}

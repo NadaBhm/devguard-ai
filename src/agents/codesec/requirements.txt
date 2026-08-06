@@ -1,0 +1,16 @@
+# ---------------------------------------------------------------------------
+# SAST (Static Application Security Testing)
+# ---------------------------------------------------------------------------
+semgrep>=1.45.0          # CLI invoked via subprocess. Also available as Python lib.
+bandit[toml]>=1.7.8      # Python-only SAST fallback
+# ---------------------------------------------------------------------------
+# Dependency Vulnerability Scanning
+# ---------------------------------------------------------------------------
+pip-audit>=2.7.0         # Python CVE detection
+safety>=3.0.0            # Python dependency safety (second opinion)
+# ---------------------------------------------------------------------------
+# SBOM Generation
+# ---------------------------------------------------------------------------
+cyclonedx-bom>=4.0.0     # CycloneDX Python library + CLI
+cyclonedx-python-lib>=7.0.0  # Core library for SBOM manipulation
+

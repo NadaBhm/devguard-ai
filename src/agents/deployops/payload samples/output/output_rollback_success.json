@@ -1,0 +1,9 @@
+{
+  "status": "success",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "message": "Rolled back to arn:aws:ecs:us-east-1:123456789012:task-definition/app-service:2",
+  "cluster": "devguard-cluster",
+  "service_name": "app-service",
+  "previous_task_definition": "arn:aws:ecs:us-east-1:123456789012:task-definition/app-service:2",
+  "triggered_at": "2026-08-03T10:18:45Z"
+}

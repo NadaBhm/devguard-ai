@@ -1,0 +1,4 @@
+{
+  "status": "failed",
+  "error": "Invalid payload: 2 validation errors for DeployPayload\nartifacts.docker_images\n  Field required [type=missing]\naws_config.ecs_cluster\n  Field required [type=missing]"
+}

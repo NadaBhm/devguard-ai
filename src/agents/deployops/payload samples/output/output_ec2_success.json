@@ -1,0 +1,64 @@
+{
+  "status": "success",
+  "job_id": "job-ec2-sample-001",
+  "deployed_url": "http://54.210.123.45",
+  "resources": {
+    "instance_ids": {
+      "value": [
+        "i-0abcdef1234567890"
+      ]
+    },
+    "public_ips": {
+      "value": [
+        "54.210.123.45"
+      ]
+    }
+  },
+  "deployment_details": {
+    "instance_ids": [
+      "i-0abcdef1234567890"
+    ],
+    "instance_type": "t3.medium",
+    "public_ips": [
+      "54.210.123.45"
+    ],
+    "private_ips": [
+      "10.0.1.10"
+    ],
+    "vpc_id": "vpc-0abcdef1234567890",
+    "subnet_id": "subnet-0abcdef1234567890",
+    "security_groups": [
+      "sg-0123456789abcdef0"
+    ],
+    "ami_id": "ami-0abcdef1234567890",
+    "key_pair_name": "devguard-key",
+    "instance_state": "running"
+  },
+  "health_check": {
+    "status": "healthy",
+    "endpoint": "http://54.210.123.45/health",
+    "response_time_ms": 38,
+    "attempts": 1,
+    "checked_at": "2026-08-03T10:20:30Z"
+  },
+  "cost_estimate": {
+    "estimated_monthly_cost": 31.97,
+    "currency": "USD",
+    "breakdown": {
+      "ec2_compute": 24.67,
+      "ebs_volume": 5.3,
+      "data_transfer": 2.0
+    }
+  },
+  "approval": {
+    "status": "approved",
+    "approved_by": "deploy@example.com",
+    "approved_at": "2026-08-03T10:15:00Z"
+  },
+  "metadata": {
+    "deployed_at": "2026-08-03T10:20:30Z",
+    "deployed_by": "deployops-agent",
+    "compute_type": "ec2",
+    "strategy": "rolling"
+  }
+}

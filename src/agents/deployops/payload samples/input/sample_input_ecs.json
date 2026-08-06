@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.1",
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "compute_type": "ecs",
+  "artifacts": {
+    "terraform": {
+      "files": {
+        "main.tf": "terraform {\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"\n    }\n  }\n}\n\nprovider \"aws\" {\n  region = var.region\n}\n\nresource \"aws_ecs_cluster\" \"this\" {\n  name = \"devguard-cluster\"\n}\n\nresource \"aws_ecs_task_definition\" \"this\" {\n  family                   = \"app-service\"\n  requires_compatibilities = [\"FARGATE\"]\n  network_mode              = \"awsvpc\"\n  cpu                       = \"512\"\n  memory                    = \"1024\"\n\n  container_definitions = jsonencode([\n    {\n      name  = \"app-service\"\n      image = \"devguard-app:sha-a1b2c3d\"\n      portMappings = [\n        {\n          containerPort = 8080\n          protocol      = \"tcp\"\n        }\n      ]\n    }\n  ])\n}\n\nresource \"aws_ecs_service\" \"this\" {\n  name            = \"app-service\"\n  cluster         = aws_ecs_cluster.this.id\n  task_definition = aws_ecs_task_definition.this.arn\n  desired_count   = 1\n  launch_type     = \"FARGATE\"\n}",
+        "variables.tf": "variable \"region\" {\n  description = \"AWS region to deploy into\"\n  type        = string\n  default     = \"us-east-1\"\n}\n\nvariable \"environment\" {\n  description = \"Deployment environment\"\n  type        = string\n  default     = \"dev\"\n}",
+        "outputs.tf": "output \"cluster_name\" {\n  value = aws_ecs_cluster.this.name\n}\n\noutput \"service_name\" {\n  value = aws_ecs_service.this.name\n}\n\noutput \"task_definition_arn\" {\n  value = aws_ecs_task_definition.this.arn\n}"
+      },
+      "variables": {
+        "region": "us-east-1",
+        "environment": "dev"
+      }
+    },
+    "dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+    "docker_image": {
+      "name": "devguard-app",
+      "tag": "sha-a1b2c3d"
+    },
+    "source_code": "/tmp/repo_550e8400-e29b-41d4-a716-446655440000"
+  },
+  "aws_config": {
+    "region": "us-east-1",
+    "estimated_monthly_cost": {
+      "amount": 14.42,
+      "currency": "USD",
+      "range_min": 11.53,
+      "range_max": 17.3
+    },
+    "ecs": {
+      "cluster": "devguard-cluster",
+      "service_name": "app-service",
+      "task_cpu": "512",
+      "task_memory": "1024"
+    },
+    "lambda": null,
+    "ec2": null
+  },
+  "deployment_config": {
+    "ecs": {
+      "strategy": "rolling",
+      "health_check_path": "/health",
+      "health_check_port": 8080,
+      "timeout_minutes": 5,
+      "min_healthy_percent": 50,
+      "max_percent": 200
+    },
+    "lambda": null,
+    "ec2": null
+  },
+  "approval": {
+    "status": "pending",
+    "approved_by": null
+  },
+  "enrichment": {
+    "architecture_explanation": "Mock response: modules 5-10 (load scenarios, finops, llm enrichment) are not built yet.",
+    "cost_summary": "estimated_monthly_cost is real (module 4, cost_estimator), but a human-readable summary of it needs module 10 (llm_enrichment), not built yet.",
+    "finops_justification": "Mock response: modules 5-10 (load scenarios, finops, llm enrichment) are not built yet.",
+    "enrichment_source": "fallback"
+  }
+}

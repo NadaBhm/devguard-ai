@@ -1,0 +1,36 @@
+{
+  "status": "success",
+  "app_name": "todo-app",
+  "environment": "dev",
+  "cluster": "todo-app-cluster",
+  "services": [
+    {
+      "name": "todo-app-dev-frontend",
+      "status": "ACTIVE",
+      "running": 1,
+      "desired": 1,
+      "deployments": [
+        {
+          "task_definition": "arn:aws:ecs:us-east-1:420435662988:task-definition/todo-app-dev-frontend:15",
+          "status": "PRIMARY"
+        },
+        {
+          "task_definition": "arn:aws:ecs:us-east-1:420435662988:task-definition/todo-app-dev-frontend:14",
+          "status": "ACTIVE"
+        }
+      ]
+    },
+    {
+      "name": "todo-app-dev-backend",
+      "status": "ACTIVE",
+      "running": 1,
+      "desired": 1,
+      "deployments": [
+        {
+          "task_definition": "arn:aws:ecs:us-east-1:420435662988:task-definition/todo-app-dev-backend:27",
+          "status": "PRIMARY"
+        }
+      ]
+    }
+  ]
+}

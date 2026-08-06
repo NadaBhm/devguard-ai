@@ -23,7 +23,7 @@ services:
       retries: 10
 
   # -----------------------------------------------------------------------
-  # Redis - Celery broker/backend - T-1.4
+  # Redis - app cache / progress pub-sub - T-1.4
   # -----------------------------------------------------------------------
   redis:
     image: redis:7-alpine
@@ -65,7 +65,7 @@ services:
       - ../.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-devguard}:${POSTGRES_PASSWORD:-devguard}@postgres:5432/${POSTGRES_DB:-devguard}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/2
       QDRANT_URL: http://qdrant:6333
     ports:
       - "${BACKEND_PORT:-8000}:8000"
@@ -81,29 +81,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    volumes:
-      - ../src:/app/src
-
-  # -----------------------------------------------------------------------
-  # Celery worker - async agent execution - T-1.4 / T-2.14
-  # -----------------------------------------------------------------------
-  celery_worker:
-    build:
-      context: ..
-      dockerfile: infrastructure/Dockerfile.celery
-    container_name: devguard-celery-worker
-    restart: unless-stopped
-    env_file:
-      - ../.env
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-devguard}:${POSTGRES_PASSWORD:-devguard}@postgres:5432/${POSTGRES_DB:-devguard}
-      REDIS_URL: redis://redis:6379/0
-      QDRANT_URL: http://qdrant:6333
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     volumes:
       - ../src:/app/src
 

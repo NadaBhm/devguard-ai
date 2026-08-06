@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://devguard-ai.dev/schemas/orchestrator-input-schema.json",
   "title": "DevGuard AI - Orchestrator State Schema",
-  "description": "Schema global de l'etat du workflow LangGraph. codesec_result contient le payload EXACT de l'agent CodeSec (Nada). deployops_result aligne avec deployops-mock-schema.json (Oussema).",
+  "description": "Schema global de l'etat du workflow LangGraph. codesec_result contient le payload EXACT de l'agent CodeSec (Nada). deployops_result aligne avec deployops-mock-schema.json (Oussema). infracost_result est la forme CANONIQUE: l'agent InfraCost (Karim) emet ses propres modeles Pydantic (Money.amount, files{}, projected_monthly_savings...), normalises vers cette forme par orchestrator/agent_adapters.normalize_infracost_result() avant d'entrer dans l'etat.",
   "type": "object",
   "properties": {
     "job_id": {
@@ -29,9 +29,10 @@
         "health_checking",
         "completed",
         "failed",
-        "rolled_back"
+        "rolled_back",
+        "rejected"
       ],
-      "description": "Etat courant du workflow"
+      "description": "Etat courant du workflow. 'rejected' = un humain a refuse une gate (distinct de 'failed', qui signale une panne technique)."
     },
     "created_at": {
       "type": "string",
@@ -42,7 +43,10 @@
       "format": "date-time"
     },
     "codesec_result": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "PAYLOAD EXACT de l'agent CodeSec (Nada) - voir codesec-mock-schema.json",
       "properties": {
         "job_id": {
@@ -52,7 +56,10 @@
           "type": "string"
         },
         "error": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "repo_url": {
           "type": "string"
@@ -394,8 +401,11 @@
       }
     },
     "infracost_result": {
-      "type": ["object", "null"],
-      "description": "Resultat de l'agent InfraCost (Karim)",
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Resultat de l'agent InfraCost (Karim), NORMALISE. Voir agent_adapters.normalize_infracost_result: l'agent emet cost_estimate.amount (Money), generated_terraform.files{}, optimizations[].projected_monthly_savings. Ces noms sont traduits vers ceux ci-dessous avant d'entrer dans l'etat.",
       "properties": {
         "architecture_recommendation": {
           "type": "string",
@@ -423,6 +433,10 @@
             },
             "plan_passed": {
               "type": "boolean"
+            },
+            "variables": {
+              "type": "object",
+              "description": "Valeurs de variables utilisees pour le rendu."
             }
           }
         },
@@ -430,7 +444,8 @@
           "type": "object",
           "properties": {
             "monthly_cost_usd": {
-              "type": "number"
+              "type": "number",
+              "description": "Total mensuel. Normalise depuis Money.amount."
             },
             "currency": {
               "type": "string",
@@ -448,9 +463,27 @@
                     "type": "number"
                   }
                 }
-              }
+              },
+              "description": "Detail par service. VIDE avec le vrai agent InfraCost: son pipeline ne produit qu'un total, pas de repartition par service. A demander a Karim si le rapport doit l'afficher."
+            },
+            "range_min": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Borne basse de l'incertitude (Money.range_min)."
+            },
+            "range_max": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Borne haute de l'incertitude (Money.range_max)."
             }
-          }
+          },
+          "required": [
+            "monthly_cost_usd"
+          ]
         },
         "load_scenarios": {
           "type": "array",
@@ -458,18 +491,18 @@
             "type": "object",
             "properties": {
               "users": {
-                "type": "integer",
-                "enum": [
-                  1000,
-                  10000,
-                  100000
-                ]
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Niveau de charge simule (1000 / 10000 / 100000)."
               },
               "estimated_monthly_cost_usd": {
                 "type": "number"
               },
               "scaling_assumptions": {
-                "type": "string"
+                "type": "string",
+                "description": "Prose. Rendue depuis le dict `sizing` de l'agent si absente."
               }
             }
           }
@@ -481,18 +514,20 @@
             "properties": {
               "strategy": {
                 "type": "string",
-                "enum": [
-                  "spot_instances",
-                  "reserved_instances",
-                  "graviton",
-                  "savings_plan"
-                ]
+                "description": "Strategie d'optimisation. Valeurs usuelles: spot_instances, reserved_instances, graviton, savings_plan. PAS une enum fermee: le nom vient d'un LLM cote InfraCost, normalize_infracost_result mappe ce qu'il reconnait et laisse passer le reste plutot que de perdre la recommandation."
               },
               "projected_savings_usd": {
                 "type": "number"
               },
               "description": {
                 "type": "string"
+              },
+              "selected": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "True si retenue par le FinOps optimizer."
               }
             }
           }
@@ -511,10 +546,17 @@
             }
           }
         }
-      }
+      },
+      "required": [
+        "architecture_recommendation",
+        "cost_estimate"
+      ]
     },
     "deployops_result": {
-      "type": ["object", "null"],
+      "type": [
+        "object",
+        "null"
+      ],
       "description": "Resultat de l'agent DeployOps (Oussema) - ALIGNE avec deployops-mock-schema.json",
       "properties": {
         "job_id": {
@@ -913,8 +955,47 @@
               "description": "Duree totale du pipeline en secondes"
             }
           }
+        },
+        "html_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Chemin du HTML rendu sur disque."
+        },
+        "pdf_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Chemin du PDF, null si WeasyPrint indisponible."
+        },
+        "formats_available": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Formats reellement produits. HTML toujours; PDF best-effort."
+        },
+        "render_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Duree de rendu (NFR: < 10s)."
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Renseigne si le rendu a echoue (format='json')."
         }
       }
+    },
+    "__interrupt__": {
+      "type": "array",
+      "description": "Ajoute par LangGraph quand le workflow est en pause sur une gate humaine. ATTENTION: en memoire, les elements sont des OBJETS Python langgraph.types.Interrupt (avec .value et .id), PAS des dicts JSON - l'etat retourne par graph.invoke() n'est donc pas serialisable tel quel. Le backend les retire/aplatit avant persistance (cf. src/backend/persistence.py). Aucune contrainte sur les items ici, precisement parce que leur type differe entre l'etat en memoire et sa forme serialisee. Declare car additionalProperties=false ferait autrement echouer la validation de tout job en attente d'approbation - soit l'essentiel de sa duree de vie."
     }
   },
   "required": [

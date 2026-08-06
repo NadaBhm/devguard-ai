@@ -50,11 +50,21 @@ def mock_codesec_agent_impl(state: OrchestratorState) -> OrchestratorState:
     state["orchestrator_metadata"]["nodes_executed"].append("codesec_agent")
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    state["codesec_result"] = {
-        "job_id": state["job_id"],
+    state["codesec_result"] = build_mock_codesec_result(state["job_id"], state["repo_url"])
+
+    score = state["codesec_result"]["security_score"]["score"]
+    grade = state["codesec_result"]["security_score"]["grade"]
+    logger.info(f"[{state['job_id']}] CodeSec complete. Score: {score}/100 (Grade {grade})")
+    return state
+
+
+def build_mock_codesec_result(job_id: str, repo_url: str) -> dict:
+    """Sprint 1 mock CodeSec payload (matches Nada's codesec-mock-schema.json)."""
+    return {
+        "job_id": job_id,
         "status": "completed",
         "error": None,
-        "repo_url": state["repo_url"],
+        "repo_url": repo_url,
         "repo_metadata": {
             "name": "repo-name",
             "branch": "main",
@@ -214,7 +224,7 @@ def mock_codesec_agent_impl(state: OrchestratorState) -> OrchestratorState:
                     "source_file": "requirements.txt"
                 }
             ],
-            "download_url": f"/api/jobs/{state['job_id']}/sbom/download"
+            "download_url": f"/api/jobs/{job_id}/sbom/download"
         },
         "security_score": {
             "score": 68,
@@ -244,11 +254,6 @@ def mock_codesec_agent_impl(state: OrchestratorState) -> OrchestratorState:
         }
     }
 
-    score = state["codesec_result"]["security_score"]["score"]
-    grade = state["codesec_result"]["security_score"]["grade"]
-    logger.info(f"[{state['job_id']}] CodeSec complete. Score: {score}/100 (Grade {grade})")
-    return state
-
 
 def mock_infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
     """MOCK: InfraCost Agent (Karim). Sprint 1 mock data."""
@@ -259,7 +264,15 @@ def mock_infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
     state["orchestrator_metadata"]["nodes_executed"].append("infracost_agent")
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    state["infracost_result"] = {
+    state["infracost_result"] = build_mock_infracost_result()
+
+    logger.info(f"[{state['job_id']}] InfraCost complete. Est. cost: ${state['infracost_result']['cost_estimate']['monthly_cost_usd']}/mo")
+    return state
+
+
+def build_mock_infracost_result() -> dict:
+    """Sprint 1 mock InfraCost payload (orchestrator InfraCostResult shape)."""
+    return {
         "architecture_recommendation": "ecs_fargate",
         "justification": "FastAPI app with moderate traffic -> ECS Fargate for serverless containers without EC2 management",
         "generated_terraform": {
@@ -293,9 +306,6 @@ def mock_infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
         ],
     }
 
-    logger.info(f"[{state['job_id']}] InfraCost complete. Est. cost: ${state['infracost_result']['cost_estimate']['monthly_cost_usd']}/mo")
-    return state
-
 
 def mock_deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
     """
@@ -310,9 +320,17 @@ def mock_deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     # ALIGNED with deployops-mock-schema.json - all required fields present
-    state["deployops_result"] = {
+    state["deployops_result"] = build_mock_deployops_result(state["job_id"])
+
+    logger.info(f"[{state['job_id']}] DeployOps complete. URL: {state['deployops_result']['deployed_url']}")
+    return state
+
+
+def build_mock_deployops_result(job_id: str) -> dict:
+    """Sprint 1 mock DeployOps payload (aligned with deployops-mock-schema.json)."""
+    return {
         # ===== CHAMPS REQUIS par deployops-mock-schema.json =====
-        "job_id": state["job_id"],  # <- REQUIS: doit matcher l'orchestrateur
+        "job_id": job_id,  # <- REQUIS: doit matcher l'orchestrateur
         "deployment_status": "success",
         "deployed_url": "https://devguard-app-123456.us-east-1.elb.amazonaws.com",
         "health_check": {
@@ -371,9 +389,6 @@ def mock_deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
         }
     }
 
-    logger.info(f"[{state['job_id']}] DeployOps complete. URL: {state['deployops_result']['deployed_url']}")
-    return state
-
 
 # =============================================================================
 # SECTION 5: HEALTH CHECK & REPORT
@@ -404,54 +419,61 @@ def health_check_impl(state: OrchestratorState) -> OrchestratorState:
 
 
 def generate_report_impl(state: OrchestratorState) -> OrchestratorState:
-    """Generate final report with all agent results. CDC: US-2.2.6"""
-    logger.info(f"[{state['job_id']}] Generating final report...")
+    """
+    Generate the final report. CDC: US-2.2.6, T-3.12
+
+    Rendering (Jinja2 -> HTML, WeasyPrint -> PDF) lives in report.py; this
+    node only updates state and keeps the failure non-fatal: the pipeline has
+    already done its real work by this point, and losing a completed
+    deployment's results because a PDF library is missing would be absurd.
+    """
+    from .report import generate_report
+
+    job_id = state["job_id"]
+    logger.info(f"[{job_id}] Generating final report...")
 
     state["orchestrator_metadata"]["current_node"] = "generate_report"
     state["orchestrator_metadata"]["nodes_executed"].append("generate_report")
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    codesec = state.get("codesec_result") or {}
-    summary = codesec.get("summary", {})
-    vuln_count = summary.get("sast_findings_count", 0)
-    critical_count = summary.get("total_critical", 0)
-
-    infracost = state.get("infracost_result") or {}
-    cost_estimate = infracost.get("cost_estimate", {})
-    monthly_cost = cost_estimate.get("monthly_cost_usd", 0.0)
-
-    deployops = state.get("deployops_result")
-    deploy_status = deployops.get("deployment_status", "not_deployed") if deployops else "not_deployed"
-
-    recommendations = []
-    security_score = codesec.get("security_score", {})
-    if security_score and security_score.get("recommendations"):
-        recommendations.extend(security_score["recommendations"])
-
-    optimizations = infracost.get("optimizations", [])
-    if optimizations:
-        recommendations.extend([opt.get("description", "") for opt in optimizations])
-
     start_time = datetime.fromisoformat(state["orchestrator_metadata"]["start_time"])
     elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
     state["orchestrator_metadata"]["elapsed_seconds"] = elapsed
 
-    state["final_report"] = {
-        "format": "html",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "download_url": None,
-        "summary": {
-            "total_vulnerabilities": vuln_count,
-            "critical_count": critical_count,
-            "estimated_monthly_cost_usd": monthly_cost,
-            "deployment_status": deploy_status,
-            "recommendations": recommendations,
-            "pipeline_duration_seconds": elapsed,
-        },
-    }
+    try:
+        state["final_report"] = generate_report(state)
+        logger.info(
+            f"[{job_id}] Report ready: "
+            f"{state['final_report'].get('formats_available')} in {elapsed:.2f}s"
+        )
+    except Exception as exc:
+        logger.error(f"[{job_id}] Report generation failed: {exc}")
+        state["final_report"] = {
+            "format": "json",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "download_url": None,
+            "error": str(exc),
+            "summary": _summary_fallback(state, elapsed),
+        }
 
-    logger.info(f"[{state['job_id']}] Report generated in {elapsed:.2f}s.")
     return state
+
+
+def _summary_fallback(state: OrchestratorState, elapsed: float) -> dict:
+    """Minimal summary used when full rendering fails."""
+    codesec = state.get("codesec_result") or {}
+    summary = codesec.get("summary", {})
+    infracost = state.get("infracost_result") or {}
+    deployops = state.get("deployops_result")
+
+    return {
+        "total_vulnerabilities": summary.get("sast_findings_count", 0),
+        "critical_count": summary.get("total_critical", 0),
+        "estimated_monthly_cost_usd": (infracost.get("cost_estimate") or {}).get("monthly_cost_usd", 0),
+        "deployment_status": deployops.get("deployment_status", "not_deployed") if deployops else "not_deployed",
+        "recommendations": (codesec.get("security_score") or {}).get("recommendations", []),
+        "pipeline_duration_seconds": elapsed,
+    }
 
 
 # =============================================================================
@@ -504,3 +526,107 @@ def route_after_health_check(state: OrchestratorState) -> str:
     if state.get("status") == "completed":
         return "generate_report"
     return "end"
+
+
+# =============================================================================
+# SECTION 7: REAL AGENT NODES (T-2.17 / T-3.16)
+# =============================================================================
+# Replacements for the three mock_*_agent_impl nodes above. They delegate
+# every agent-specific detail to agent_adapters.py, so this file stays about
+# workflow, not about whose method is async and whose payload key is spelled
+# differently.
+#
+# These nodes are SYNCHRONOUS even though two of the three agents are async.
+# LangGraph's graph.invoke() cannot run async nodes, and making the graph
+# async would force run_workflow()/resume_workflow() to become async too,
+# breaking the backend that calls them from sync FastAPI endpoints. The
+# async agent calls are therefore driven through agent_adapters.run_sync().
+#
+# In mock mode (the default, see agent_adapters._flag) they return exactly the
+# same payloads as the mock nodes, so the graph behaves identically until the
+# agent branches are merged and DEVGUARD_REAL_* is switched on.
+
+def codesec_agent_impl(state: OrchestratorState) -> OrchestratorState:
+    """CodeSec node. CDC: US-1.1.1 to US-1.1.6"""
+    from .agent_adapters import call_codesec, run_sync
+
+    job_id = state["job_id"]
+    logger.info(f"[{job_id}] CodeSec node starting for: {state['repo_url']}")
+
+    state["status"] = "analyzing"
+    state["orchestrator_metadata"]["current_node"] = "codesec_agent"
+    state["orchestrator_metadata"]["nodes_executed"].append("codesec_agent")
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    state["codesec_result"] = run_sync(call_codesec(state["repo_url"], job_id))
+
+    score = state["codesec_result"].get("security_score", {}).get("score", 0)
+    grade = state["codesec_result"].get("security_score", {}).get("grade", "N/A")
+    logger.info(f"[{job_id}] CodeSec complete. Score: {score}/100 (Grade {grade})")
+    return state
+
+
+def infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
+    """InfraCost node. CDC: US-2.1.1 to US-2.1.6, T-3.16"""
+    from .agent_adapters import call_infracost, run_sync
+
+    job_id = state["job_id"]
+    logger.info(f"[{job_id}] InfraCost node starting")
+
+    state["status"] = "infra_generating"
+    state["orchestrator_metadata"]["current_node"] = "infracost_agent"
+    state["orchestrator_metadata"]["nodes_executed"].append("infracost_agent")
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    state["infracost_result"] = run_sync(call_infracost(state["codesec_result"] or {}, job_id))
+
+    cost = state["infracost_result"].get("cost_estimate", {}).get("monthly_cost_usd", 0)
+    logger.info(f"[{job_id}] InfraCost complete. Est. cost: ${cost}/mo")
+    return state
+
+
+def deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
+    """
+    DeployOps node. CDC: US-1.2.1 to US-1.2.4
+
+    Builds the DeployOps payload from InfraCost's stashed `_deploy_inputs`
+    (see agent_adapters.call_infracost) and the gate-2 approval, then hands
+    it to the agent.
+    """
+    from .agent_adapters import (
+        call_deployops,
+        run_sync,
+        translate_infracost_to_deploy_payload,
+        use_real_deployops,
+    )
+
+    job_id = state["job_id"]
+    logger.info(f"[{job_id}] DeployOps node starting")
+
+    state["status"] = "deploying"
+    state["orchestrator_metadata"]["current_node"] = "deployops_agent"
+    state["orchestrator_metadata"]["nodes_executed"].append("deployops_agent")
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    gate_2 = state["human_gates"]["gate_2_pre_deployops"]
+    approved_by = gate_2.get("approved_by") or "unknown"
+
+    deploy_payload: dict = {}
+    if use_real_deployops():
+        deploy_inputs = (state.get("infracost_result") or {}).get("_deploy_inputs")
+        if not deploy_inputs:
+            # Real DeployOps against mock InfraCost: there is nothing real to
+            # deploy. Better to say so than to ship an empty payload.
+            raise ValueError(
+                "DeployOps is in REAL mode but InfraCost produced no "
+                "_deploy_inputs (InfraCost is probably still mocked). Set "
+                "DEVGUARD_REAL_INFRACOST=1 as well, or turn DeployOps back to mock."
+            )
+        deploy_payload = translate_infracost_to_deploy_payload(
+            job_id, deploy_inputs, approved_by=approved_by
+        )
+
+    state["deployops_result"] = run_sync(call_deployops(deploy_payload, job_id))
+
+    logger.info(f"[{job_id}] DeployOps complete. URL: {state['deployops_result'].get('deployed_url')}")
+    return state

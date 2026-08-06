@@ -38,6 +38,28 @@ CHANGELOG:
           that shadowed the built-in str() and caused a TypeError on every node call)
 - v1.0.4: Fixed _human_gate_2_impl to use status "rejected" instead of "failed"
           on human rejection, consistent with _human_gate_1_impl
+- v1.2.1: InfraCost output is normalized to the documented schema shape
+          (agent_adapters.normalize_infracost_result). The real agent emits
+          Money.amount / files{} / projected_monthly_savings, none of which
+          match orchestrator-input-schema.json - unnormalized, the final
+          report told stakeholders the deployment cost $0/month. Schema also
+          gained "rejected" status and __interrupt__, both of which the
+          orchestrator already produced but the schema rejected.
+- v1.2.0: Final report generation (T-3.12 / US-2.2.6) in report.py.
+          Jinja2 -> HTML always; WeasyPrint -> PDF best-effort (its native
+          libs are absent on some dev machines). Inline SVG architecture
+          diagram, no extra dependency. Secret VALUES are never rendered.
+- v1.1.0: Chat with conversation memory (T-3.10 / T-3.11, US-2.2.5) in
+          chat.py. Combines orchestrator job results with Nada's RAG repo
+          retrieval; memory is orchestrator-side because lib/rag is stateless.
+- v1.0.8: Retry with exponential backoff on agent nodes (T-2.18 / US-2.2.4).
+          Transient failures retry up to 3x (1s/2s); deterministic ones
+          (ValueError/TypeError/KeyError) escalate immediately; each attempt
+          runs on an isolated state copy so partial mutations can't leak.
+- v1.0.7: Agent nodes now go through agent_adapters.py (T-2.17 / T-3.16).
+          The three mock_*_agent_impl functions are kept in nodes.py and are
+          still what the adapters return in mock mode (the default), so
+          behavior is unchanged until DEVGUARD_REAL_* is switched on.
 - v1.0.6: Split into state.py / error_handlers.py / human_gates.py / nodes.py.
           graph.py now only wires the graph together and exposes the public API.
           No behavior change - pure refactor.
@@ -54,13 +76,13 @@ from typing import Optional
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from .state import OrchestratorState, create_initial_state
+from .state import GRAPH_VERSION, OrchestratorState, create_initial_state
 from .error_handlers import safe_node_wrapper
 from .human_gates import human_gate_1_impl, human_gate_2_impl
 from .nodes import (
-    mock_codesec_agent_impl,
-    mock_infracost_agent_impl,
-    mock_deployops_agent_impl,
+    codesec_agent_impl,
+    infracost_agent_impl,
+    deployops_agent_impl,
     health_check_impl,
     generate_report_impl,
     route_after_codesec,
@@ -91,7 +113,7 @@ def build_orchestrator_graph() -> StateGraph:
 
     builder.add_node(
         "codesec_agent",
-        lambda s: safe_node_wrapper(mock_codesec_agent_impl, "codesec_agent", s)
+        lambda s: safe_node_wrapper(codesec_agent_impl, "codesec_agent", s)
     )
     builder.add_node(
         "human_gate_1",
@@ -99,7 +121,7 @@ def build_orchestrator_graph() -> StateGraph:
     )
     builder.add_node(
         "infracost_agent",
-        lambda s: safe_node_wrapper(mock_infracost_agent_impl, "infracost_agent", s)
+        lambda s: safe_node_wrapper(infracost_agent_impl, "infracost_agent", s)
     )
     builder.add_node(
         "human_gate_2",
@@ -107,7 +129,7 @@ def build_orchestrator_graph() -> StateGraph:
     )
     builder.add_node(
         "deployops_agent",
-        lambda s: safe_node_wrapper(mock_deployops_agent_impl, "deployops_agent", s)
+        lambda s: safe_node_wrapper(deployops_agent_impl, "deployops_agent", s)
     )
     builder.add_node(
         "health_check",
@@ -155,7 +177,7 @@ def build_orchestrator_graph() -> StateGraph:
     memory = MemorySaver()
     graph = builder.compile(checkpointer=memory)
 
-    logger.info("Orchestrator graph compiled successfully (v1.0.6).")
+    logger.info("Orchestrator graph compiled successfully (v%s).", GRAPH_VERSION)
     return graph
 
 
@@ -277,7 +299,7 @@ def resume_workflow(thread_id: str, resume_data: dict) -> OrchestratorState:
         raise
 
 
-# =============================================================================
+# ===============   ==============================================================
 # SECTION 9: MAIN (for testing)
 # =============================================================================
 
@@ -286,7 +308,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("DevGuard AI - Orchestrator Test Run")
-    print("Version: 1.0.6 (split into state/error_handlers/human_gates/nodes)")
+    print(f"Version: {GRAPH_VERSION} (adapters + retry + chat + report)")
     print("=" * 60)
 
     state = create_initial_state(test_repo)

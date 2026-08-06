@@ -1,0 +1,231 @@
+{#
+  DevGuard AI - final report template (T-3.12 / US-2.2.6)
+
+  Rendered by orchestrator/report.py. Kept as a standalone file rather than a
+  string inside the module so the frontend owner can restyle it without
+  touching Python.
+
+  Styling constraints: this same HTML is what WeasyPrint turns into the PDF,
+  and WeasyPrint supports neither flexbox nor grid. Layout therefore uses
+  tables and block elements only - a flex-based redesign would look fine in
+  the browser and collapse in the PDF.
+#}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DevGuard AI - Report - {{ repo_name }}</title>
+<style>
+  @page { size: A4; margin: 18mm 15mm; @bottom-center { content: "DevGuard AI - page " counter(page); font-size: 9pt; color: #888; } }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; color: #1f2933; font-size: 11pt; line-height: 1.5; margin: 0; }
+  h1 { font-size: 22pt; margin: 0 0 4px; color: #0b3d5c; }
+  h2 { font-size: 14pt; margin: 26px 0 10px; padding-bottom: 5px; border-bottom: 2px solid #e4e7eb; color: #0b3d5c; }
+  h3 { font-size: 11.5pt; margin: 16px 0 6px; color: #334e68; }
+  .subtitle { color: #627d98; margin: 0 0 18px; font-size: 10pt; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 10pt; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid #e4e7eb; vertical-align: top; }
+  th { background: #f5f7fa; font-weight: 600; color: #334e68; }
+  .kpi td { border: none; padding: 0 12px 0 0; width: 25%; }
+  .kpi .value { font-size: 20pt; font-weight: 700; color: #0b3d5c; display: block; }
+  .kpi .label { font-size: 8.5pt; color: #627d98; text-transform: uppercase; letter-spacing: .4px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 8.5pt; font-weight: 600; color: #fff; }
+  .sev-critical { background: #b91c1c; } .sev-high { background: #d97706; }
+  .sev-medium  { background: #ca8a04; } .sev-low  { background: #65a30d; }
+  .sev-info { background: #64748b; }
+  .ok { color: #15803d; font-weight: 600; } .ko { color: #b91c1c; font-weight: 600; }
+  .muted { color: #829ab1; font-style: italic; }
+  code { background: #f5f7fa; padding: 1px 4px; border-radius: 3px; font-size: 9pt; }
+  ul { margin: 6px 0; padding-left: 18px; } li { margin-bottom: 3px; }
+  .footer { margin-top: 30px; padding-top: 10px; border-top: 1px solid #e4e7eb; font-size: 8.5pt; color: #829ab1; }
+</style>
+</head>
+<body>
+
+<h1>DevGuard AI &mdash; Analysis Report</h1>
+<p class="subtitle">
+  <strong>{{ repo_url }}</strong><br>
+  Job <code>{{ job_id }}</code> &middot; generated {{ generated_at }} &middot; pipeline completed in {{ duration_seconds }}s
+</p>
+
+<table class="kpi"><tr>
+  <td><span class="value">{{ security_score }}/100</span><span class="label">Security score (grade {{ security_grade }})</span></td>
+  <td><span class="value">{{ total_findings }}</span><span class="label">Total findings</span></td>
+  <td><span class="value">${{ monthly_cost }}</span><span class="label">Est. monthly cost</span></td>
+  <td><span class="value {{ 'ok' if deployment_status == 'success' else 'ko' }}">{{ deployment_status }}</span><span class="label">Deployment</span></td>
+</tr></table>
+
+<h2>1. Architecture</h2>
+{{ architecture_svg }}
+<p>
+  Recommended compute: <strong>{{ architecture }}</strong>.
+  {% if architecture_justification %}{{ architecture_justification }}{% endif %}
+</p>
+
+<h2>2. Security analysis</h2>
+{% if has_codesec %}
+<h3>Detected stack</h3>
+<table>
+  <tr><th>Language</th><td>{{ stack.primary_language }}</td>
+      <th>Frameworks</th><td>{{ stack.frameworks or "none detected" }}</td></tr>
+  <tr><th>Database</th><td>{{ stack.database or "none" }}</td>
+      <th>Container</th><td>{{ "yes" if stack.container else "no" }}</td></tr>
+</table>
+
+<h3>Findings by severity</h3>
+<table>
+  <tr><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Info</th></tr>
+  <tr>
+    <td><span class="badge sev-critical">{{ severity.critical }}</span></td>
+    <td><span class="badge sev-high">{{ severity.high }}</span></td>
+    <td><span class="badge sev-medium">{{ severity.medium }}</span></td>
+    <td><span class="badge sev-low">{{ severity.low }}</span></td>
+    <td><span class="badge sev-info">{{ severity.info }}</span></td>
+  </tr>
+</table>
+
+{% if sast_findings %}
+<h3>Static analysis (top {{ sast_findings|length }})</h3>
+<table>
+  <tr><th>Severity</th><th>Issue</th><th>Location</th><th>Remediation</th></tr>
+  {% for f in sast_findings %}
+  <tr>
+    <td><span class="badge sev-{{ f.severity }}">{{ f.severity }}</span></td>
+    <td>{{ f.message }}{% if f.cwe_id %}<br><span class="muted">{{ f.cwe_id }}</span>{% endif %}</td>
+    <td><code>{{ f.file }}:{{ f.line }}</code></td>
+    <td>{{ f.remediation or "-" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if secrets %}
+<h3>Hardcoded secrets ({{ secrets|length }})</h3>
+<table>
+  <tr><th>Type</th><th>Location</th><th>Remediation</th></tr>
+  {% for s in secrets %}
+  <tr><td>{{ s.type }}</td><td><code>{{ s.file }}:{{ s.line }}</code></td><td>{{ s.remediation or "-" }}</td></tr>
+  {% endfor %}
+</table>
+{# Secret values are deliberately never rendered - this report gets emailed
+   and archived. Only type and location, so it stays actionable without
+   becoming a credential leak of its own. #}
+<p class="muted">Secret values are intentionally omitted from this report.</p>
+{% endif %}
+
+{% if vulnerable_packages %}
+<h3>Vulnerable dependencies ({{ vulnerable_packages|length }})</h3>
+<table>
+  <tr><th>Package</th><th>Installed</th><th>Fixed in</th><th>CVE</th><th>Severity</th></tr>
+  {% for p in vulnerable_packages %}
+  <tr><td>{{ p.package }}</td><td><code>{{ p.installed_version }}</code></td>
+      <td><code>{{ p.fixed_version }}</code></td><td>{{ p.cve_id }}</td>
+      <td><span class="badge sev-{{ p.severity }}">{{ p.severity }}</span></td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% else %}
+<p class="muted">No security analysis available for this job.</p>
+{% endif %}
+
+<h2>3. Cost estimate</h2>
+{% if has_infracost %}
+<h3>Monthly breakdown</h3>
+<table>
+  <tr><th>Service</th><th>Monthly cost (USD)</th></tr>
+  {% for item in cost_breakdown %}
+  <tr><td>{{ item.service }}</td><td>${{ item.monthly_cost_usd }}</td></tr>
+  {% endfor %}
+  <tr><th>Total</th><th>${{ monthly_cost }}</th></tr>
+</table>
+
+{% if load_scenarios %}
+<h3>Load scenarios</h3>
+<table>
+  <tr><th>Users</th><th>Est. monthly cost</th><th>Scaling assumptions</th></tr>
+  {% for s in load_scenarios %}
+  <tr><td>{{ "{:,}".format(s.users) if s.users else "-" }}</td>
+      <td>${{ s.estimated_monthly_cost_usd }}</td>
+      <td>{{ s.scaling_assumptions or "-" }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if optimizations %}
+<h3>Optimization opportunities</h3>
+<ul>
+  {% for o in optimizations %}
+  <li><strong>{{ o.strategy or o.name or "option" }}</strong>
+      {% if o.projected_savings_usd %}&mdash; save ~${{ o.projected_savings_usd }}/month{% endif %}
+      {% if o.description %}<br>{{ o.description }}{% endif %}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if region_comparison %}
+<h3>Region comparison</h3>
+<table>
+  <tr><th>Region</th><th>Monthly cost (USD)</th></tr>
+  {% for r in region_comparison %}
+  <tr><td>{{ r.region }}</td><td>${{ r.monthly_cost_usd }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% else %}
+<p class="muted">No cost estimate available for this job.</p>
+{% endif %}
+
+<h2>4. Deployment</h2>
+{% if has_deployops %}
+<table>
+  <tr><th>Status</th><td class="{{ 'ok' if deployment_status == 'success' else 'ko' }}">{{ deployment_status }}</td></tr>
+  <tr><th>URL</th><td>{% if deployed_url %}<a href="{{ deployed_url }}">{{ deployed_url }}</a>{% else %}<span class="muted">not deployed</span>{% endif %}</td></tr>
+  <tr><th>Health check</th><td class="{{ 'ok' if health_check_passed else 'ko' }}">{{ "passed" if health_check_passed else "failed" }}</td></tr>
+  {% if rollback_triggered %}<tr><th>Rollback</th><td class="ko">triggered &mdash; {{ rollback_reason }}</td></tr>{% endif %}
+  {% if terraform_outputs %}
+  {% for key, value in terraform_outputs.items() %}
+  <tr><th>{{ key }}</th><td><code>{{ value }}</code></td></tr>
+  {% endfor %}
+  {% endif %}
+</table>
+{% else %}
+<p class="muted">This job was not deployed.</p>
+{% endif %}
+
+<h2>5. Approval trail</h2>
+<table>
+  <tr><th>Gate</th><th>Decision</th><th>By</th><th>When</th><th>Comment</th></tr>
+  {% for gate in approvals %}
+  <tr>
+    <td>{{ gate.name }}</td>
+    <td class="{{ 'ok' if gate.approved else 'ko' }}">{{ gate.decision }}</td>
+    <td>{{ gate.approved_by or "-" }}</td>
+    <td>{{ gate.approved_at or "-" }}</td>
+    <td>{{ gate.comment or "-" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+{% if recommendations %}
+<h2>6. Recommendations</h2>
+<ul>{% for r in recommendations %}<li>{{ r }}</li>{% endfor %}</ul>
+{% endif %}
+
+{% if errors %}
+<h2>7. Incidents during the pipeline</h2>
+<table>
+  <tr><th>Node</th><th>Attempt</th><th>Error</th><th>Recovered</th></tr>
+  {% for e in errors %}
+  <tr><td>{{ e.node }}</td><td>{{ e.attempt }}/{{ e.max_attempts }}</td>
+      <td>{{ e.message }}</td>
+      <td class="{{ 'ok' if e.resolved else 'ko' }}">{{ "yes" if e.resolved else "no" }}</td></tr>
+  {% endfor %}
+</table>
+<p class="muted">Recovered incidents were retried successfully and did not affect the outcome.</p>
+{% endif %}
+
+<p class="footer">
+  Generated by DevGuard AI (orchestrator v{{ graph_version }}) on {{ generated_at }}.
+  Nodes executed: {{ nodes_executed }}.
+</p>
+
+</body>
+</html>

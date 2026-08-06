@@ -299,13 +299,19 @@ class TestGenerateReport:
         assert "recommendations" in summary
         assert "pipeline_duration_seconds" in summary
 
-    def test_report_format_html(self, initial_state):
+    def test_report_format(self, initial_state):
+        """
+        Since T-3.12 the node actually renders files, so "format" reports what
+        was produced: "pdf" when WeasyPrint's native libs are available,
+        "html" otherwise (and "json" if rendering failed entirely). Asserting
+        a hard "html" here would fail on machines that CAN make a PDF.
+        """
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         initial_state = mock_deployops_agent_impl(initial_state)
         initial_state = health_check_impl(initial_state)
         result = generate_report_impl(initial_state)
-        assert result["final_report"]["format"] == "html"
+        assert result["final_report"]["format"] in ("pdf", "html")
 
 
 # =============================================================================

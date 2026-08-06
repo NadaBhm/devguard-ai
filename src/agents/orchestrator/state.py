@@ -21,6 +21,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional, TypedDict
 
+# Single source of truth for the orchestrator version. graph.py imports this
+# rather than repeating the string, so the value reported in state metadata
+# and the value logged at compile time can never drift apart again (they did:
+# state said 1.0.5 while the graph said 1.0.7).
+GRAPH_VERSION = "1.2.1"
+
 
 # =============================================================================
 # SECTION 1: STATE DEFINITIONS
@@ -240,7 +246,7 @@ def create_initial_state(repo_url: str) -> OrchestratorState:
         },
         "error_log": [],
         "orchestrator_metadata": {
-            "graph_version": "1.0.5",
+            "graph_version": GRAPH_VERSION,
             "start_time": now,
             "elapsed_seconds": 0.0,
             "current_node": "start",

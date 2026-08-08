@@ -420,6 +420,16 @@ class CodeSecAgent:
         # Set SBOM download URL
         results["sbom"].download_url = f"/api/jobs/{job_id}/sbom/download"
 
+        # Capture Dockerfile content for downstream agents (InfraCost /
+        # DeployOps need it to build the image; the clone is removed below).
+        dockerfile_content: str | None = None
+        try:
+            dockerfile_path = next(repo_path.rglob("Dockerfile"), None)
+            if dockerfile_path and dockerfile_path.is_file() and dockerfile_path.stat().st_size <= 256 * 1024:
+                dockerfile_content = dockerfile_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            dockerfile_content = None
+
         # Cleanup clone directory
         try:
             shutil.rmtree(repo_path, ignore_errors=True)

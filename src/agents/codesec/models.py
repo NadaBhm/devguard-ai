@@ -386,5 +386,6 @@ class CodeSecResult(BaseModel):
     secrets: list[Secret] = Field(default_factory=list)
     dependencies: DependenciesResult = Field(default_factory=DependenciesResult)
     dockerfile_findings: list[DockerfileFinding] = Field(default_factory=list)
+    dockerfile_content: str | None = Field(default=None)
     sbom: SBOM = Field(default_factory=lambda: SBOM(serial_number=""))
     security_score: SecurityScore = Field(...)

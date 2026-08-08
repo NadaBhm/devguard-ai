@@ -70,6 +70,7 @@ def _calculate_category_score(
     findings: list[Any],
     severity_attr: str = "severity",
     max_score: int = 100,
+    executed: bool = True,
 ) -> int:
     """
     Calculate a category score with capped penalties and diminishing returns.
@@ -79,7 +80,14 @@ def _calculate_category_score(
         - Repeated findings of same severity decay by 25% each (0.75^n).
         - Total penalty is capped at 70% of max_score.
         - Score never drops below 15 (avoids score=0 from noise).
+
+    `executed=False` means the scanner in question never actually ran (its
+    tool is missing or disabled), so an empty finding list is NOT evidence of
+    a clean category. Such a category contributes 0 rather than full marks,
+    preventing a misleadingly high score when scanners are unavailable.
     """
+    if not executed:
+        return 0
     if not findings:
         return max_score
 
@@ -287,6 +295,7 @@ def calculate_score(
     dockerfile_findings: list[DockerfileFinding],
     sbom: SBOM,
     stack_detection: StackDetection,
+    scanner_coverage: dict[str, bool] | None = None,
 ) -> SecurityScore:
     """
     Calculate the overall security score and grade.
@@ -295,13 +304,25 @@ def calculate_score(
         - Category penalties are capped and floored (realistic scores).
         - Grade thresholds: A≥95, B≥85, C≥70, D≥50, F<50.
         - Perfect score (100) requires: zero findings + complete stack + quality SBOM.
+
+    `scanner_coverage` reports whether each scanner actually executed (its
+    tool was installed and enabled). Categories that did not run contribute
+    0 — an empty result is not treated as 'clean' — and the perfect-score
+    gate requires every scanner to have executed.
     """
+    coverage = scanner_coverage or {}
+    sast_executed = coverage.get("sast", True)
+    secrets_executed = coverage.get("secrets", True)
+    deps_executed = coverage.get("dependencies", True)
+    dockerfile_executed = coverage.get("dockerfile", True)
+    sbom_executed = coverage.get("sbom", True)
+
     # Per-category scores (0-100 each)
-    sast_score = _calculate_category_score(sast_findings, max_score=100)
-    secrets_score = _calculate_category_score(secrets, max_score=100)
-    deps_score = _calculate_category_score(vulnerable_packages, max_score=100)
-    dockerfile_score = _calculate_category_score(dockerfile_findings, max_score=100)
-    sbom_score = _calculate_sbom_score(sbom)
+    sast_score = _calculate_category_score(sast_findings, max_score=100, executed=sast_executed)
+    secrets_score = _calculate_category_score(secrets, max_score=100, executed=secrets_executed)
+    deps_score = _calculate_category_score(vulnerable_packages, max_score=100, executed=deps_executed)
+    dockerfile_score = _calculate_category_score(dockerfile_findings, max_score=100, executed=dockerfile_executed)
+    sbom_score = _calculate_sbom_score(sbom) if sbom_executed else 0
     stack_score = _calculate_stack_detection_score(stack_detection)
 
     # Apply weights
@@ -325,14 +346,17 @@ def calculate_score(
 
     # Perfect score gate: must truly be clean AND well-detected
     has_no_findings = not (sast_findings or secrets or vulnerable_packages or dockerfile_findings)
+    has_no_scan_unexecuted = (
+        sast_executed and secrets_executed and deps_executed and dockerfile_executed
+    )
     has_complete_stack = (
         bool(stack_detection.primary_language and stack_detection.primary_language != "unknown")
         and stack_detection.confidence >= 0.95
         and bool(stack_detection.frameworks and stack_detection.frameworks != "unknown")
     )
-    has_quality_sbom = sbom_score >= 90
+    has_quality_sbom = sbom_score >= 90 and sbom_executed
 
-    if has_no_findings and has_complete_stack and has_quality_sbom:
+    if has_no_findings and has_no_scan_unexecuted and has_complete_stack and has_quality_sbom:
         total_score = 100
         breakdown = ScoreBreakdown(
             sast=SCORING_WEIGHTS["sast"],

@@ -42,7 +42,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .config import DEFAULT_CLONE_DIR, GITHUB_URL_PATTERN, MAX_FILES_PER_REPO, MAX_REPO_SIZE_MB
+from .config import (
+    DEFAULT_CLONE_DIR,
+    GITHUB_URL_PATTERN,
+    MAX_FILES_PER_REPO,
+    MAX_REPO_SIZE_MB,
+    TOOLS,
+)
 from .models import (
     CodeSecResult,
     DependenciesResult,
@@ -402,6 +408,18 @@ class CodeSecAgent:
         score_start = datetime.now(timezone.utc)
         _add_phase("scoring", PhaseStatus.RUNNING, started=score_start)
         try:
+            def _tool_installed(name: str) -> bool:
+                tool = TOOLS.get(name)
+                return bool(tool and tool.enabled and shutil.which(tool.executable))
+
+            coverage = {
+                "sast": _tool_installed("semgrep") or _tool_installed("bandit"),
+                "secrets": _tool_installed("gitleaks") or _tool_installed("trufflehog"),
+                "dependencies": _tool_installed("pip_audit") or _tool_installed("safety") or _tool_installed("trivy"),
+                "dockerfile": _tool_installed("hadolint") or _tool_installed("trivy") or _tool_installed("checkov"),
+                "sbom": _tool_installed("cyclonedx") or _tool_installed("syft"),
+            }
+
             security_score = calculate_score(
                 sast_findings=results["sast"],
                 secrets=results["secrets"],
@@ -409,6 +427,7 @@ class CodeSecAgent:
                 dockerfile_findings=results["dockerfile"],
                 sbom=results["sbom"],
                 stack_detection=stack_result,
+                scanner_coverage=coverage,
             )
             score_end = datetime.now(timezone.utc)
             _add_phase("scoring", PhaseStatus.COMPLETED, started=score_start, completed=score_end)

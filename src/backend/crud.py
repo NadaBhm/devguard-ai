@@ -18,6 +18,7 @@ def create_user(db: Session, user: schemas.UserCreate):
         hashed_password=hashed_password,
         first_name=user.first_name,
         last_name=user.last_name,
+        is_verified=True,
     )
     db.add(db_user)
     db.commit()

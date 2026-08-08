@@ -61,9 +61,51 @@ def _parse_secret_match(secret_type: str, match: re.Match[str], file_path: Path,
     )
 
 
+def _is_likely_false_positive(secret: Secret) -> bool:
+    """
+    Filter out secrets that are clearly examples or documentation.
+    Returns True if the secret should be excluded.
+    """
+    file_lower = secret.file.lower() if secret.file else ""
+    
+    # 1. Exclude documentation files
+    if file_lower.endswith((".md", ".markdown", ".rst", ".txt")):
+        return True
+    if any(name in file_lower for name in ("readme", "contributing", "changelog", "license", "notice")):
+        return True
+    
+    # 2. Exclude placeholder values
+    placeholder_patterns = [
+        "your_", "YOUR_", "example", "EXAMPLE", "sample", "SAMPLE",
+        "demo", "DEMO", "fake", "FAKE", "test", "TEST", "placeholder",
+        "PLACEHOLDER", "xxxx", "XXXX", "****", "####", "changeme",
+        "CHANGE_ME", "insert_", "my_", "YOUR-API-KEY", "YOUR_API_KEY",
+        "sk_test_", "pk_test_", "sk_live_", "pk_live_",
+    ]
+    
+    value = (secret.value_preview or "").lower()
+    secret_type = (secret.type or "").lower()
+    
+    if any(pattern.lower() in value for pattern in placeholder_patterns):
+        return True
+    if any(pattern.lower() in secret_type for pattern in placeholder_patterns):
+        return True
+    
+    return False
+
+
 def _run_regex_fallback(repo_path: Path) -> list[Secret]:
+    """Regex-based secret detection with doc-file exclusions."""
     findings: list[Secret] = []
-    files = find_files(repo_path, patterns=("*",), exclude=("*.pyc", "*.lock", "node_modules/*", "venv/*", ".venv/*"))
+    files = find_files(
+        repo_path,
+        patterns=("*",),
+        exclude=(
+            "*.pyc", "*.lock", "node_modules/*", "venv/*", ".venv/*",
+            "*.md", "*.markdown", "*.rst", "*.txt",
+            "README*", "CONTRIBUTING*", "CHANGELOG*", "LICENSE*", "NOTICE*",
+        ),
+    )
     for file_path in files:
         content = read_file_safe(file_path, max_size_mb=1)
         if not content:
@@ -87,17 +129,21 @@ def run_secrets_scan(repo_path: Path) -> list[Secret]:
 
     # External tool fallback: try GitLeaks if installed.
     try:
-        result = run_subprocess(["gitleaks", "detect", "--no-git", "--report-format=json", "--path=."] , cwd=repo_path, timeout=60)
-        if result.returncode == 0 and result.stdout:
+        result = run_subprocess(
+            ["gitleaks", "detect", "--no-git", "--report-format=json", "--path=."],
+            cwd=repo_path,
+            timeout=60,
+        )
+        # FIX: gitleaks returns 1 when leaks found, 0 when clean
+        if result.returncode in (0, 1) and result.stdout:
             try:
                 import json
-
                 data = json.loads(result.stdout)
                 for item in data:
                     findings = item.get("finding", item)
                     file_path = findings.get("file") or findings.get("File") or ""
                     line = int(findings.get("line", 1)) if findings.get("line") else 1
-                    value = findings.get("line") if findings.get("line") else None
+                    value = findings.get("match") or findings.get("secret") or findings.get("line") or None
                     all_findings.append(
                         Secret(
                             type=findings.get("rule", "secret"),
@@ -115,7 +161,11 @@ def run_secrets_scan(repo_path: Path) -> list[Secret]:
     except ScannerError:
         logger.info("GitLeaks not available; using regex fallback for secrets detection.")
 
+    # Fallback regex only if gitleaks found nothing or failed
     if not all_findings:
         all_findings = _run_regex_fallback(repo_path)
+
+    # Post-filter false positives (README, placeholders, examples)
+    all_findings = [s for s in all_findings if not _is_likely_false_positive(s)]
 
     return all_findings

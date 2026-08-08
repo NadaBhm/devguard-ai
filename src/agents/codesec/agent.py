@@ -65,7 +65,6 @@ from .scanners.sbom import generate_sbom
 from .scanners.scorer import calculate_score
 from .scanners.secrets import run_secrets_scan
 from .scanners.stack_detection import detect_stack, get_language_breakdown
-from lib.rag.ingestion import ingest_repo
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +327,7 @@ class CodeSecAgent:
         try:
             repo_path = self._clone_repo(validated_url, job_id)
             try:
+                from lib.rag.ingestion import ingest_repo
                 ingest_repo(repo_path, job_id=job_id)
             except Exception as exc:
                 logger.warning("RAG ingestion failed (non-critical): %s", exc)

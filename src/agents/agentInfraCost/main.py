@@ -1,127 +1,94 @@
-"""CLI entry point for the InfraCost agent (Agent 2).
+"""FastAPI entry point for the InfraCost Agent.
 
-Usage:
-    python main.py run <input.json> [--region us-east-1] [--environment dev] [--out output.json]
-    python main.py approve <output.json> --approved-by user@example.com [--out approved.json]
-    python main.py reject <output.json> [--out rejected.json]
-
-Can be run directly (`python main.py ...`) or as a module
-(`python -m agentInfraCost.main ...` with src/agents on PYTHONPATH, or
-`python -m src.agents.agentInfraCost.main ...` with the repo root on
-PYTHONPATH) — the bootstrap below makes relative imports work either way.
+Exposes ``POST /agents/infracost/generate``, thinly wrapping module 9's
+``run_pipeline`` (input validation through output assembly, with fallback
+LLM enrichment if ``GEMINI_API_KEY`` is unset). All business logic lives in
+``core/``; this file only translates HTTP in and out.
 """
 
 from __future__ import annotations
 
-if __package__ in (None, ""):  # `python main.py` direct execution
-    import sys as _sys
-    from pathlib import Path as _Path
-
-    _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
-    __package__ = "agentInfraCost"
-
-import argparse
-import json
 import logging
-import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 from dotenv import load_dotenv
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
-from .core.pipeline import DEFAULT_ENVIRONMENT, DEFAULT_REGION, apply_approval, run_pipeline
-from .models.exceptions import InfraCostAgentError
-from .models.output_models import InfraCostOutput
+from core.input_validator import (
+    InputValidationError,
+    InvalidStatusError,
+    LowConfidenceError,
+    MalformedInputError,
+    MissingStackDetectionError,
+)
+from core.pipeline import PipelineStageError, run_pipeline
+from models.output_schema import InfraCostOutput
 
-# Loads GEMINI_API_KEY (if present) from a .env file next to this script,
-# regardless of the current working directory the CLI is invoked from.
-# Never errors if the file is absent — llm_enrichment.py's fallback mode
-# covers that case.
+# Loads GEMINI_API_KEY / OPENROUTER_API_KEY / OPENROUTER_MODEL / AWS
+# credentials from a .env file sitting next to this script, if one exists
+# -- regardless of which terminal starts the server, so these don't need
+# retyping as $env: variables every session. .env itself is gitignored;
+# never committed, never something Claude is given directly. Silently does
+# nothing if the file is absent -- every one of these is optional, each
+# with its own automatic fallback (see core/llm_provider.py,
+# core/aws_pricing_client.py, core/llm_enrichment.py). Must run before any
+# request comes in, but the modules above only read these vars at call
+# time (never at import time), so it's safe to load after importing them.
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+# INFO is off by default in Python (root logger starts at WARNING); without
+# this, core.llm_architecture_advisor's and core.llm_deployment_advisor's
+# "an LLM chose ..." log lines would silently never appear anywhere,
+# leaving no way to see -- while the server runs -- whether a request
+# actually used the LLM or fell back to the deterministic path.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger(__name__)
 
 
-def _write_output(output: InfraCostOutput, out_path: Optional[str]) -> None:
-    """Serializes `output` to JSON (respecting the "lambda" field alias) and
-    either writes it to `out_path` or prints it to stdout."""
-    payload = output.model_dump(mode="json", by_alias=True)
-    text = json.dumps(payload, indent=2)
-    if out_path:
-        Path(out_path).write_text(text, encoding="utf-8")
-        logger.info("Wrote output to %s", out_path)
-    else:
-        print(text)
+class UTF8JSONResponse(JSONResponse):
+    """Same as FastAPI's default JSONResponse, but declares ``charset=utf-8``
+    explicitly in Content-Type. JSON is UTF-8 by spec (RFC 8259) regardless,
+    and most clients assume that correctly — but Windows PowerShell 5.1's
+    ``Invoke-RestMethod``/``Invoke-WebRequest`` defaults to Latin-1 when no
+    charset is stated, mangling every accented character in ``enrichment``'s
+    French text. Being explicit costs nothing for compliant clients and
+    fixes this one for free.
+    """
+
+    media_type = "application/json; charset=utf-8"
 
 
-def _cmd_run(args: argparse.Namespace) -> int:
-    raw = json.loads(Path(args.input).read_text(encoding="utf-8"))
-    output = run_pipeline(raw, region=args.region, environment=args.environment)
-    _write_output(output, args.out)
-    return 0
+app = FastAPI(title="InfraCost Agent", default_response_class=UTF8JSONResponse)
+
+_ERROR_CODES: dict[type[InputValidationError], str] = {
+    InvalidStatusError: "invalid_status",
+    MissingStackDetectionError: "missing_stack_detection",
+    MalformedInputError: "malformed_input",
+    LowConfidenceError: "low_confidence",
+}
 
 
-def _cmd_approve(args: argparse.Namespace) -> int:
-    raw = json.loads(Path(args.output_file).read_text(encoding="utf-8"))
-    output = InfraCostOutput.model_validate(raw)
-    approved = apply_approval(output, approved=True, approved_by=args.approved_by)
-    _write_output(approved, args.out)
-    return 0
+@app.post("/agents/infracost/generate", response_model=InfraCostOutput)
+def generate(raw: dict[str, Any] = Body(...)) -> InfraCostOutput:
+    """Run the full InfraCost pipeline on a repo analysis payload.
 
-
-def _cmd_reject(args: argparse.Namespace) -> int:
-    raw = json.loads(Path(args.output_file).read_text(encoding="utf-8"))
-    output = InfraCostOutput.model_validate(raw)
-    rejected = apply_approval(output, approved=False)
-    _write_output(rejected, args.out)
-    return 0
-
-
-def build_parser() -> argparse.ArgumentParser:
-    """Builds the CLI's argument parser (kept separate from main() for testability)."""
-    parser = argparse.ArgumentParser(
-        prog="agentInfraCost", description="DevGuard AI InfraCost Agent (Agent 2)"
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    run_parser = subparsers.add_parser(
-        "run", help="Run the pipeline on an Agent 1 output JSON file"
-    )
-    run_parser.add_argument("input", help="Path to the repo-analysis agent's output JSON")
-    run_parser.add_argument("--region", default=DEFAULT_REGION)
-    run_parser.add_argument("--environment", default=DEFAULT_ENVIRONMENT)
-    run_parser.add_argument("--out", default=None, help="Write output JSON here instead of stdout")
-    run_parser.set_defaults(func=_cmd_run)
-
-    approve_parser = subparsers.add_parser(
-        "approve", help="Approve a pending InfraCostOutput JSON file"
-    )
-    approve_parser.add_argument("output_file", help="Path to a pending InfraCostOutput JSON file")
-    approve_parser.add_argument("--approved-by", required=True)
-    approve_parser.add_argument("--out", default=None)
-    approve_parser.set_defaults(func=_cmd_approve)
-
-    reject_parser = subparsers.add_parser(
-        "reject", help="Reject a pending InfraCostOutput JSON file"
-    )
-    reject_parser.add_argument("output_file", help="Path to a pending InfraCostOutput JSON file")
-    reject_parser.add_argument("--out", default=None)
-    reject_parser.set_defaults(func=_cmd_reject)
-
-    return parser
-
-
-def main(argv: Optional[list[str]] = None) -> int:
-    """CLI entry point. Returns a process exit code (0 success, 1 failure)."""
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    Raises:
+        HTTPException: 422, if module 1's validation rejects the payload —
+            the body names which rule failed (``error``), why
+            (``message``), and which job (``job_id``). 500, if any other
+            stage fails — the body names exactly which one (``stage``).
+    """
     try:
-        return args.func(args)
-    except InfraCostAgentError as exc:
-        logger.error("%s", exc)
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+        return run_pipeline(raw)
+    except InputValidationError as exc:
+        error_code = _ERROR_CODES.get(type(exc), "invalid_input")
+        raise HTTPException(
+            status_code=422,
+            detail={"error": error_code, "message": str(exc), "job_id": exc.job_id},
+        ) from exc
+    except PipelineStageError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "pipeline_stage_failed", "stage": exc.stage, "message": str(exc)},
+        ) from exc

@@ -1,9 +1,7 @@
 output "instance_ids" {
-  description = "IDs of the deployed EC2 instances"
-  value       = aws_instance.app[*].id
+  value = aws_instance.this[*].id
 }
 
-output "instance_public_ips" {
-  description = "Public IP addresses of the deployed EC2 instances"
-  value       = aws_instance.app[*].public_ip
+output "public_ips" {
+  value = aws_instance.this[*].public_ip
 }

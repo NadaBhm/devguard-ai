@@ -1,21 +1,13 @@
-"""Module 4: computes the estimated monthly AWS cost for a compute decision.
+"""Step 4 of the InfraCost pipeline: estimate the monthly AWS cost.
 
-Uses the static price table in data/aws_pricing.json (loaded once and cached
-in memory — no network calls, no live AWS Pricing API). Every result is
-returned as a range (amount ± 20%), never a single number, per the output
-contract.
-
-Pricing table structure this module depends on (see data/aws_pricing.json):
-  - ecs_fargate.{x86,arm_graviton}.{vcpu_per_hour,memory_gb_per_hour}
-  - ecs_fargate.hours_per_month
-  - lambda.{x86,arm_graviton}.{gb_second,requests_per_million}
-  - ec2_on_demand_hourly[instance_type]   (Graviton instances are separate
-    keys here, e.g. "t4g.small" / "m7g.large" — there is no "arm_graviton"
-    sub-block for EC2, unlike ecs_fargate/lambda. `use_graviton` is
-    therefore a no-op for the EC2 formula: the instance_type string alone
-    determines the price, and picking a Graviton instance type is a
-    decision made upstream (decision_engine / finops_optimizer), not here.)
-  - ebs_gp3_per_gb_month
+Prices come from the live AWS Pricing API when it's reachable (module
+``aws_pricing_client``, cached ~24h), falling back to the static, offline
+table in ``data/aws_pricing.json`` whenever it isn't — missing credentials,
+no network, boto3 not installed, a transient AWS error. Either way, the
+formulas below apply a different one per ``compute_type``. A stack
+detection and a sizing decision can only ever produce an estimate, never
+an exact bill, so this always returns a range (``amount`` ± 20%), never a
+single figure.
 """
 
 from __future__ import annotations
@@ -24,203 +16,185 @@ import json
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Final, Literal
 
-from ..models.exceptions import PricingDataError
-from ..models.internal_models import CostEstimateResult, DecisionResult
+from pydantic import BaseModel
+
+from core.decision_engine import DecisionResult
+from models.output_schema import Money
 
 logger = logging.getLogger(__name__)
 
-_PRICING_FILE = Path(__file__).resolve().parent.parent / "data" / "aws_pricing.json"
+_PRICING_FILE: Final[Path] = Path(__file__).resolve().parent.parent / "data" / "aws_pricing.json"
 
-RANGE_UNCERTAINTY_PCT = 0.20
+_UNCERTAINTY_MARGIN: Final[float] = 0.20
 
-# Baseline usage assumptions used only when a caller (typically pipeline.py,
-# for the initial pre-scenario estimate) does not supply real Lambda usage
-# figures. scenario_simulator.py (module 5) overrides these with figures
-# derived from each 1K/10K/100K user-load tier instead of relying on them.
-DEFAULT_LAMBDA_MONTHLY_INVOCATIONS = 100_000
-DEFAULT_LAMBDA_AVG_DURATION_SECONDS = 0.2
+# AWS Fargate convention: CPU is expressed in units where 1024 = 1 vCPU;
+# memory is expressed in MiB.
+_FARGATE_CPU_UNITS_PER_VCPU: Final[int] = 1024
+_MB_PER_GB: Final[int] = 1024
+_EC2_HOURS_PER_MONTH: Final[int] = 730
+
+ArchFamily = Literal["x86", "arm_graviton"]
+
+
+class CostEstimationError(Exception):
+    """Base class for cost_estimator failures."""
+
+
+class MissingPricingDataError(CostEstimationError):
+    """A pricing key the formula needs is absent from aws_pricing.json.
+
+    Never guessed or defaulted — the caller must update the pricing table.
+    """
+
+    def __init__(self, key_path: str) -> None:
+        self.key_path = key_path
+        super().__init__(f"Missing pricing data for '{key_path}' in {_PRICING_FILE.name}")
+
+
+class CostEstimationContext(BaseModel):
+    """Traffic/workload assumptions the pricing formulas need but the
+    architecture decision doesn't carry.
+
+    These describe one baseline, moderate-traffic month. Module 5
+    (``scenario_simulator``) will override them with real per-scenario
+    numbers (1K / 10K / 100K users) rather than relying on these defaults.
+    """
+
+    avg_duration_seconds: float = 1.0
+    monthly_invocations: int = 100_000
+    ebs_gb: int = 20
 
 
 @lru_cache(maxsize=1)
-def load_pricing_table() -> dict[str, Any]:
-    """Loads and caches data/aws_pricing.json for the lifetime of the process.
+def _load_static_pricing_data() -> dict[str, Any]:
+    """The offline, manually-maintained table — read from disk exactly once
+    per process, always available, never a network call."""
+    return json.loads(_PRICING_FILE.read_text(encoding="utf-8"))
 
-    Cached via lru_cache so the file is read from disk at most once, no
-    matter how many times an estimate is requested.
+
+def _load_pricing_data() -> dict[str, Any]:
+    """Live AWS prices when reachable, the static table otherwise.
+
+    Deliberately NOT ``@lru_cache``-d itself: the live path manages its own
+    ~24h cache internally (``aws_pricing_client``), so calling this again
+    later in a long-running process can pick up a refreshed price. The
+    static path underneath is still cached (see
+    ``_load_static_pricing_data``), so falling back never re-reads the file
+    from disk.
+
+    Never raises: any failure in the live path — boto3 not installed, no
+    AWS credentials, no network, an AWS-side error — logs a warning and
+    returns the static table instead, exactly as this function behaved
+    before the live integration existed.
     """
-    with _PRICING_FILE.open(encoding="utf-8") as f:
-        return json.load(f)
+    static = _load_static_pricing_data()
+    try:
+        from core.aws_pricing_client import fetch_live_pricing_data
+
+        return fetch_live_pricing_data(fallback=static)
+    except Exception:
+        logger.warning("Live AWS pricing unavailable; using the static table.", exc_info=True)
+        return static
 
 
-def _get(table: dict[str, Any], *path: str) -> Any:
-    """Walks `path` into `table`, raising PricingDataError naming the exact
-    missing key instead of guessing or extrapolating a value."""
-    node: Any = table
-    for i, key in enumerate(path):
+def _get_pricing(data: dict[str, Any], *path: str) -> Any:
+    """Walk `data` through `path`; raise MissingPricingDataError naming the
+    full dotted path if any key along the way is absent."""
+    node: Any = data
+    for key in path:
         if not isinstance(node, dict) or key not in node:
-            raise PricingDataError(".".join(path[: i + 1]))
+            raise MissingPricingDataError(".".join(path))
         node = node[key]
     return node
 
 
-def _to_range(amount: float) -> CostEstimateResult:
-    """Wraps a computed amount into the ± RANGE_UNCERTAINTY_PCT contract shape."""
-    return CostEstimateResult(
+def _select_arch_family(decision: DecisionResult) -> ArchFamily:
+    """Pick which pricing tier applies.
+
+    For EC2, the instance type name already encodes the family — AWS's own
+    naming convention marks Graviton/ARM instances with a trailing "g" on
+    the generation number (t4g, m6g, m7g, ...). For ECS Fargate and Lambda,
+    the decision carries no such signal, so we default to arm_graviton:
+    AWS's recommended baseline for any standard containerized or
+    interpreted workload, absent a known reason not to use it.
+    """
+    if decision.compute_type == "ec2":
+        instance_family = str(decision.sizing["instance_type"]).split(".")[0]
+        return "arm_graviton" if instance_family.endswith("g") else "x86"
+    return "arm_graviton"
+
+
+def _estimate_ecs(
+    decision: DecisionResult, pricing: dict[str, Any], context: CostEstimationContext
+) -> float:
+    arch = _select_arch_family(decision)
+    vcpu_per_hour = _get_pricing(pricing, "ecs_fargate", arch, "vcpu_per_hour")
+    memory_gb_per_hour = _get_pricing(pricing, "ecs_fargate", arch, "memory_gb_per_hour")
+    hours_per_month = _get_pricing(pricing, "ecs_fargate", "hours_per_month")
+
+    nb_vcpu = int(decision.sizing["task_cpu"]) / _FARGATE_CPU_UNITS_PER_VCPU
+    ram_gb = int(decision.sizing["task_memory"]) / _MB_PER_GB
+
+    return (vcpu_per_hour * nb_vcpu + memory_gb_per_hour * ram_gb) * hours_per_month
+
+
+def _estimate_lambda(
+    decision: DecisionResult, pricing: dict[str, Any], context: CostEstimationContext
+) -> float:
+    arch = _select_arch_family(decision)
+    gb_second = _get_pricing(pricing, "lambda", arch, "gb_second")
+    requests_per_million = _get_pricing(pricing, "lambda", arch, "requests_per_million")
+
+    memory_gb = int(decision.sizing["memory_mb"]) / _MB_PER_GB
+    compute_cost = gb_second * memory_gb * context.avg_duration_seconds * context.monthly_invocations
+    request_cost = requests_per_million * context.monthly_invocations / 1_000_000
+    return compute_cost + request_cost
+
+
+def _estimate_ec2(
+    decision: DecisionResult, pricing: dict[str, Any], context: CostEstimationContext
+) -> float:
+    instance_type = str(decision.sizing["instance_type"])
+    hourly_rate = _get_pricing(pricing, "ec2_on_demand_hourly", instance_type)
+    ebs_per_gb_month = _get_pricing(pricing, "ebs_gp3_per_gb_month")
+
+    compute_cost = hourly_rate * _EC2_HOURS_PER_MONTH
+    ebs_cost = ebs_per_gb_month * context.ebs_gb
+    return compute_cost + ebs_cost
+
+
+_ESTIMATORS = {
+    "ecs": _estimate_ecs,
+    "lambda": _estimate_lambda,
+    "ec2": _estimate_ec2,
+}
+
+
+def estimate_cost(decision: DecisionResult, context: CostEstimationContext | None = None) -> Money:
+    """Estimate the monthly AWS cost for a decided architecture.
+
+    Args:
+        decision: Module 2's output — names ``compute_type`` and its sizing.
+        context: Traffic/workload assumptions; defaults to one baseline
+            moderate-traffic month if omitted.
+
+    Returns:
+        A ``Money`` with ``amount`` plus a ±20% ``range_min``/``range_max``
+        — never a single exact figure.
+
+    Raises:
+        MissingPricingDataError: a pricing key the formula needs is absent
+            from ``data/aws_pricing.json``.
+    """
+    context = context or CostEstimationContext()
+    pricing = _load_pricing_data()
+    amount = _ESTIMATORS[decision.compute_type](decision, pricing, context)
+
+    return Money(
         amount=round(amount, 2),
         currency="USD",
-        range_min=round(amount * (1 - RANGE_UNCERTAINTY_PCT), 2),
-        range_max=round(amount * (1 + RANGE_UNCERTAINTY_PCT), 2),
+        range_min=round(amount * (1 - _UNCERTAINTY_MARGIN), 2),
+        range_max=round(amount * (1 + _UNCERTAINTY_MARGIN), 2),
     )
-
-
-def _hours_per_month(pricing: dict[str, Any]) -> float:
-    return float(_get(pricing, "ecs_fargate", "hours_per_month"))
-
-
-def estimate_ecs_cost(
-    *,
-    vcpu: float,
-    memory_gb: float,
-    use_graviton: bool = False,
-    pricing: Optional[dict[str, Any]] = None,
-) -> CostEstimateResult:
-    """Estimates monthly ECS Fargate cost for one task.
-
-    Formula: (vcpu_per_hour * vcpu + memory_gb_per_hour * memory_gb) * hours_per_month
-
-    :param vcpu: fractional vCPU count (e.g. 0.5 for 512 Fargate CPU units)
-    :param memory_gb: task memory in GB (e.g. 1.0 for 1024 MB)
-    :param use_graviton: selects the arm_graviton price sub-block instead of x86
-    """
-    table = pricing if pricing is not None else load_pricing_table()
-    arch = "arm_graviton" if use_graviton else "x86"
-    vcpu_per_hour = float(_get(table, "ecs_fargate", arch, "vcpu_per_hour"))
-    memory_gb_per_hour = float(_get(table, "ecs_fargate", arch, "memory_gb_per_hour"))
-    hours = _hours_per_month(table)
-
-    amount = (vcpu_per_hour * vcpu + memory_gb_per_hour * memory_gb) * hours
-    return _to_range(amount)
-
-
-def estimate_lambda_cost(
-    *,
-    memory_mb: int,
-    avg_duration_seconds: float,
-    monthly_invocations: int,
-    use_graviton: bool = False,
-    pricing: Optional[dict[str, Any]] = None,
-) -> CostEstimateResult:
-    """Estimates monthly AWS Lambda cost.
-
-    Formula: (gb_second * memory_gb * avg_duration_seconds * monthly_invocations)
-              + (requests_per_million * monthly_invocations / 1_000_000)
-
-    The AWS Lambda free tier (present in the pricing table under
-    lambda.free_tier) is intentionally NOT subtracted here: this function
-    computes gross compute + request cost, matching the formula given in
-    the module spec. Net-of-free-tier cost is a finops_optimizer concern,
-    not a cost_estimator one.
-
-    :param memory_mb: configured Lambda memory in MB
-    :param avg_duration_seconds: assumed average execution time per invocation
-    :param monthly_invocations: assumed number of invocations per month
-    :param use_graviton: selects the arm_graviton price sub-block instead of x86
-    """
-    table = pricing if pricing is not None else load_pricing_table()
-    arch = "arm_graviton" if use_graviton else "x86"
-    gb_second = float(_get(table, "lambda", arch, "gb_second"))
-    requests_per_million = float(_get(table, "lambda", arch, "requests_per_million"))
-
-    memory_gb = memory_mb / 1024.0
-    compute_cost = gb_second * memory_gb * avg_duration_seconds * monthly_invocations
-    request_cost = requests_per_million * monthly_invocations / 1_000_000
-    amount = compute_cost + request_cost
-    return _to_range(amount)
-
-
-def estimate_ec2_cost(
-    *,
-    instance_type: str,
-    instance_count: int = 1,
-    ebs_gb: Optional[float] = None,
-    pricing: Optional[dict[str, Any]] = None,
-) -> CostEstimateResult:
-    """Estimates monthly EC2 On-Demand cost.
-
-    Formula: ec2_on_demand_hourly[instance_type] * hours_per_month * instance_count
-              + (ebs_gp3_per_gb_month * ebs_gb * instance_count if ebs_gb is given)
-
-    :param instance_type: must exist as a key in ec2_on_demand_hourly;
-        raises PricingDataError naming the instance type if not covered.
-    :param instance_count: number of identical instances (fleet size)
-    :param ebs_gb: optional attached EBS gp3 volume size per instance, in GB
-    """
-    table = pricing if pricing is not None else load_pricing_table()
-    hourly_rate = _get(table, "ec2_on_demand_hourly", instance_type)
-    hours = _hours_per_month(table)
-
-    amount = float(hourly_rate) * hours * instance_count
-    if ebs_gb is not None:
-        ebs_rate = float(_get(table, "ebs_gp3_per_gb_month"))
-        amount += ebs_rate * ebs_gb * instance_count
-
-    return _to_range(amount)
-
-
-def estimate_cost(
-    decision: DecisionResult,
-    *,
-    use_graviton: bool = False,
-    lambda_avg_duration_seconds: Optional[float] = None,
-    lambda_monthly_invocations: Optional[int] = None,
-    ec2_ebs_gb: Optional[float] = None,
-) -> CostEstimateResult:
-    """Routes to the matching formula for decision.compute_type.
-
-    This is the entry point pipeline.py calls with decision_engine's output.
-    scenario_simulator.py (module 5) instead calls estimate_ecs_cost /
-    estimate_lambda_cost / estimate_ec2_cost directly with per-scenario
-    sizing and usage figures, since it recomputes sizing per load tier
-    rather than reusing decision_engine's single baseline decision.
-
-    :raises ValueError: if decision.compute_type has no matching sizing block
-        (indicates a bug upstream in decision_engine)
-    :raises PricingDataError: if a required price is missing from the table
-    """
-    if decision.compute_type == "ecs":
-        if decision.ecs is None:
-            raise ValueError("DecisionResult.compute_type='ecs' but decision.ecs is None")
-        vcpu = decision.ecs.task_cpu / 1024.0
-        memory_gb = decision.ecs.task_memory / 1024.0
-        return estimate_ecs_cost(vcpu=vcpu, memory_gb=memory_gb, use_graviton=use_graviton)
-
-    if decision.compute_type == "lambda":
-        if decision.lambda_ is None:
-            raise ValueError("DecisionResult.compute_type='lambda' but decision.lambda_ is None")
-        return estimate_lambda_cost(
-            memory_mb=decision.lambda_.memory_mb,
-            avg_duration_seconds=(
-                lambda_avg_duration_seconds
-                if lambda_avg_duration_seconds is not None
-                else DEFAULT_LAMBDA_AVG_DURATION_SECONDS
-            ),
-            monthly_invocations=(
-                lambda_monthly_invocations
-                if lambda_monthly_invocations is not None
-                else DEFAULT_LAMBDA_MONTHLY_INVOCATIONS
-            ),
-            use_graviton=use_graviton,
-        )
-
-    if decision.compute_type == "ec2":
-        if decision.ec2 is None:
-            raise ValueError("DecisionResult.compute_type='ec2' but decision.ec2 is None")
-        return estimate_ec2_cost(
-            instance_type=decision.ec2.instance_type,
-            instance_count=decision.ec2.instance_count,
-            ebs_gb=ec2_ebs_gb,
-        )
-
-    raise ValueError(f"Unknown compute_type: {decision.compute_type!r}")

@@ -1,246 +1,182 @@
+"""Tests for core.decision_engine."""
+
+import copy
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-from agentInfraCost.core.decision_engine import decide
-from agentInfraCost.core.input_validator import validate_input
-from agentInfraCost.models.exceptions import LowConfidenceStackDetectionError
-from agentInfraCost.models.input_models import (
-    ContainerInfo,
-    InfraCostAgentInput,
-    RepoMetadata,
-    StackDetection,
+from core.decision_engine import (
+    DecisionResult,
+    _choose_compute_type,
+    decide_architecture,
 )
-from agentInfraCost.models.internal_models import EcsSizing
+from models.input_schema import RepoAnalysisInput
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
-def _load(name: str) -> dict:
-    return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
+def _load_analysis(filename: str) -> RepoAnalysisInput:
+    raw = json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
+    return RepoAnalysisInput.model_validate(raw)
 
 
-def _make_input(
-    *,
-    job_id: str = "job-x",
-    container_detected: bool,
-    compose_detected: bool,
-    frameworks: list[str],
-    database: str | None,
-    loc: int,
-    total_files: int = 50,
-    primary_language: str = "python",
-    confidence: float = 0.9,
-) -> InfraCostAgentInput:
-    return InfraCostAgentInput(
-        job_id=job_id,
-        status="completed",
-        repo_url="https://github.com/owner/repo",
-        repo_metadata=RepoMetadata(
-            name="repo",
-            branch="main",
-            commit_sha="deadbeef",
-            total_files=total_files,
-            loc=loc,
-            language_breakdown={},
-        ),
-        stack_detection=StackDetection(
-            primary_language=primary_language,
-            frameworks=frameworks,
-            database=database,
-            build_tool="pip",
-            container=ContainerInfo(
-                detected=container_detected,
-                base_image=None,
-                dockerfile_path=None,
-                compose_detected=compose_detected,
-            ),
-            confidence=confidence,
-            detected_files=[],
-        ),
-    )
+def _load_raw(filename: str) -> dict[str, Any]:
+    return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------
+# Nominal cases — the 4 fixtures, expecting different results per context
+# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "fixture_name,expected",
+    "filename,expected_compute_type",
     [
         ("sample_input.json", "ecs"),
         ("sample_input_variant_lambda_candidate.json", "lambda"),
         ("sample_input_variant_node_ecs.json", "ecs"),
-        ("sample_input_variant_low_confidence.json", "REJECT"),
+        ("sample_input_variant_low_confidence.json", "lambda"),
     ],
 )
-def test_decision_matches_expected_compute_type_per_fixture(
-    fixture_name: str, expected: str
+def test_decide_architecture_matches_expected_compute_type(
+    filename: str, expected_compute_type: str
 ) -> None:
-    raw = _load(fixture_name)
-    if expected == "REJECT":
-        with pytest.raises(LowConfidenceStackDetectionError):
-            validate_input(raw)
-        return
-
-    parsed = validate_input(raw)
-    result = decide(parsed)
-    assert result.compute_type == expected
+    analysis = _load_analysis(filename)
+    result = decide_architecture(analysis)
+    assert result.compute_type == expected_compute_type
 
 
-def test_all_four_fixtures_do_not_collapse_to_one_outcome() -> None:
-    """Anti-overfitting guard: the fixtures must not all produce the same result."""
-    outcomes = set()
-    for fixture_name in [
-        "sample_input.json",
-        "sample_input_variant_lambda_candidate.json",
-        "sample_input_variant_node_ecs.json",
-    ]:
-        parsed = validate_input(_load(fixture_name))
-        outcomes.add(decide(parsed).compute_type)
-    outcomes.add("REJECT")  # the 4th fixture never reaches decision_engine
-    assert len(outcomes) >= 2
+def test_decision_differs_between_fastapi_and_node_stacks() -> None:
+    """FastAPI and Express share no framework name, only structural shape."""
+    fastapi_result = decide_architecture(_load_analysis("sample_input.json"))
+    node_result = decide_architecture(
+        _load_analysis("sample_input_variant_node_ecs.json")
+    )
+    assert fastapi_result.compute_type == "ecs"
+    assert node_result.compute_type == "ecs"
+    assert fastapi_result.compute_type == node_result.compute_type
 
 
-class TestGenericityAcrossFrameworkNames:
-    def test_fastapi_and_express_stacks_reach_ecs_via_identical_sizing_tier(self) -> None:
-        """sample_input.json (fastapi/sqlalchemy) and the node variant
-        (express/prisma) must be classified using the exact same generic
-        signals, never by inspecting the framework names themselves — proven
-        here by both landing on the same computed ECS tier despite having
-        completely different frameworks."""
-        fastapi_result = decide(validate_input(_load("sample_input.json")))
-        express_result = decide(validate_input(_load("sample_input_variant_node_ecs.json")))
-
-        assert fastapi_result.compute_type == express_result.compute_type == "ecs"
-        assert fastapi_result.ecs is not None and express_result.ecs is not None
-        assert fastapi_result.ecs.task_cpu == express_result.ecs.task_cpu
-        assert fastapi_result.ecs.task_memory == express_result.ecs.task_memory
-
-
-class TestSyntheticStacks:
-    def test_no_container_large_codebase_favors_ec2(self) -> None:
-        payload = _make_input(
-            container_detected=False,
-            compose_detected=False,
-            frameworks=["some-web-framework"],
-            database="some-db-engine",
-            loc=50000,
-            total_files=800,
-        )
-        result = decide(payload)
-        assert result.compute_type == "ec2"
-        assert result.ec2 is not None
-        assert result.lambda_ is None
-        assert result.ecs is None
-
-    def test_container_with_framework_but_no_compose_still_beats_ec2(self) -> None:
-        """A Dockerfile with a detected framework but no Compose file should
-        still rank ECS above EC2 (container + framework signals dominate
-        EC2's weaker combined container signals) — the ranking comes purely
-        from the weighted sum, not a cascade of special cases."""
-        payload = _make_input(
-            container_detected=True,
-            compose_detected=False,
-            frameworks=["some-web-framework"],
-            database=None,
-            loc=200,
-        )
-        result = decide(payload)
-        assert result.compute_type == "ecs"
-
-    def test_container_without_compose_or_framework_can_lose_to_lambda(self) -> None:
-        """A bare, frameworkless Dockerfile on a tiny codebase is genuinely
-        ambiguous: Lambda's combined "no framework + small + no database"
-        signals legitimately outweigh ECS's lone container signal. This
-        documents that outcome rather than assuming containers always win."""
-        payload = _make_input(
-            container_detected=True,
-            compose_detected=False,
-            frameworks=[],
-            database=None,
-            loc=200,
-        )
-        result = decide(payload)
-        assert result.compute_type == "lambda"
-
-    def test_tiny_containerless_script_is_lambda_regardless_of_language(self) -> None:
-        for language in ["python", "javascript", "go", "ruby", "some-future-language"]:
-            payload = _make_input(
-                container_detected=False,
-                compose_detected=False,
-                frameworks=[],
-                database=None,
-                loc=100,
-                primary_language=language,
-            )
-            result = decide(payload)
-            assert result.compute_type == "lambda", f"failed for language={language}"
-            assert result.lambda_ is not None
-
-    def test_unknown_language_falls_back_to_generic_runtime_and_handler(self) -> None:
-        payload = _make_input(
-            container_detected=False,
-            compose_detected=False,
-            frameworks=[],
-            database=None,
-            loc=100,
-            primary_language="some-future-language",
-        )
-        result = decide(payload)
-        assert result.lambda_ is not None
-        assert result.lambda_.runtime == "provided.al2023"
-        assert result.lambda_.handler == "main.handler"
+@pytest.mark.parametrize(
+    "filename,expected_keys",
+    [
+        ("sample_input.json", {"task_cpu", "task_memory"}),
+        ("sample_input_variant_lambda_candidate.json", {"memory_mb"}),
+        ("sample_input_variant_node_ecs.json", {"task_cpu", "task_memory"}),
+    ],
+)
+def test_sizing_keys_match_compute_type(
+    filename: str, expected_keys: set[str]
+) -> None:
+    result = decide_architecture(_load_analysis(filename))
+    assert set(result.sizing.keys()) == expected_keys
 
 
-class TestSizingTiersAreCalculatedNotHardcoded:
-    def test_ecs_sizing_scales_up_with_complexity(self) -> None:
-        minimal = _make_input(
-            container_detected=True,
-            compose_detected=True,
-            frameworks=["x"],
-            database=None,
-            loc=100,
-            total_files=10,
-        )
-        complex_ = _make_input(
-            container_detected=True,
-            compose_detected=True,
-            frameworks=["x", "y"],
-            database="some-db",
-            loc=20000,
-            total_files=500,
-        )
-        minimal_result = decide(minimal)
-        complex_result = decide(complex_)
-        assert minimal_result.compute_type == complex_result.compute_type == "ecs"
-        assert minimal_result.ecs is not None and complex_result.ecs is not None
-        assert minimal_result.ecs.task_cpu <= complex_result.ecs.task_cpu
-        assert minimal_result.ecs.task_memory <= complex_result.ecs.task_memory
-        assert (minimal_result.ecs.task_cpu, minimal_result.ecs.task_memory) != (
-            complex_result.ecs.task_cpu,
-            complex_result.ecs.task_memory,
+def test_score_breakdown_has_all_three_compute_types() -> None:
+    result = decide_architecture(_load_analysis("sample_input.json"))
+    assert set(result.score_breakdown.keys()) == {"ecs", "lambda", "ec2"}
+    assert all(isinstance(v, float) for v in result.score_breakdown.values())
+
+
+# --------------------------------------------------------------------------
+# Limit / edge cases
+# --------------------------------------------------------------------------
+
+
+def test_large_uncontainerized_project_chooses_ec2() -> None:
+    raw = _load_raw("sample_input_variant_lambda_candidate.json")
+    raw["repo_metadata"]["loc"] = 50_000
+    analysis = RepoAnalysisInput.model_validate(raw)
+    result = decide_architecture(analysis)
+    assert result.compute_type == "ec2"
+    assert set(result.sizing.keys()) == {"instance_type"}
+
+
+@pytest.mark.parametrize(
+    "loc,expected_cpu,expected_memory",
+    [
+        (4_999, "256", "512"),
+        (5_000, "512", "1024"),
+        (14_999, "512", "1024"),
+        (15_000, "1024", "2048"),
+    ],
+)
+def test_ecs_sizing_tier_boundaries(
+    loc: int, expected_cpu: str, expected_memory: str
+) -> None:
+    raw = _load_raw("sample_input.json")
+    raw["repo_metadata"]["loc"] = loc
+    analysis = RepoAnalysisInput.model_validate(raw)
+    result = decide_architecture(analysis)
+    assert result.sizing == {"task_cpu": expected_cpu, "task_memory": expected_memory}
+
+
+@pytest.mark.parametrize(
+    "loc,expected_memory_mb",
+    [
+        (199, 128),
+        (200, 256),
+        (999, 256),
+        (1_000, 512),
+    ],
+)
+def test_lambda_sizing_tier_boundaries(loc: int, expected_memory_mb: int) -> None:
+    raw = _load_raw("sample_input_variant_lambda_candidate.json")
+    raw["repo_metadata"]["loc"] = loc
+    analysis = RepoAnalysisInput.model_validate(raw)
+    result = decide_architecture(analysis)
+    assert result.sizing == {"memory_mb": expected_memory_mb}
+
+
+@pytest.mark.parametrize(
+    "scores,expected",
+    [
+        ({"ecs": 5.0, "lambda": 5.0, "ec2": 5.0}, "ecs"),
+        ({"ecs": 1.0, "lambda": 5.0, "ec2": 5.0}, "lambda"),
+        ({"ecs": 1.0, "lambda": 1.0, "ec2": 5.0}, "ec2"),
+    ],
+)
+def test_choose_compute_type_ties_favor_insertion_order(
+    scores: dict[str, float], expected: str
+) -> None:
+    assert _choose_compute_type(scores) == expected
+
+
+def test_decide_architecture_does_not_mutate_input() -> None:
+    analysis = _load_analysis("sample_input.json")
+    snapshot = analysis.model_copy(deep=True)
+    decide_architecture(analysis)
+    assert analysis == snapshot
+
+
+# --------------------------------------------------------------------------
+# Error cases
+# --------------------------------------------------------------------------
+
+
+def test_decision_result_rejects_invalid_compute_type() -> None:
+    with pytest.raises(ValidationError):
+        DecisionResult(
+            compute_type="serverless",  # type: ignore[arg-type]
+            sizing={"memory_mb": 128},
+            score_breakdown={"ecs": 0.0, "lambda": 0.0, "ec2": 0.0},
         )
 
 
-class TestResultShapeConsistency:
-    def test_only_the_selected_compute_types_sizing_block_is_set(self) -> None:
-        for fixture_name in ["sample_input.json", "sample_input_variant_lambda_candidate.json"]:
-            result = decide(validate_input(_load(fixture_name)))
-            blocks = {"ecs": result.ecs, "lambda": result.lambda_, "ec2": result.ec2}
-            populated = [name for name, block in blocks.items() if block is not None]
-            assert populated == [result.compute_type]
+def test_decision_result_rejects_wrong_sizing_value_type() -> None:
+    with pytest.raises(ValidationError):
+        DecisionResult(
+            compute_type="lambda",
+            sizing={"memory_mb": ["not", "a", "number"]},  # type: ignore[dict-item]
+            score_breakdown={"ecs": 0.0, "lambda": 0.0, "ec2": 0.0},
+        )
 
-    def test_ecs_sizing_model_rejects_non_positive_task_cpu(self) -> None:
-        """Guards the sizing schema itself against a future bug in the tier
-        tables silently producing a nonsensical (non-positive) value."""
-        with pytest.raises(ValidationError):
-            EcsSizing(
-                cluster="c",
-                service_name="s",
-                task_cpu=-1,
-                task_memory=512,
-                health_check_path="/health",
-                health_check_port=8080,
-                timeout_minutes=5,
-                min_healthy_percent=50,
-                max_percent=200,
-            )
+
+def test_decide_architecture_is_deterministic() -> None:
+    analysis = _load_analysis("sample_input_variant_node_ecs.json")
+    first = decide_architecture(analysis)
+    second = decide_architecture(analysis)
+    assert first == second

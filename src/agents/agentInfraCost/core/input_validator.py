@@ -1,105 +1,134 @@
-"""Module 1: validates and parses the payload received from Agent 1.
+"""Step 1 of the InfraCost pipeline: validate and parse Agent 1's payload.
 
-Fail-fast rules (checked before full schema validation, per spec):
-  - status must be "completed"
-  - stack_detection must be present
-  - stack_detection.confidence must be >= CONFIDENCE_THRESHOLD
+Applies structural validation (via ``models.input_schema.RepoAnalysisInput``)
+followed by the fail-fast business rules described in the agent's contract:
 
-Any other structural problem (missing required field, wrong type, ...) is
-caught by the Pydantic schema and re-raised as a typed InputValidationError.
-Missing *optional* fields are logged as warnings and otherwise ignored.
+- ``status`` must be ``"completed"``.
+- ``stack_detection`` must be present.
+- ``stack_detection.confidence`` must be >= ``MIN_CONFIDENCE`` — below that,
+  the stack detection is too uncertain to safely recommend an architecture.
+
+Absence of optional fields (e.g. ``compose_detected``) is logged as a
+warning and does not block the pipeline.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
+from typing import Any, Final
 
-from pydantic import ValidationError as PydanticValidationError
+from pydantic import ValidationError
 
-from ..models.exceptions import (
-    InputValidationError,
-    JobNotCompletedError,
-    LowConfidenceStackDetectionError,
-    MissingStackDetectionError,
-)
-from ..models.input_models import InfraCostAgentInput
+from models.input_schema import RepoAnalysisInput
 
 logger = logging.getLogger(__name__)
 
-CONFIDENCE_THRESHOLD = 0.5
+MIN_CONFIDENCE: Final[float] = 0.5
+REQUIRED_STATUS: Final[str] = "completed"
 
-# Dotted paths (as raw dict key sequences) to optional fields worth warning
-# about when entirely absent from the payload, since their absence means
-# this agent falls back to conservative defaults downstream.
-_OPTIONAL_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
+# Dotted paths of schema-optional fields whose absence from the *raw*
+# payload is worth flagging, even though a default will be used.
+_OPTIONAL_FIELD_PATHS: Final[tuple[tuple[str, ...], ...]] = (
     ("stack_detection", "container", "compose_detected"),
     ("stack_detection", "database"),
     ("stack_detection", "build_tool"),
-    ("repo_metadata", "commit_sha"),
     ("security_score",),
 )
 
 
-def _get_nested(payload: dict[str, Any], path: tuple[str, ...]) -> tuple[bool, Any]:
-    """Walks `path` into `payload`. Returns (found, value)."""
-    node: Any = payload
+class InputValidationError(Exception):
+    """Base class for every fail-fast rejection of Agent 1's payload."""
+
+    def __init__(self, message: str, *, job_id: str | None = None) -> None:
+        self.job_id = job_id
+        super().__init__(message)
+
+
+class InvalidStatusError(InputValidationError):
+    """``status`` is not ``"completed"``."""
+
+
+class MissingStackDetectionError(InputValidationError):
+    """``stack_detection`` is absent from the payload."""
+
+
+class LowConfidenceError(InputValidationError):
+    """``stack_detection.confidence`` is below ``MIN_CONFIDENCE``."""
+
+
+class MalformedInputError(InputValidationError):
+    """The payload does not match the expected structural schema."""
+
+
+def _field_present(raw: dict[str, Any], path: tuple[str, ...]) -> bool:
+    """Return True if every key in ``path`` exists in ``raw`` (value may be None)."""
+    node: Any = raw
     for key in path:
         if not isinstance(node, dict) or key not in node:
-            return False, None
+            return False
         node = node[key]
-    return True, node
+    return True
 
 
-def _warn_missing_optional_fields(payload: dict[str, Any]) -> None:
+def _warn_missing_optional_fields(raw: dict[str, Any], job_id: str) -> None:
+    """Log a warning for each optional field missing from the raw payload."""
     for path in _OPTIONAL_FIELD_PATHS:
-        found, _ = _get_nested(payload, path)
-        if not found:
+        if not _field_present(raw, path):
             logger.warning(
-                "Optional field '%s' is absent from the input payload; "
-                "continuing with defaults.",
+                "job_id=%s optional field '%s' missing from input payload; "
+                "continuing with schema default",
+                job_id,
                 ".".join(path),
             )
 
 
-def validate_input(payload: dict[str, Any]) -> InfraCostAgentInput:
-    """Validates and parses a raw dict payload from the repo-analysis agent.
+def validate_input(raw: dict[str, Any]) -> RepoAnalysisInput:
+    """Validate and parse a raw payload from the repo-analysis agent.
 
-    :raises JobNotCompletedError: status is not "completed"
-    :raises MissingStackDetectionError: stack_detection is absent or null
-    :raises LowConfidenceStackDetectionError: confidence < CONFIDENCE_THRESHOLD
-    :raises InputValidationError: any other schema validation failure
+    Args:
+        raw: The decoded JSON payload produced by Agent 1.
+
+    Returns:
+        The parsed and validated ``RepoAnalysisInput``.
+
+    Raises:
+        InvalidStatusError: ``status`` is not ``"completed"``.
+        MissingStackDetectionError: ``stack_detection`` is absent.
+        MalformedInputError: the payload fails structural schema validation.
+        LowConfidenceError: ``stack_detection.confidence`` is below
+            ``MIN_CONFIDENCE``.
     """
-    if not isinstance(payload, dict):
-        raise InputValidationError(f"Expected a JSON object, got {type(payload).__name__}")
+    job_id = str(raw.get("job_id", "<unknown>"))
 
-    status = payload.get("status")
-    if status != "completed":
-        raise JobNotCompletedError(str(status))
-
-    if payload.get("stack_detection") is None:
-        raise MissingStackDetectionError()
-
-    try:
-        parsed = InfraCostAgentInput.model_validate(payload)
-    except PydanticValidationError as exc:
-        raise InputValidationError(f"Input payload failed schema validation: {exc}") from exc
-
-    if parsed.stack_detection.confidence < CONFIDENCE_THRESHOLD:
-        raise LowConfidenceStackDetectionError(
-            parsed.stack_detection.confidence, CONFIDENCE_THRESHOLD
+    status = raw.get("status")
+    if status != REQUIRED_STATUS:
+        raise InvalidStatusError(
+            f"Expected status='{REQUIRED_STATUS}', got status={status!r}",
+            job_id=job_id,
         )
 
-    _warn_missing_optional_fields(payload)
+    if not _field_present(raw, ("stack_detection",)) or raw.get("stack_detection") is None:
+        raise MissingStackDetectionError(
+            "Payload is missing 'stack_detection'; cannot recommend an "
+            "architecture without a detected stack.",
+            job_id=job_id,
+        )
+
+    try:
+        parsed = RepoAnalysisInput.model_validate(raw)
+    except ValidationError as exc:
+        raise MalformedInputError(
+            f"Payload failed schema validation: {exc}", job_id=job_id
+        ) from exc
+
+    if parsed.stack_detection.confidence < MIN_CONFIDENCE:
+        raise LowConfidenceError(
+            f"stack_detection.confidence={parsed.stack_detection.confidence} is "
+            f"below the minimum usable threshold of {MIN_CONFIDENCE}; stack "
+            "detection is too uncertain to recommend an architecture.",
+            job_id=job_id,
+        )
+
+    _warn_missing_optional_fields(raw, job_id)
 
     return parsed
-
-
-def parse_and_validate_input(raw_json: str) -> InfraCostAgentInput:
-    """Convenience wrapper: parses a raw JSON string then validates it."""
-    try:
-        payload = json.loads(raw_json)
-    except json.JSONDecodeError as exc:
-        raise InputValidationError(f"Input payload is not valid JSON: {exc}") from exc
-    return validate_input(payload)

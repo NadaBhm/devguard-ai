@@ -1,76 +1,9 @@
-```txt
-# =====================================================
-# DevGuard AI - Unified Requirements
-# Production + Development Dependencies
-# =====================================================
-
-# ========== Web Framework ==========
-
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
-python-multipart>=0.0.6
-websockets>=12.0
-psycopg2-binary>=2.9.0
-email-validator>=2.1.0
-
-# ========== Database & ORM ==========
-
-sqlalchemy>=2.0.0
-alembic>=1.13.0
-
-# ========== Pydantic & Settings ==========
-
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
-
-# ========== Authentication ==========
-
-python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
-
-# ========== AWS ==========
-
 boto3>=1.34.0
 botocore>=1.34.0
-
-# ========== LLM ==========
-
 google-generativeai>=0.7.0
-
-# ========== Cache / Messaging ==========
-
-redis>=5.0.0
-
-# ========== RAG / Vector Store ==========
-
-qdrant-client>=1.7.0
-sentence-transformers>=2.3.0
-transformers>=4.36.0
-torch>=2.1.0
-numpy>=1.26.0
-
-# ========== Orchestration ==========
-
-langgraph>=0.1.0
-
-# ========== Report Generation ==========
-
-jinja2>=3.1.0
-
-# ========== Utilities ==========
-
+httpx>=0.27.0
 python-dotenv>=1.0.0
-
-# ========== Testing ==========
-
-pytest>=8.0
-pytest-asyncio>=0.23
-pytest-cov>=5.0
-httpx>=0.27
-jsonschema>=4.21.0
-
-# ========== Development Tools ==========
-
-ruff>=0.4
-mypy>=1.10
-```
+pydantic>=2.7.0
+jinja2>=3.1.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0

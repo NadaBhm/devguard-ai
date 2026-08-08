@@ -1,213 +1,236 @@
+"""Tests for core.terraform_generator."""
+
+import json
+from pathlib import Path
+
 import pytest
+from jinja2 import UndefinedError
+from pydantic import ValidationError
 
-from agentInfraCost.core.terraform_generator import generate_terraform
-from agentInfraCost.models.internal_models import (
-    DecisionResult,
-    Ec2Sizing,
-    EcsSizing,
-    LambdaSizing,
-    ScoreBreakdown,
-)
+from core.decision_engine import DecisionResult, decide_architecture
+from core.terraform_generator import _ENV, TerraformContext, generate_terraform
+from models.input_schema import RepoAnalysisInput
 
-EXPECTED_FILES = {"main.tf", "variables.tf", "outputs.tf"}
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
-def _score_breakdown() -> ScoreBreakdown:
-    return ScoreBreakdown(ecs_score=0.0, lambda_score=0.0, ec2_score=0.0, signals={})
+def _load_analysis(filename: str) -> RepoAnalysisInput:
+    raw = json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
+    return RepoAnalysisInput.model_validate(raw)
 
 
-def _ecs_decision(service_name: str = "repo-name-service") -> DecisionResult:
-    return DecisionResult(
-        compute_type="ecs",
-        ecs=EcsSizing(
-            cluster="devguard-cluster",
-            service_name=service_name,
-            task_cpu=512,
-            task_memory=1024,
-            health_check_path="/health",
-            health_check_port=8080,
-            timeout_minutes=5,
-            min_healthy_percent=50,
-            max_percent=200,
-        ),
-        score_breakdown=_score_breakdown(),
+# --------------------------------------------------------------------------
+# Nominal cases
+# --------------------------------------------------------------------------
+
+
+def test_generate_terraform_for_ecs_fixture() -> None:
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    assert decision.compute_type == "ecs"
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d")
+
+    files = generate_terraform(decision, context)
+
+    assert "aws_ecs_cluster" in files.main_tf
+    assert f'cpu                       = "{decision.sizing["task_cpu"]}"' in files.main_tf
+    assert f'memory                    = "{decision.sizing["task_memory"]}"' in files.main_tf
+    assert "devguard-app:sha-a1b2c3d" in files.main_tf
+    assert 'default     = "us-east-1"' in files.variables_tf
+    assert "aws_ecs_cluster.this.name" in files.outputs_tf
+
+
+def test_ecs_database_detected_adds_connection_placeholders() -> None:
+    """Regression test: stack_detection.database used to only influence the
+    architecture score, never reach the generated Terraform at all. Fixed
+    2026-08-05 (option 2: declare connection variables, never auto-create a
+    real, paying database)."""
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(
+        job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d", database="postgresql"
     )
 
+    files = generate_terraform(decision, context)
 
-def _lambda_decision() -> DecisionResult:
-    return DecisionResult(
-        compute_type="lambda",
-        lambda_=LambdaSizing(
-            function_name="small-cli-tool",
-            runtime="python3.12",
-            memory_mb=256,
-            timeout_seconds=30,
-            handler="main.handler",
-            reserved_concurrency=None,
-        ),
-        score_breakdown=_score_breakdown(),
-    )
+    assert 'DB_ENGINE", value = "postgresql"' in files.main_tf
+    assert "var.db_host" in files.main_tf
+    assert "var.db_password" in files.main_tf
+    assert 'variable "db_password"' in files.variables_tf
+    assert "sensitive   = true" in files.variables_tf
+    # never a real database resource -- only variable declarations
+    assert "aws_db_instance" not in files.main_tf
 
 
-def _ec2_decision() -> DecisionResult:
-    return DecisionResult(
+def test_ecs_no_database_detected_adds_no_db_placeholders() -> None:
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d")
+
+    files = generate_terraform(decision, context)
+
+    assert "DB_ENGINE" not in files.main_tf
+    assert "db_password" not in files.variables_tf
+
+
+def test_ecs_service_has_working_health_check_and_networking() -> None:
+    """Regression test for a real bug: the Fargate service used to have no
+    network_configuration block (terraform apply would fail outright) and
+    health_check_path never reached the actual Terraform, only the JSON
+    output. Flagged by a teammate's review (Oussama), fixed 2026-08-05."""
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d")
+
+    files = generate_terraform(decision, context)
+
+    assert "network_configuration" in files.main_tf
+    assert "subnets          = var.subnet_ids" in files.main_tf
+    assert "aws_lb_target_group" in files.main_tf
+    assert 'path                = "/health"' in files.main_tf
+    assert "load_balancer {" in files.main_tf
+    assert 'variable "vpc_id"' in files.variables_tf
+    assert 'variable "subnet_ids"' in files.variables_tf
+    assert "load_balancer_dns_name" in files.outputs_tf
+
+
+def test_generate_terraform_for_lambda_fixture() -> None:
+    analysis = _load_analysis("sample_input_variant_lambda_candidate.json")
+    decision = decide_architecture(analysis)
+    assert decision.compute_type == "lambda"
+    context = TerraformContext(job_id=analysis.job_id)
+
+    files = generate_terraform(decision, context)
+
+    assert "aws_lambda_function" in files.main_tf
+    assert f'memory_size   = {decision.sizing["memory_mb"]}' in files.main_tf
+    assert "aws_lambda_function.this.function_name" in files.outputs_tf
+
+
+def test_generate_terraform_for_node_ecs_fixture_is_valid_too() -> None:
+    """Proves generation isn't tied to the FastAPI example specifically."""
+    analysis = _load_analysis("sample_input_variant_node_ecs.json")
+    decision = decide_architecture(analysis)
+    assert decision.compute_type == "ecs"
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-9988776")
+
+    files = generate_terraform(decision, context)
+
+    assert "aws_ecs_cluster" in files.main_tf
+    assert "devguard-app:sha-9988776" in files.main_tf
+
+
+def test_generate_terraform_for_ec2() -> None:
+    """No fixture picks ec2 naturally, so the decision is built by hand here."""
+    decision = DecisionResult(
         compute_type="ec2",
-        ec2=Ec2Sizing(
-            instance_type="t3.small",
-            ami_id="ami-0000000000000000",
-            instance_count=2,
-            key_pair_name="devguard-keypair",
-            health_check_path="/status",
-            health_check_port=80,
-            timeout_minutes=10,
-        ),
-        score_breakdown=_score_breakdown(),
+        sizing={"instance_type": "t3.small"},
+        score_breakdown={"ecs": -3.0, "lambda": 0.0, "ec2": 5.0},
+    )
+    context = TerraformContext(job_id="job-ec2-test")
+
+    files = generate_terraform(decision, context)
+
+    assert "aws_instance" in files.main_tf
+    assert 'instance_type = "t3.small"' in files.main_tf
+    assert "aws_instance.this[*].id" in files.outputs_tf
+
+
+# --------------------------------------------------------------------------
+# Limit / edge cases
+# --------------------------------------------------------------------------
+
+
+def test_sizing_is_actually_templated_not_hardcoded() -> None:
+    """Two different sizings must produce two genuinely different files."""
+    context = TerraformContext(job_id="job-a")
+    small = DecisionResult(
+        compute_type="ecs",
+        sizing={"task_cpu": "256", "task_memory": "512"},
+        score_breakdown={"ecs": 1.0, "lambda": 0.0, "ec2": 0.0},
+    )
+    large = DecisionResult(
+        compute_type="ecs",
+        sizing={"task_cpu": "1024", "task_memory": "2048"},
+        score_breakdown={"ecs": 1.0, "lambda": 0.0, "ec2": 0.0},
     )
 
+    small_files = generate_terraform(small, context)
+    large_files = generate_terraform(large, context)
 
-def _assert_balanced_braces(content: str) -> None:
-    assert content.count("{") == content.count("}"), "unbalanced braces: not valid HCL"
-
-
-class TestEcsGeneration:
-    def test_nominal_produces_the_three_expected_files(self) -> None:
-        result = generate_terraform(
-            _ecs_decision(), region="us-east-1", docker_image_uri="repo-name:a1b2c3d4e5f6"
-        )
-        assert set(result.files.keys()) == EXPECTED_FILES
-        for content in result.files.values():
-            _assert_balanced_braces(content)
-
-    def test_interpolates_sizing_and_image_into_main_tf(self) -> None:
-        result = generate_terraform(
-            _ecs_decision(), region="us-east-1", docker_image_uri="repo-name:a1b2c3d4e5f6"
-        )
-        main_tf = result.files["main.tf"]
-        assert 'cluster_name = "devguard-cluster"' in main_tf
-        assert 'family                   = "repo-name-service"' in main_tf
-        assert 'cpu                      = "512"' in main_tf
-        assert 'memory                   = "1024"' in main_tf
-        assert 'image     = "repo-name:a1b2c3d4e5f6"' in main_tf
-        assert "deployment_minimum_healthy_percent = 50" in main_tf
-        assert "deployment_maximum_percent         = 200" in main_tf
-
-    def test_variables_dict_contains_region_and_environment(self) -> None:
-        result = generate_terraform(
-            _ecs_decision(),
-            region="eu-west-1",
-            environment="prod",
-            docker_image_uri="repo-name:sha",
-        )
-        assert result.variables == {"region": "eu-west-1", "environment": "prod"}
-
-    def test_missing_docker_image_uri_raises_value_error(self) -> None:
-        with pytest.raises(ValueError, match="docker_image_uri is required"):
-            generate_terraform(_ecs_decision(), region="us-east-1")
-
-    def test_missing_sizing_block_raises_value_error(self) -> None:
-        decision = DecisionResult(compute_type="ecs", ecs=None, score_breakdown=_score_breakdown())
-        with pytest.raises(ValueError, match="decision.ecs is None"):
-            generate_terraform(decision, region="us-east-1", docker_image_uri="x:y")
+    assert '"256"' in small_files.main_tf and '"512"' in small_files.main_tf
+    assert '"1024"' in large_files.main_tf and '"2048"' in large_files.main_tf
+    assert small_files.main_tf != large_files.main_tf
 
 
-class TestLambdaGeneration:
-    def test_nominal_produces_the_three_expected_files(self) -> None:
-        result = generate_terraform(_lambda_decision(), region="us-east-1")
-        assert set(result.files.keys()) == EXPECTED_FILES
-        for content in result.files.values():
-            _assert_balanced_braces(content)
-
-    def test_interpolates_function_config_into_main_tf(self) -> None:
-        result = generate_terraform(_lambda_decision(), region="us-east-1")
-        main_tf = result.files["main.tf"]
-        assert 'function_name = "small-cli-tool"' in main_tf
-        assert 'handler       = "main.handler"' in main_tf
-        assert 'runtime       = "python3.12"' in main_tf
-        assert "memory_size   = 256" in main_tf
-        assert "timeout       = 30" in main_tf
-        assert "reserved_concurrent_executions" not in main_tf
-
-    def test_reserved_concurrency_is_emitted_when_set(self) -> None:
-        decision = DecisionResult(
+def test_each_compute_type_renders_only_its_own_resources() -> None:
+    context = TerraformContext(job_id="job-b")
+    ecs = generate_terraform(
+        DecisionResult(
+            compute_type="ecs",
+            sizing={"task_cpu": "256", "task_memory": "512"},
+            score_breakdown={"ecs": 1.0, "lambda": 0.0, "ec2": 0.0},
+        ),
+        context,
+    )
+    lambda_ = generate_terraform(
+        DecisionResult(
             compute_type="lambda",
-            lambda_=LambdaSizing(
-                function_name="fn",
-                runtime="python3.12",
-                memory_mb=256,
-                timeout_seconds=30,
-                handler="main.handler",
-                reserved_concurrency=5,
-            ),
-            score_breakdown=_score_breakdown(),
-        )
-        result = generate_terraform(decision, region="us-east-1")
-        assert "reserved_concurrent_executions = 5" in result.files["main.tf"]
+            sizing={"memory_mb": 128},
+            score_breakdown={"ecs": 0.0, "lambda": 1.0, "ec2": 0.0},
+        ),
+        context,
+    )
+    ec2 = generate_terraform(
+        DecisionResult(
+            compute_type="ec2",
+            sizing={"instance_type": "t3.micro"},
+            score_breakdown={"ecs": 0.0, "lambda": 0.0, "ec2": 1.0},
+        ),
+        context,
+    )
 
-    def test_docker_image_uri_is_ignored_for_lambda(self) -> None:
-        with_image = generate_terraform(
-            _lambda_decision(), region="us-east-1", docker_image_uri="ignored:tag"
-        )
-        without_image = generate_terraform(_lambda_decision(), region="us-east-1")
-        assert with_image.files == without_image.files
-
-    def test_missing_sizing_block_raises_value_error(self) -> None:
-        decision = DecisionResult(
-            compute_type="lambda", lambda_=None, score_breakdown=_score_breakdown()
-        )
-        with pytest.raises(ValueError, match="decision.lambda_ is None"):
-            generate_terraform(decision, region="us-east-1")
+    assert "aws_ecs" in ecs.main_tf and "aws_lambda" not in ecs.main_tf and "aws_instance" not in ecs.main_tf
+    assert "aws_lambda" in lambda_.main_tf and "aws_ecs" not in lambda_.main_tf and "aws_instance" not in lambda_.main_tf
+    assert "aws_instance" in ec2.main_tf and "aws_ecs" not in ec2.main_tf and "aws_lambda" not in ec2.main_tf
 
 
-class TestEc2Generation:
-    def test_nominal_produces_the_three_expected_files(self) -> None:
-        result = generate_terraform(_ec2_decision(), region="us-east-1")
-        assert set(result.files.keys()) == EXPECTED_FILES
-        for content in result.files.values():
-            _assert_balanced_braces(content)
-
-    def test_interpolates_instance_config_into_main_tf(self) -> None:
-        result = generate_terraform(_ec2_decision(), region="us-east-1")
-        main_tf = result.files["main.tf"]
-        assert "count         = 2" in main_tf
-        assert 'ami           = "ami-0000000000000000"' in main_tf
-        assert 'instance_type = "t3.small"' in main_tf
-        assert 'key_name      = "devguard-keypair"' in main_tf
-        assert "user_data" not in main_tf
-
-    def test_docker_image_uri_adds_user_data_block(self) -> None:
-        result = generate_terraform(
-            _ec2_decision(), region="us-east-1", docker_image_uri="legacy-app:c9d8e7f6a5b4"
-        )
-        main_tf = result.files["main.tf"]
-        assert "user_data" in main_tf
-        assert "docker run -d -p 80:80 legacy-app:c9d8e7f6a5b4" in main_tf
-
-    def test_missing_sizing_block_raises_value_error(self) -> None:
-        decision = DecisionResult(compute_type="ec2", ec2=None, score_breakdown=_score_breakdown())
-        with pytest.raises(ValueError, match="decision.ec2 is None"):
-            generate_terraform(decision, region="us-east-1")
+def test_terraform_files_round_trip_with_contract_aliases() -> None:
+    context = TerraformContext(job_id="job-c")
+    decision = DecisionResult(
+        compute_type="ecs",
+        sizing={"task_cpu": "256", "task_memory": "512"},
+        score_breakdown={"ecs": 1.0, "lambda": 0.0, "ec2": 0.0},
+    )
+    files = generate_terraform(decision, context)
+    dumped = files.model_dump(by_alias=True)
+    assert set(dumped.keys()) == {"main.tf", "variables.tf", "outputs.tf"}
 
 
-class TestHclStringEscaping:
-    def test_double_quote_in_value_does_not_break_hcl(self) -> None:
-        decision = _ecs_decision(service_name='evil"name')
-        result = generate_terraform(
-            decision, region="us-east-1", docker_image_uri="repo:tag"
-        )
-        main_tf = result.files["main.tf"]
-        assert 'evil\\"name' in main_tf
-        _assert_balanced_braces(main_tf)
-
-    def test_backslash_in_value_is_escaped(self) -> None:
-        decision = _ecs_decision(service_name="path\\to\\thing")
-        result = generate_terraform(
-            decision, region="us-east-1", docker_image_uri="repo:tag"
-        )
-        assert "path\\\\to\\\\thing" in result.files["main.tf"]
+# --------------------------------------------------------------------------
+# Error cases
+# --------------------------------------------------------------------------
 
 
-class TestUnknownComputeType:
-    def test_raises_value_error(self) -> None:
-        decision = _ecs_decision().model_copy(update={"compute_type": "unknown"})
-        with pytest.raises(ValueError, match="Unknown compute_type"):
-            generate_terraform(decision, region="us-east-1", docker_image_uri="x:y")
+def test_terraform_context_requires_job_id() -> None:
+    with pytest.raises(ValidationError):
+        TerraformContext()  # type: ignore[call-arg]
+
+
+def test_missing_sizing_key_raises_clear_key_error() -> None:
+    """A DecisionResult with an incomplete `sizing` dict fails loudly, not silently."""
+    decision = DecisionResult(
+        compute_type="ecs",
+        sizing={"task_cpu": "256"},  # task_memory missing on purpose
+        score_breakdown={"ecs": 1.0, "lambda": 0.0, "ec2": 0.0},
+    )
+    context = TerraformContext(job_id="job-d")
+    with pytest.raises(KeyError):
+        generate_terraform(decision, context)
+
+
+def test_template_variable_missing_from_context_raises_clear_error() -> None:
+    """StrictUndefined must turn a template typo/gap into a real exception,
+    never a silently blank value in the generated Terraform."""
+    with pytest.raises(UndefinedError):
+        _ENV.get_template("ecs/main.tf.j2").render(cluster_name="only-this-one-is-set")

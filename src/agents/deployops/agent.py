@@ -546,6 +546,15 @@ class DeployOpsAgent:
         dep_config = payload.get("deployment_config", {})
         approval = payload.get("approval", {})
 
+        # DeployOps is ECS-only. EC2/Lambda payloads have no deployment path
+        # here — refuse them loudly instead of collapsing to a payload with
+        # null ecs_cluster/service_name that fails validation downstream.
+        if compute != "ecs":
+            raise ValueError(
+                f"DeployOps only supports compute_type='ecs', got "
+                f"compute_type={compute!r}. No ec2/lambda mapping exists."
+            )
+
         # Map the nested compute-specific block onto the flat shape.
         if compute == "ecs":
             ecs_aws = aws_config.get("ecs") or {}
@@ -605,17 +614,19 @@ class DeployOpsAgent:
         if image:
             dockerfile = artifacts.get("dockerfile")
             if not dockerfile:
-                self.logger.warning(
-                    "No Dockerfile content in InfraCost payload for %s; "
-                    "DeployOps will read it from the checked-out source.",
-                    image.get("name"),
+                # CodeScan deletes its clone after extracting artifacts, so
+                # there is never a checked-out source to fall back on , refuse to fabricate an unusable image instead.
+                
+                raise ValueError(
+                    f"InfraCost payload for {image.get('name')!r} carries no "
+                    "Dockerfile content; DeployOps cannot build from a "
+                    "nonexistent checkout."
                 )
-                dockerfile = "FROM scratch\n"
             docker_images.append(
                 {
                     "name": image.get("name", "app"),
                     "dockerfile": dockerfile,
-                    "context": ".",
+                    "context": artifacts.get("source_code") or ".",
                     "tag": image.get("tag", "latest"),
                     "platform": "linux/amd64",
                 }

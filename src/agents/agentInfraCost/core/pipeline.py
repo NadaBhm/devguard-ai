@@ -85,6 +85,10 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
 
     try:
         dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+        # Prefer the real Dockerfile content the CodeSec agent extracted
+        # (agent.payload["dockerfile_content"]), never a synthesized stand-in.
+        if raw.get("dockerfile_content"):
+            dockerfile = raw["dockerfile_content"]
         terraform_context = decide_deployment_context(
             analysis,
             job_id=analysis.job_id,

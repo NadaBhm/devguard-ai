@@ -102,6 +102,7 @@ def _build_artifacts(
     terraform_files: TerraformFiles,
     dockerfile: str | None,
     docker_image: DockerImage | None,
+    source_code: str = ".",
 ) -> Artifacts:
     terraform = TerraformArtifacts(
         files=terraform_files,
@@ -111,7 +112,7 @@ def _build_artifacts(
         terraform=terraform,
         dockerfile=dockerfile,
         docker_image=docker_image,
-        source_code=f"/tmp/repo_{analysis.job_id}",
+        source_code=source_code,
     )
 
 
@@ -234,6 +235,7 @@ def build_output(
     dockerfile: str | None = None,
     docker_image: DockerImage | None = None,
     approval_status: ApprovalStatus = "pending",
+    source_code: str = ".",
 ) -> InfraCostOutput:
     """Assemble the final contract from already-computed module outputs.
 
@@ -251,6 +253,10 @@ def build_output(
         docker_image: Same as ``dockerfile``, resolved together.
         approval_status: Defaults to "pending" — module 8 owns the real
             state machine; this is just what gets stamped on assembly.
+        source_code: Where the deployable source lives for tooling that
+            consumes these artifacts (e.g. the DeployOps agent). Defaults
+            to ``"."`` — a relative build context, never a fabricated
+            ``/tmp`` checkout path that nobody created.
 
     Returns:
         One of the three ``InfraCostOutput`` variants, with the other two
@@ -258,6 +264,6 @@ def build_output(
     """
     if dockerfile is None and docker_image is None:
         dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
-    artifacts = _build_artifacts(analysis, terraform_files, dockerfile, docker_image)
+    artifacts = _build_artifacts(analysis, terraform_files, dockerfile, docker_image, source_code)
     builder = _BUILDERS[decision.compute_type]
     return builder(analysis, decision, artifacts, cost, enrichment, approval_status)

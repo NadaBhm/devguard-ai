@@ -387,6 +387,63 @@ class TestCalculateScore:
         )
         assert score.score < 100
 
+    def test_unexecuted_scanner_cannot_inflate_score(self):
+        """"Cli - category that never ran (tool missing/disabled) gets 0, not 100."""
+        score = calculate_score(
+            sast_findings=[],
+            secrets=[],
+            vulnerable_packages=[],
+            dockerfile_findings=[],
+            sbom=_sbom([
+                SbomComponent(name=f"lib{i}", version=f"{i}.0", licenses=[LicenseInfo(id="MIT")])
+                for i in range(1, 6)
+            ]),
+            stack_detection=_stack(confidence=0.95),
+            scanner_coverage={
+                "sast": False, "secrets": True, "dependencies": True,
+                "dockerfile": True, "sbom": True,
+            },
+        )
+        assert score.breakdown.sast == 0
+        assert score.score < 100
+        assert score.grade != Grade.A
+
+    def test_perfect_gate_blocked_when_a_scanner_did_not_run(self):
+        """No findings + complete stack + quality SBOM is not 100 if a
+        scanner never executed."""
+        score = calculate_score(
+            sast_findings=[],
+            secrets=[],
+            vulnerable_packages=[],
+            dockerfile_findings=[],
+            sbom=_sbom([
+                SbomComponent(name=f"lib{i}", version=f"{i}.0", licenses=[LicenseInfo(id="MIT")])
+                for i in range(1, 6)
+            ]),
+            stack_detection=_stack(confidence=0.95),
+            scanner_coverage={
+                "sast": True, "secrets": True, "dependencies": True,
+                "dockerfile": True, "sbom": False, "stack_detection": True,
+            },
+        )
+        assert score.score < 100
+
+    def test_empty_but_executed_still_scores_clean(self):
+        """An empty result from a scanner that DID run remains 'clean'."""
+        score = calculate_score(
+            sast_findings=[],
+            secrets=[],
+            vulnerable_packages=[],
+            dockerfile_findings=[],
+            sbom=_sbom([
+                SbomComponent(name=f"lib{i}", version=f"{i}.0", licenses=[LicenseInfo(id="MIT")])
+                for i in range(1, 6)
+            ]),
+            stack_detection=_stack(confidence=0.95),
+            scanner_coverage=None,
+        )
+        assert score.score == 100
+
     def test_grade_a_boundary(self):
         """A requires >= 95."""
         score = calculate_score(

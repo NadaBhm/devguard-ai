@@ -42,7 +42,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .config import DEFAULT_CLONE_DIR, GITHUB_URL_PATTERN, MAX_FILES_PER_REPO, MAX_REPO_SIZE_MB
+from .config import (
+    DEFAULT_CLONE_DIR,
+    GITHUB_URL_PATTERN,
+    MAX_FILES_PER_REPO,
+    MAX_REPO_SIZE_MB,
+    TOOLS,
+)
 from .models import (
     CodeSecResult,
     DependenciesResult,
@@ -65,7 +71,6 @@ from .scanners.sbom import generate_sbom
 from .scanners.scorer import calculate_score
 from .scanners.secrets import run_secrets_scan
 from .scanners.stack_detection import detect_stack, get_language_breakdown
-from lib.rag.ingestion import ingest_repo
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +176,7 @@ class CodeSecAgent:
             )
             if result.returncode != 0:
                 # Try default branch if main fails
-                cmd[5] = "--branch=master"
+                cmd[4] = "--branch=master"
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
@@ -328,6 +333,7 @@ class CodeSecAgent:
         try:
             repo_path = self._clone_repo(validated_url, job_id)
             try:
+                from lib.rag.ingestion import ingest_repo
                 ingest_repo(repo_path, job_id=job_id)
             except Exception as exc:
                 logger.warning("RAG ingestion failed (non-critical): %s", exc)
@@ -402,6 +408,18 @@ class CodeSecAgent:
         score_start = datetime.now(timezone.utc)
         _add_phase("scoring", PhaseStatus.RUNNING, started=score_start)
         try:
+            def _tool_installed(name: str) -> bool:
+                tool = TOOLS.get(name)
+                return bool(tool and tool.enabled and shutil.which(tool.executable))
+
+            coverage = {
+                "sast": _tool_installed("semgrep") or _tool_installed("bandit"),
+                "secrets": _tool_installed("gitleaks") or _tool_installed("trufflehog"),
+                "dependencies": _tool_installed("pip_audit") or _tool_installed("safety") or _tool_installed("trivy"),
+                "dockerfile": _tool_installed("hadolint") or _tool_installed("trivy") or _tool_installed("checkov"),
+                "sbom": _tool_installed("cyclonedx") or _tool_installed("syft"),
+            }
+
             security_score = calculate_score(
                 sast_findings=results["sast"],
                 secrets=results["secrets"],
@@ -409,6 +427,7 @@ class CodeSecAgent:
                 dockerfile_findings=results["dockerfile"],
                 sbom=results["sbom"],
                 stack_detection=stack_result,
+                scanner_coverage=coverage,
             )
             score_end = datetime.now(timezone.utc)
             _add_phase("scoring", PhaseStatus.COMPLETED, started=score_start, completed=score_end)
@@ -434,6 +453,16 @@ class CodeSecAgent:
 
         # Set SBOM download URL
         results["sbom"].download_url = f"/api/jobs/{job_id}/sbom/download"
+
+        # Capture Dockerfile content for downstream agents (InfraCost /
+        # DeployOps need it to build the image; the clone is removed below).
+        dockerfile_content: str | None = None
+        try:
+            dockerfile_path = next(repo_path.rglob("Dockerfile"), None)
+            if dockerfile_path and dockerfile_path.is_file() and dockerfile_path.stat().st_size <= 256 * 1024:
+                dockerfile_content = dockerfile_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            dockerfile_content = None
 
         # Cleanup clone directory
         try:

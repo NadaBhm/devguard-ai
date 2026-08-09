@@ -195,6 +195,13 @@ export const IconDownload = (p: IconProps) => (
   </Base>
 )
 
+export const IconCopy = (p: IconProps) => (
+  <Base {...p}>
+    <rect x="6" y="6" width="7.5" height="7.5" rx="1.3" />
+    <path d="M3.8 9.7H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h5.7a1 1 0 0 1 1 1v.8" />
+  </Base>
+)
+
 export const IconLogout = (p: IconProps) => (
   <Base {...p}>
     <path d="M9.5 2.5H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h5.5" />

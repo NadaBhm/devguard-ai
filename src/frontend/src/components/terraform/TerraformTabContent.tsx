@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react"
 import type { TerraformArtifact } from "../../types/results"
-import { IconDownload, IconFile } from "../icons"
+import { IconCheck, IconCopy, IconDownload, IconFile } from "../icons"
 import { Button } from "../ui/Button"
+import { HclViewer } from "./HclViewer"
 
 function downloadFile(artifact: TerraformArtifact) {
   const blob = new Blob([artifact.content], { type: "text/plain;charset=utf-8" })
@@ -26,10 +27,17 @@ function downloadAll(artifacts: TerraformArtifact[]) {
 
 export function TerraformTab({ artifacts }: { artifacts: TerraformArtifact[] }) {
   const [selected, setSelected] = useState<string | null>(null)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const active = useMemo(
     () => artifacts.find((a) => a.id === selected) ?? artifacts[0],
     [artifacts, selected],
   )
+
+  async function copyContent(artifact: TerraformArtifact) {
+    await navigator.clipboard.writeText(artifact.content)
+    setCopiedId(artifact.id)
+    setTimeout(() => setCopiedId((current) => (current === artifact.id ? null : current)), 1500)
+  }
 
   if (artifacts.length === 0) {
     return (
@@ -78,13 +86,27 @@ export function TerraformTab({ artifacts }: { artifacts: TerraformArtifact[] }) 
           <div className="flex flex-col">
             <div className="flex items-center justify-between border-b border-border px-4 py-2">
               <code className="font-mono text-[12px] text-muted">{active.file_path}</code>
-              <Button size="sm" variant="secondary" icon={<IconDownload className="size-3.5" />} onClick={() => downloadFile(active)}>
-                Download
-              </Button>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={
+                    copiedId === active.id ? (
+                      <IconCheck className="size-3.5 text-accent" />
+                    ) : (
+                      <IconCopy className="size-3.5" />
+                    )
+                  }
+                  onClick={() => copyContent(active)}
+                >
+                  {copiedId === active.id ? "Copied" : "Copy"}
+                </Button>
+                <Button size="sm" variant="secondary" icon={<IconDownload className="size-3.5" />} onClick={() => downloadFile(active)}>
+                  Download
+                </Button>
+              </div>
             </div>
-            <pre className="max-h-[480px] overflow-auto p-4 font-mono text-[12.5px] leading-relaxed text-foreground">
-              <code>{active.content}</code>
-            </pre>
+            <HclViewer code={active.content} />
           </div>
         )}
       </div>

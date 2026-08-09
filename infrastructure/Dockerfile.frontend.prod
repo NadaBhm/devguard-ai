@@ -1,0 +1,33 @@
+# DevGuard AI - Frontend (React 19 + Vite + Tailwind), PRODUCTION build.
+#
+# Dockerfile.frontend (no .prod suffix) stays the dev-mode image used by
+# docker-compose (Vite dev server + hot reload, source bind-mounted) - this
+# is the separate multi-stage build referenced there as "later" (Sprint 5,
+# T-5.12): compile the static assets once, serve them with nginx, no Node
+# runtime or dev server in the final image.
+
+# ---- build stage ----------------------------------------------------------
+FROM node:20-alpine AS build
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# ---- serve stage ------------------------------------------------------------
+FROM nginx:1.27-alpine AS serve
+
+COPY --from=build /app/dist /usr/share/nginx/html
+# nginx:1.19+ runs envsubst on every *.template here into conf.d/ at
+# container start (its own docker-entrypoint.d script, nothing custom
+# needed) -- BACKEND_HOST becomes a real runtime setting, not baked into
+# the image at build time.
+COPY infrastructure/nginx.frontend.conf.template /etc/nginx/templates/default.conf.template
+ENV BACKEND_HOST=backend:8000
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

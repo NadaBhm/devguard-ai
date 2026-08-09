@@ -484,19 +484,28 @@ class DeployOpsAgent:
         """Build Docker image and push to ECR"""
 
         workspace = self._workspace_dir(job_id)
-        
+
         image_name = docker_image.name
         image_tag = docker_image.tag
         region = aws_config.region
-        
+
         # Get AWS account ID
         aws = AWSClient(region=region)
         account_id = aws.get_account_id()
-        
+
+        # Create the ECR repository if it doesn't already exist
+        import boto3
+        ecr_client = boto3.client("ecr", region_name=region)
+        try:
+            ecr_client.create_repository(repositoryName=image_name)
+            self.logger.info(f"Created ECR repository: {image_name}")
+        except ecr_client.exceptions.RepositoryAlreadyExistsException:
+            pass
+
         # ECR repository URI
         ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
         image_uri = f"{ecr_repo}:{image_tag}"
-        
+
         # Login to ECR. The AWS CLI may only be installed in the active
         # virtualenv, so do not assume it is globally available to /bin/sh.
         aws_executable = shutil.which("aws") or str(Path(sys.executable).with_name("aws"))
@@ -504,7 +513,7 @@ class DeployOpsAgent:
             self.logger.error("AWS CLI executable was not found")
             return None
         login_cmd = (
-            f"{aws_executable} ecr get-login-password --region {region} | "
+            f'"{aws_executable}" ecr get-login-password --region {region} | '
             f"docker login --username AWS --password-stdin "
             f"{account_id}.dkr.ecr.{region}.amazonaws.com"
         )
@@ -515,9 +524,9 @@ class DeployOpsAgent:
         )
         stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"ECR login failed: {stderr.decode()}")
+            self.logger.error(f"ECR login failed: {stderr.decode('utf-8', errors='replace')}")
             return None
-        
+
         # Build Docker image with platform for Fargate compatibility
         # Build context is relative to workspace
         build_context = self._workspace_dir(job_id) / docker_image.context
@@ -529,9 +538,9 @@ class DeployOpsAgent:
         )
         stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Docker build failed: {stderr.decode()}")
+            self.logger.error(f"Docker build failed: {stderr.decode('utf-8', errors='replace')}")
             return None
-        
+
         # Push to ECR
         push_cmd = ["docker", "push", image_uri]
         result = await asyncio.create_subprocess_exec(
@@ -541,9 +550,9 @@ class DeployOpsAgent:
         )
         stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Docker push failed: {stderr.decode()}")
+            self.logger.error(f"Docker push failed: {stderr.decode('utf-8', errors='replace')}")
             return None
-        
+
         self.logger.info(f"Image pushed: {image_uri}")
         return image_uri
     
@@ -570,7 +579,7 @@ class DeployOpsAgent:
         )
         stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Backend Docker build failed: {stderr.decode()}")
+            self.logger.error(f"Backend Docker build failed: {stderr.decode("utf-8", errors="replace")}")
             return False
         
         # Push backend image
@@ -582,7 +591,7 @@ class DeployOpsAgent:
         )
         stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Backend Docker push failed: {stderr.decode()}")
+            self.logger.error(f"Backend Docker push failed: {stderr.decode("utf-8", errors="replace")}")
             return False
         
         self.logger.info(f"Backend image pushed: {backend_image_uri}")

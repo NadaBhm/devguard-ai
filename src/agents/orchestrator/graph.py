@@ -38,6 +38,23 @@ CHANGELOG:
           that shadowed the built-in str() and caused a TypeError on every node call)
 - v1.0.4: Fixed _human_gate_2_impl to use status "rejected" instead of "failed"
           on human rejection, consistent with _human_gate_1_impl
+- v1.3.1: InfraCost API on master reverted to run_pipeline_with_context() +
+          core.orchestrator_adapter.to_orchestrator_result() (the API v1.3.0
+          replaced no longer matches master - see agent_adapters.py's module
+          docstring on the churn). This build ALSO generates real Dockerfile
+          content (output_builder.resolve_docker_artifacts), unblocking the
+          DeployOps translation that v1.3.0's build could not complete.
+          normalize_infracost_result() now does real work again: fixes
+          cost_estimate.amount -> .monthly_cost_usd, a real gap in Karim's
+          own to_orchestrator_result() caught by test_schema_conformance.py.
+- v1.3.0: agent_adapters.py rewritten for InfraCost's REAL API on master.
+          run_pipeline_with_context()/core.orchestrator_adapter never existed
+          on master - only run_pipeline() -> InfraCostOutput. Also surfaced a
+          real integration gap: real InfraCost never provides Dockerfile
+          CONTENT (only a source_code path, which is CodeSec's clone -
+          already deleted by the time DeployOps needs it). The translator
+          now fails loudly on this instead of silently sending an unusable
+          payload. Needs a team decision (see agent_adapters.py docstring).
 - v1.2.1: InfraCost output is normalized to the documented schema shape
           (agent_adapters.normalize_infracost_result). The real agent emits
           Money.amount / files{} / projected_monthly_savings, none of which

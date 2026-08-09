@@ -156,9 +156,143 @@ async def call_codesec(repo_url: str, job_id: str) -> dict[str, Any]:
     return payload
 
 
+def _infracost_package_dir() -> "Path":
+    """Absolute path to src/agents/agentInfraCost, regardless of cwd."""
+    from pathlib import Path
+    # this file: src/agents/orchestrator/agent_adapters.py
+    # -> parents[1] = src/agents ; the package sits right next to us
+    return Path(__file__).resolve().parents[1] / "agentInfraCost"
+
+
+def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> "Any":
+    """
+    Import and run Karim's pipeline using ITS OWN import convention.
+
+    Karim's core/*.py files import each other with flat names
+    (`from core.decision_engine import ...`, `from models.output_schema import ...`),
+    which only resolve if agentInfraCost/ itself - not src/ - is on sys.path.
+    That's a separate, incompatible requirement from every other agent, which
+    are all importable as `src.agents.<name>...` (package-qualified).
+
+    Rather than asking every caller to juggle a 3-entry PYTHONPATH (fragile,
+    and apparently platform-dependent - it silently failed on Windows while
+    working here), we add agentInfraCost/ to sys.path ONCE, right here, and
+    then import using Karim's OWN flat convention. This runs off the main
+    thread (via run_in_executor in call_infracost), so it's safe to mutate
+    sys.path without racing the rest of the app.
+
+    TODO: drop this entirely once Karim's core/*.py either use relative
+    imports or `agents.agentInfraCost.core...` absolute imports, matching
+    every other agent in this project.
+    """
+    import sys as _sys
+
+    package_dir = str(_infracost_package_dir())
+    added = package_dir not in _sys.path
+    if added:
+        _sys.path.insert(0, package_dir)
+    try:
+        from core.orchestrator_adapter import to_orchestrator_result  # noqa: PLC0415
+        from core.pipeline import run_pipeline_with_context  # noqa: PLC0415
+
+        ctx = run_pipeline_with_context(codesec_result)
+        # Stash for the caller, which only imported these lazily and needs
+        # them again to build the OrchestratorInfraCostResult below.
+        ctx._to_orchestrator_result = to_orchestrator_result
+        return ctx
+    finally:
+        if added:
+            _sys.path.remove(package_dir)
+
+
 # =============================================================================
 # 2. INFRACOST (Karim)
 # =============================================================================
+# CDC Reference: T-3.16 (integrate InfraCost into orchestrator workflow)
+#
+# NOTE ON API CHURN: this module has been rewritten twice against two
+# different InfraCost APIs seen on master at different times:
+#   - run_pipeline_with_context() + core.orchestrator_adapter.to_orchestrator_result()
+#     (models/output_schema.py) -- what THIS version targets, matching the
+#     master snapshot merged 2026-08-08.
+#   - a plain run_pipeline() with no adapter module (models/output_models.py)
+#     -- seen on an earlier master snapshot; that version never provided
+#     Dockerfile CONTENT, only a path into CodeSec's already-deleted clone
+#     (a real, unresolved integration gap flagged to the team).
+# THIS version's output_builder.py generates the Dockerfile content itself
+# (resolve_docker_artifacts -> f"FROM {base_image}\nCOPY . /app\n"), so that
+# specific blocker does not apply here. If InfraCost's API changes again,
+# check artifacts.dockerfile in the raw output first - if it's back to being
+# empty/path-only, translate_infracost_to_deploy_payload's dockerfile check
+# below will fail loudly rather than silently, which is the point.
+
+def _infracost_package_dir() -> "Path":
+    """Absolute path to src/agents/agentInfraCost, regardless of cwd."""
+    from pathlib import Path
+    return Path(__file__).resolve().parents[1] / "agentInfraCost"
+
+
+def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
+    """
+    Import and run Karim's pipeline using ITS OWN import convention.
+
+    core/*.py here import each other with flat names (`from core.decision_engine
+    import ...`, `from models.output_schema import ...`), which only resolve if
+    agentInfraCost/ itself - not src/ - is on sys.path.
+
+    An earlier version of this function merely INSERTED agentInfraCost/ into
+    the existing sys.path (leaving '.' and 'src' in place too) before
+    importing with Karim's flat names. That worked in testing here, but
+    reproducibly failed on Windows with "No module named
+    'core.orchestrator_adapter'" - 'core' resolving to *something*, just not
+    the right thing. The likely cause: with '.', 'src' AND agentInfraCost/
+    all on sys.path simultaneously, Python's implicit namespace-package
+    mechanism (PEP 420) can assemble a bare `core` package out of portions
+    from more than one of those entries, and Windows' path/caching behavior
+    made a different portion win than what happened to work on Linux here -
+    a fragile, order-dependent outcome either way.
+
+    This version removes the ambiguity instead of hoping insertion order
+    resolves it: for the duration of this call ONLY, sys.path is replaced
+    with agentInfraCost/ plus whatever isn't part of this project's own
+    source tree (stdlib, site-packages, installed dependencies stay
+    reachable; '.', 'src', and their absolute-path equivalents do not). No
+    other sys.path entry can contribute a competing `core` or `models`
+    portion during this import, on any platform. Restored exactly afterwards
+    - this runs off the main thread (via run_in_executor in call_infracost),
+    so mutating sys.path here can't race the rest of the app.
+    """
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    package_dir = str(_infracost_package_dir())
+    project_paths = {
+        ".", "src",
+        str(_Path(".").resolve()),
+        str(_Path("src").resolve()),
+    }
+    original_path = list(_sys.path)
+    _sys.path[:] = [package_dir] + [p for p in original_path if p not in project_paths]
+    try:
+        from core.orchestrator_adapter import to_orchestrator_result  # noqa: PLC0415
+        from core.pipeline import run_pipeline_with_context  # noqa: PLC0415
+
+        ctx = run_pipeline_with_context(codesec_result)
+        result = dict(to_orchestrator_result(ctx.output, ctx.decision, ctx.finops))
+        # Stash the raw artifacts DeployOps needs (Dockerfile content,
+        # terraform files, aws_config/deployment_config) - the orchestrator's
+        # InfraCostResult TypedDict has no field for these, so without
+        # keeping them here they'd be lost between this node and DeployOps's.
+        result["_deploy_inputs"] = {
+            "compute_type": ctx.output.compute_type,
+            "artifacts": ctx.output.artifacts.model_dump(mode="json", by_alias=True),
+            "aws_config": ctx.output.aws_config.model_dump(mode="json", by_alias=True),
+            "deployment_config": ctx.output.deployment_config.model_dump(mode="json", by_alias=True),
+        }
+        return result
+    finally:
+        _sys.path[:] = original_path
+
 
 async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[str, Any]:
     """
@@ -168,205 +302,48 @@ async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[st
         ctx = run_pipeline_with_context(codesec_result)   # SYNC
         result = to_orchestrator_result(ctx.output, ctx.decision, ctx.finops)
 
-    Two things to know:
-
-    1. We must use run_pipeline_with_context(), NOT plain run_pipeline().
-       Karim's to_orchestrator_result() needs `decision` and `finops`, which
-       only the _with_context variant exposes. run_pipeline() returns just
-       the output and would leave us unable to build load_scenarios,
-       optimizations and region_comparison.
-
-    2. run_pipeline_with_context is SYNCHRONOUS and CPU/LLM-bound (it calls
-       an LLM advisor and the AWS Pricing API). Calling it directly inside an
-       async node would block the whole event loop, freezing WebSocket
-       progress streaming for every other job in the process. It therefore
-       goes through run_in_executor.
-
-    Returns the orchestrator's InfraCostResult shape, PLUS an extra
-    orchestrator-internal key `_deploy_inputs` holding the raw artifacts /
-    aws_config / deployment_config that DeployOps needs later. The
-    orchestrator's InfraCostResult TypedDict has no field for the Dockerfile
-    or source_code, so without stashing them here they would be lost between
-    the InfraCost node and the DeployOps node.
+    run_pipeline_with_context is synchronous and does real work (LLM calls,
+    AWS pricing lookups), so it goes through run_in_executor rather than
+    blocking the event loop, same reasoning as CodeSec's async agent call.
     """
     if not use_real_infracost():
         from .nodes import build_mock_infracost_result
         logger.info("[%s] InfraCost: MOCK mode (set DEVGUARD_REAL_INFRACOST=1 for real)", job_id)
         return build_mock_infracost_result()
 
-    from agents.agentInfraCost.core.orchestrator_adapter import to_orchestrator_result
-    from agents.agentInfraCost.core.pipeline import run_pipeline_with_context
-
     logger.info("[%s] InfraCost: REAL agent", job_id)
-    loop = asyncio.get_event_loop()
-    ctx = await loop.run_in_executor(None, run_pipeline_with_context, codesec_result)
-
-    result: dict[str, Any] = normalize_infracost_result(
-        dict(to_orchestrator_result(ctx.output, ctx.decision, ctx.finops))
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, _run_infracost_pipeline, codesec_result
     )
-
-    # Stash what DeployOps will need but the orchestrator TypedDict drops.
-    output = ctx.output
-    result["_deploy_inputs"] = {
-        "compute_type": output.compute_type,
-        "artifacts": output.artifacts.model_dump(mode="json", by_alias=True),
-        "aws_config": output.aws_config.model_dump(mode="json", by_alias=True),
-        "deployment_config": output.deployment_config.model_dump(mode="json", by_alias=True),
-    }
-    return result
-
-
-# =============================================================================
-# INFRACOST OUTPUT NORMALIZATION
-# =============================================================================
-# Karim's to_orchestrator_result() fills the orchestrator's seven InfraCostResult
-# keys, but the VALUES inside five of them are his own Pydantic models dumped
-# as-is, and none of their field names match what
-# docs/api-contracts/orchestrator-input-schema.json declares:
-#
-#   schema                                     real output
-#   ------                                     -----------
-#   cost_estimate.monthly_cost_usd             cost_estimate.amount        (Money)
-#   cost_estimate.breakdown[]                  (does not exist at all)
-#   generated_terraform.main_tf                generated_terraform.files["main.tf"]
-#   optimizations[].projected_savings_usd      optimizations[].projected_monthly_savings
-#   optimizations[].strategy / .description    optimizations[].name / .reason
-#   load_scenarios[].estimated_monthly_cost_usd  load_scenarios[].estimated_monthly_cost.amount
-#   region_comparison[].monthly_cost_usd       region_comparison[].estimated_monthly_cost.amount
-#
-# This is not caught by validation: the schema declares those sub-properties
-# without marking any of them `required`, so the divergent shape passes
-# cleanly. What actually breaks is downstream - report.py reads
-# cost_estimate["monthly_cost_usd"], finds nothing, and prints "$0/month" in
-# the report handed to stakeholders. Same silent-wrong-answer failure mode as
-# the empty docker_images list.
-#
-# Normalizing here (rather than teaching every consumer both dialects) keeps
-# the schema as the single contract: whatever the agent emits, the state
-# always holds the documented shape.
-#
-# TODO: delete once Karim's to_orchestrator_result() emits schema field names.
-
-def _money_amount(value: Any) -> float:
-    """Read a cost that may be a bare number or one of Karim's Money objects."""
-    if isinstance(value, dict):
-        return float(value.get("amount", value.get("monthly_cost_usd", 0)) or 0)
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-# Karim's optimization `name` comes from an LLM and is free text; the schema
-# declares a closed enum. Map what we recognise, pass the rest through.
-_STRATEGY_ALIASES = {
-    "graviton": "graviton",
-    "arm": "graviton",
-    "spot": "spot_instances",
-    "spot instances": "spot_instances",
-    "reserved": "reserved_instances",
-    "reserved instances": "reserved_instances",
-    "savings plan": "savings_plan",
-    "savings_plan": "savings_plan",
-}
-
-
-def _normalize_strategy(name: str) -> str:
-    lowered = (name or "").strip().lower()
-    for needle, canonical in _STRATEGY_ALIASES.items():
-        if needle in lowered:
-            return canonical
-    return name or "unspecified"
+    return normalize_infracost_result(result)
 
 
 def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
     """
-    Coerce InfraCost's output into the shape orchestrator-input-schema.json
-    documents. Idempotent: a payload already in canonical form (the Sprint 1
-    mock) passes through unchanged.
-    """
-    out = dict(result)
+    Defensive normalization on top of Karim's to_orchestrator_result().
 
-    # --- cost_estimate: Money -> {monthly_cost_usd, currency, breakdown} ---
-    cost = dict(out.get("cost_estimate") or {})
-    if "monthly_cost_usd" not in cost:
+    to_orchestrator_result() renames 6 of the orchestrator's 7 InfraCostResult
+    fields correctly, but passes cost_estimate through as a raw Money dump
+    (output.aws_config.estimated_monthly_cost.model_dump() ->
+    {amount, currency, range_min, range_max}) rather than the schema's
+    documented {monthly_cost_usd, currency, breakdown, range_min, range_max}.
+    Caught by test_schema_conformance.py, which is exactly what that test
+    suite is for. Idempotent: already-normalized input (monthly_cost_usd
+    present) passes through unchanged, so this is safe to call even if
+    Karim fixes this upstream later.
+    """
+    result = dict(result)
+    cost = dict(result.get("cost_estimate") or {})
+    if "monthly_cost_usd" not in cost and "amount" in cost:
         cost = {
-            "monthly_cost_usd": _money_amount(cost),
+            "monthly_cost_usd": cost.get("amount", 0),
             "currency": cost.get("currency", "USD"),
-            # Karim's pipeline produces a single total, never a per-service
-            # split, so there is nothing to populate this with. Left empty
-            # rather than faked; the report simply omits the breakdown table.
-            "breakdown": cost.get("breakdown") or [],
-            # Keep the uncertainty range - it's real information the schema
-            # has no field for, and dropping it would lose it entirely.
+            "breakdown": cost.get("breakdown") or [],  # this agent never splits by service
             "range_min": cost.get("range_min"),
             "range_max": cost.get("range_max"),
         }
-    out["cost_estimate"] = cost
-
-    # --- generated_terraform: {files: {...}} -> {main_tf, variables_tf, ...} ---
-    terraform = dict(out.get("generated_terraform") or {})
-    if "files" in terraform and "main_tf" not in terraform:
-        files = terraform.get("files") or {}
-        out["generated_terraform"] = {
-            "main_tf": files.get("main.tf", ""),
-            "variables_tf": files.get("variables.tf", ""),
-            "outputs_tf": files.get("outputs.tf", ""),
-            # The agent validates with `terraform plan` before emitting; if it
-            # hadn't passed there would be no artifacts to normalize.
-            "plan_passed": terraform.get("plan_passed", True),
-            "variables": terraform.get("variables") or {},
-        }
-
-    # --- optimizations: {name, reason, projected_monthly_savings} -> schema ---
-    optimizations = []
-    for option in out.get("optimizations") or []:
-        if "strategy" in option and "projected_savings_usd" in option:
-            optimizations.append(option)
-            continue
-        optimizations.append({
-            "strategy": _normalize_strategy(option.get("name", "")),
-            "projected_savings_usd": option.get(
-                "projected_monthly_savings", option.get("projected_savings_usd", 0)
-            ) or 0,
-            "description": option.get("reason") or option.get("description") or "",
-            "selected": option.get("selected"),
-        })
-    out["optimizations"] = optimizations
-
-    # --- load_scenarios: estimated_monthly_cost (Money) -> ..._usd ---
-    scenarios = []
-    for scenario in out.get("load_scenarios") or []:
-        if "estimated_monthly_cost_usd" in scenario:
-            scenarios.append(scenario)
-            continue
-        sizing = scenario.get("sizing") or {}
-        scenarios.append({
-            "users": scenario.get("users"),
-            "estimated_monthly_cost_usd": _money_amount(
-                scenario.get("estimated_monthly_cost")
-            ),
-            # The schema wants prose; the agent gives a sizing dict. Render it
-            # rather than leaving the column blank.
-            "scaling_assumptions": scenario.get("scaling_assumptions")
-            or ", ".join(f"{k}: {v}" for k, v in sizing.items())
-            or "",
-        })
-    out["load_scenarios"] = scenarios
-
-    # --- region_comparison: estimated_monthly_cost (Money) -> monthly_cost_usd ---
-    regions = []
-    for region in out.get("region_comparison") or []:
-        if "monthly_cost_usd" in region:
-            regions.append(region)
-            continue
-        regions.append({
-            "region": region.get("region", ""),
-            "monthly_cost_usd": _money_amount(region.get("estimated_monthly_cost")),
-        })
-    out["region_comparison"] = regions
-
-    return out
+        result["cost_estimate"] = cost
+    return result
 
 
 # =============================================================================
@@ -391,7 +368,6 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
 # TODO: delete this function if Karim and Oussema converge their schemas.
 
 _DEFAULT_PLATFORM = "linux/amd64"   # Fargate requires amd64 unless Graviton
-_DEFAULT_CONTEXT = "."
 
 
 def translate_infracost_to_deploy_payload(
@@ -405,66 +381,70 @@ def translate_infracost_to_deploy_payload(
 
     Args:
         job_id: orchestrator job id (DeployOps requires a non-empty job_id).
-        deploy_inputs: the `_deploy_inputs` block stashed by call_infracost().
+        deploy_inputs: the "_deploy_inputs" block stashed by
+            _run_infracost_pipeline() - compute_type / artifacts / aws_config
+            / deployment_config, model_dump(by_alias=True).
         approved_by: whoever approved human gate 2.
 
     Raises:
         ValueError: if the compute type is one DeployOps can't deploy, or if
-            a container-based deployment carries no Dockerfile. Failing loudly
-            here is the whole point — the alternative is a silent no-op that
-            only breaks later, inside AWS.
+            no Dockerfile content is available. Failing loudly here is the
+            whole point - the alternative is a silent no-op that only breaks
+            later, inside AWS.
     """
     compute_type = deploy_inputs.get("compute_type")
     artifacts = deploy_inputs.get("artifacts") or {}
     aws_config = deploy_inputs.get("aws_config") or {}
     deployment_config = deploy_inputs.get("deployment_config") or {}
 
-    # ---- (c) aws_config -------------------------------------------------
-    # DeployOps only models ECS (ecs_cluster / service_name). InfraCost can
-    # also emit lambda / ec2 blocks, which DeployOps has no fields for.
+    # ---- compute type ------------------------------------------------------
+    # DeployOps's AWSConfig (src/agents/deployops/models.py) only has
+    # ecs_cluster / service_name - no lambda or ec2 fields exist there at
+    # all. Real, unresolved scope gap between the two agents, not something
+    # this function can paper over.
     ecs_block = aws_config.get("ecs")
-    if not ecs_block:
+    if compute_type != "ecs" or not ecs_block:
         raise ValueError(
             f"DeployOps currently only supports ECS deployments, but InfraCost "
             f"recommended compute_type={compute_type!r}. No lambda/ec2 mapping "
             f"exists in DeployOps's AWSConfig model yet."
         )
 
-    # ---- (a)+(b) docker images -----------------------------------------
-    docker_images: list[dict[str, Any]] = []
-    dockerfile = artifacts.get("dockerfile")
-    docker_image = artifacts.get("docker_image") or {}
-
-    if dockerfile:
-        docker_images.append({
-            "name": docker_image.get("name") or f"devguard-{job_id[:8]}",
-            "dockerfile": dockerfile,
-            # Neither field exists upstream; InfraCost never emits them.
-            "context": artifacts.get("source_code") or _DEFAULT_CONTEXT,
-            "tag": docker_image.get("tag") or "latest",
-            "platform": _DEFAULT_PLATFORM,
-        })
-    else:
+    # ---- Dockerfile content --------------------------------------------------
+    # This InfraCost build (output_builder.resolve_docker_artifacts) GENERATES
+    # the Dockerfile content itself (f"FROM {base_image}\nCOPY . /app\n") -
+    # unlike an earlier API seen on a different master snapshot, which only
+    # pointed at a source_code path (CodeSec's already-deleted clone). Still
+    # failing loudly if this ever regresses, rather than silently sending an
+    # empty image.
+    dockerfile_content = artifacts.get("dockerfile")
+    if not dockerfile_content:
         raise ValueError(
-            "ECS deployment requires a Dockerfile, but InfraCost's artifacts "
-            "carry none (artifacts.dockerfile is null). Refusing to send a "
-            "payload that would silently deploy zero images."
+            "artifacts.dockerfile is empty - InfraCost produced no Dockerfile "
+            "content (e.g. a Lambda deployment, which doesn't use one) or its "
+            "Dockerfile-generation logic changed. Refusing to send DeployOps "
+            "an image build with no Dockerfile."
         )
 
-    # ---- terraform files ------------------------------------------------
-    # InfraCost dumps by_alias, so keys are already real filenames
-    # ("main.tf", "variables.tf", "outputs.tf") -> matches DeployOps's
-    # Dict[str, str]. No translation needed, just a defensive copy.
+    docker_image = artifacts.get("docker_image") or {}
+    docker_images = [{
+        "name": docker_image.get("name") or f"devguard-{job_id[:8]}",
+        "dockerfile": dockerfile_content,
+        # Neither field exists upstream; InfraCost never emits them.
+        "context": artifacts.get("source_code") or _DEFAULT_CONTEXT,
+        "tag": docker_image.get("tag") or "latest",
+        "platform": _DEFAULT_PLATFORM,
+    }]
+
+    # ---- terraform files ---------------------------------------------------
     terraform = artifacts.get("terraform") or {}
     tf_files = dict(terraform.get("files") or {})
     if not tf_files:
         raise ValueError("InfraCost produced no Terraform files; nothing to deploy.")
 
-    # ---- (d) deployment_config -----------------------------------------
+    # ---- deployment_config ---------------------------------------------------
     ecs_deploy = deployment_config.get("ecs") or {}
     strategy = ecs_deploy.get("strategy", "rolling")
-    # DeployOps's DeploymentStrategy enum uses "blue_green" (underscore);
-    # the orchestrator state Literal and InfraCost both say "blue-green".
     if strategy == "blue-green":
         strategy = "blue_green"
 
@@ -499,10 +479,6 @@ def translate_infracost_to_deploy_payload(
         "metadata": {},
     }
 
-    # DeployOps's rollback() does payload["aws_config"]["ecs_cluster"] with no
-    # guard, while its own AWSConfig model declares that field Optional. A
-    # None here would only blow up later, mid-rollback, when things are
-    # already going wrong. Fail now instead.
     if not payload["aws_config"]["ecs_cluster"] or not payload["aws_config"]["service_name"]:
         raise ValueError(
             "InfraCost's aws_config.ecs is missing cluster/service_name; "

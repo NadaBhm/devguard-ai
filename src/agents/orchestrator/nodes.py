@@ -613,8 +613,8 @@ def deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
 
     deploy_payload: dict = {}
     if use_real_deployops():
-        deploy_inputs = (state.get("infracost_result") or {}).get("_deploy_inputs")
-        if not deploy_inputs:
+        raw_output = (state.get("infracost_result") or {}).get("_deploy_inputs")
+        if not raw_output:
             # Real DeployOps against mock InfraCost: there is nothing real to
             # deploy. Better to say so than to ship an empty payload.
             raise ValueError(
@@ -623,7 +623,7 @@ def deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
                 "DEVGUARD_REAL_INFRACOST=1 as well, or turn DeployOps back to mock."
             )
         deploy_payload = translate_infracost_to_deploy_payload(
-            job_id, deploy_inputs, approved_by=approved_by
+            job_id, raw_output, approved_by=approved_by
         )
 
     state["deployops_result"] = run_sync(call_deployops(deploy_payload, job_id))

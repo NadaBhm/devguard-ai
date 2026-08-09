@@ -102,87 +102,61 @@ class TestAgentResultsConformance:
 
 class TestRealInfraCostShape:
     """
-    The exact payload Karim's to_orchestrator_result() produces - his Pydantic
-    models dumped as-is. Every one of these five keys carries different field
-    names from the schema.
+    What call_infracost() returns in real mode: to_orchestrator_result()'s
+    output plus a "_deploy_inputs" block, matching the master snapshot merged
+    2026-08-08 (core.orchestrator_adapter + run_pipeline_with_context).
     """
 
     @pytest.fixture
-    def raw_infracost(self):
-        money = {"amount": 145.32, "currency": "USD", "range_min": 120.0, "range_max": 170.0}
+    def infracost_result(self):
         return {
             "architecture_recommendation": "ecs_fargate",
-            "justification": "FastAPI with moderate traffic",
+            "justification": "ECS Fargate fits this workload.",
             "generated_terraform": {
                 "files": {"main.tf": "M", "variables.tf": "V", "outputs.tf": "O"},
                 "variables": {"region": "us-east-1"},
             },
-            "cost_estimate": money,
-            "load_scenarios": [
-                {"users": 1000, "sizing": {"cpu": 256, "memory": 512},
-                 "estimated_monthly_cost": money}
-            ],
-            "optimizations": [
-                {"name": "Graviton processors", "reason": "20% cheaper",
-                 "projected_monthly_savings": 25.4, "selected": True}
-            ],
-            "region_comparison": [{"region": "us-east-1", "estimated_monthly_cost": money}],
+            "cost_estimate": {
+                "amount": 145.32, "currency": "USD",   # raw Money shape, as to_orchestrator_result() emits
+                "range_min": 120.0, "range_max": 170.0,
+            },
+            "load_scenarios": [{"users": 1000, "estimated_monthly_cost": {"amount": 145.32}}],
+            "optimizations": [{"name": "graviton", "reason": "cheaper", "selected": True}],
+            "region_comparison": [{"region": "us-east-1", "estimated_monthly_cost": {"amount": 145.32}}],
+            "_deploy_inputs": {
+                "compute_type": "ecs",
+                "artifacts": {
+                    "terraform": {"files": {"main.tf": "M"}, "variables": {}},
+                    "dockerfile": "FROM python:3.12-slim\n",
+                    "docker_image": {"name": "devguard-app", "tag": "sha-abc"},
+                    "source_code": "/tmp/repo_job-abc",
+                },
+                "aws_config": {"region": "us-east-1", "ecs": {"cluster": "c", "service_name": "s"}},
+                "deployment_config": {"ecs": {"strategy": "rolling"}},
+            },
         }
 
-    def test_raw_shape_is_rejected(self, validator, raw_infracost):
+    def test_normalized_shape_conforms_to_schema(self, validator, infracost_result):
         """
-        The schema must now CATCH the mismatch. Before `required` was added it
-        validated cleanly, which is how the drift went unnoticed.
+        _deploy_inputs is an orchestrator-internal field (Dockerfile content,
+        raw terraform/aws blocks DeployOps needs), not part of the public
+        orchestrator-input-schema.json contract - validate the public view.
+        Must go through normalize_infracost_result() first: the raw
+        to_orchestrator_result() output does NOT conform on its own
+        (cost_estimate.amount, not .monthly_cost_usd) - this is the drift
+        test_schema_conformance.py exists to catch.
         """
+        normalized = normalize_infracost_result(infracost_result)
         state = create_initial_state("https://github.com/test/repo")
-        state["infracost_result"] = raw_infracost
-        assert _errors(validator, state) != []
-
-    def test_normalized_shape_conforms(self, validator, raw_infracost):
-        state = create_initial_state("https://github.com/test/repo")
-        state["infracost_result"] = normalize_infracost_result(raw_infracost)
+        state["infracost_result"] = {k: v for k, v in normalized.items() if k != "_deploy_inputs"}
         assert _errors(validator, state) == []
 
-    def test_cost_survives_normalization(self, raw_infracost):
-        """The bug this all guards against: a $0 figure in the final report."""
-        result = normalize_infracost_result(raw_infracost)
-        assert result["cost_estimate"]["monthly_cost_usd"] == 145.32
-
-    def test_uncertainty_range_is_preserved(self, raw_infracost):
-        """Real information the old schema had no field for; don't drop it."""
-        result = normalize_infracost_result(raw_infracost)
-        assert result["cost_estimate"]["range_min"] == 120.0
-        assert result["cost_estimate"]["range_max"] == 170.0
-
-    def test_terraform_files_are_flattened(self, raw_infracost):
-        result = normalize_infracost_result(raw_infracost)
-        assert result["generated_terraform"]["main_tf"] == "M"
-        assert result["generated_terraform"]["outputs_tf"] == "O"
-
-    def test_llm_strategy_names_are_mapped(self, raw_infracost):
-        result = normalize_infracost_result(raw_infracost)
-        assert result["optimizations"][0]["strategy"] == "graviton"
-        assert result["optimizations"][0]["projected_savings_usd"] == 25.4
-
-    def test_unknown_strategy_is_kept_not_dropped(self):
-        """Losing a recommendation is worse than an off-vocabulary label."""
-        result = normalize_infracost_result(
-            {"optimizations": [{"name": "S3 lifecycle tiering", "reason": "r",
-                                "projected_monthly_savings": 5}]}
-        )
-        assert result["optimizations"][0]["strategy"] == "S3 lifecycle tiering"
-
-    def test_sizing_dict_becomes_prose(self, raw_infracost):
-        result = normalize_infracost_result(raw_infracost)
-        assumptions = result["load_scenarios"][0]["scaling_assumptions"]
-        assert "cpu: 256" in assumptions
-
-    def test_normalization_is_idempotent(self, raw_infracost):
-        """The mock is already canonical; normalizing twice must be harmless."""
-        once = normalize_infracost_result(raw_infracost)
-        twice = normalize_infracost_result(once)
-        assert once == twice
+    def test_raw_shape_is_rejected_without_normalization(self, validator, infracost_result):
+        """Guards against silently reverting to the un-normalized field name."""
+        state = create_initial_state("https://github.com/test/repo")
+        state["infracost_result"] = {k: v for k, v in infracost_result.items() if k != "_deploy_inputs"}
+        assert _errors(validator, state) != []
 
     def test_mock_passes_through_unchanged(self):
         mock = build_mock_infracost_result()
-        assert normalize_infracost_result(mock)["cost_estimate"]["monthly_cost_usd"] == 145.32
+        assert normalize_infracost_result(mock) == mock

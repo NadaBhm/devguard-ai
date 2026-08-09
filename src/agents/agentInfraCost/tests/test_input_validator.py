@@ -1,3 +1,6 @@
+"""Tests for core.input_validator."""
+
+import copy
 import json
 import logging
 from pathlib import Path
@@ -5,123 +8,142 @@ from typing import Any
 
 import pytest
 
-from agentInfraCost.core.input_validator import (
-    CONFIDENCE_THRESHOLD,
-    parse_and_validate_input,
-    validate_input,
-)
-from agentInfraCost.models.exceptions import (
-    InputValidationError,
-    JobNotCompletedError,
-    LowConfidenceStackDetectionError,
+from core.input_validator import (
+    InvalidStatusError,
+    LowConfidenceError,
+    MalformedInputError,
     MissingStackDetectionError,
+    validate_input,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
-
-def _load(name: str) -> dict[str, Any]:
-    return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
-
-
-class TestNominal:
-    def test_sample_input_parses(self) -> None:
-        result = validate_input(_load("sample_input.json"))
-        assert result.job_id == "550e8400-e29b-41d4-a716-446655440000"
-        assert result.stack_detection.primary_language == "python"
-        assert result.stack_detection.container.detected is True
-
-    def test_lambda_candidate_parses(self) -> None:
-        result = validate_input(_load("sample_input_variant_lambda_candidate.json"))
-        assert result.stack_detection.container.detected is False
-        assert result.stack_detection.frameworks == []
-
-    def test_node_ecs_parses(self) -> None:
-        result = validate_input(_load("sample_input_variant_node_ecs.json"))
-        assert result.stack_detection.primary_language == "javascript"
-        assert "express" in result.stack_detection.frameworks
+VALID_FIXTURES = [
+    ("sample_input.json", "550e8400-e29b-41d4-a716-446655440000"),
+    ("sample_input_variant_lambda_candidate.json", "job-variant-001"),
+    ("sample_input_variant_node_ecs.json", "job-variant-002"),
+]
 
 
-class TestConfidenceGate:
-    def test_low_confidence_variant_is_rejected(self) -> None:
-        with pytest.raises(LowConfidenceStackDetectionError) as exc_info:
-            validate_input(_load("sample_input_variant_low_confidence.json"))
-        assert exc_info.value.confidence == pytest.approx(0.31)
-
-    def test_confidence_exactly_at_threshold_passes(self) -> None:
-        payload = _load("sample_input.json")
-        payload["stack_detection"]["confidence"] = CONFIDENCE_THRESHOLD
-        result = validate_input(payload)
-        assert result.stack_detection.confidence == CONFIDENCE_THRESHOLD
-
-    def test_confidence_just_below_threshold_is_rejected(self) -> None:
-        payload = _load("sample_input.json")
-        payload["stack_detection"]["confidence"] = CONFIDENCE_THRESHOLD - 0.01
-        with pytest.raises(LowConfidenceStackDetectionError):
-            validate_input(payload)
+def _load_fixture(filename: str) -> dict[str, Any]:
+    return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
 
 
-class TestFailFastRules:
-    def test_status_not_completed_is_rejected(self) -> None:
-        payload = _load("sample_input.json")
-        payload["status"] = "failed"
-        with pytest.raises(JobNotCompletedError) as exc_info:
-            validate_input(payload)
-        assert exc_info.value.status == "failed"
-
-    def test_missing_stack_detection_is_rejected(self) -> None:
-        payload = _load("sample_input.json")
-        del payload["stack_detection"]
-        with pytest.raises(MissingStackDetectionError):
-            validate_input(payload)
-
-    def test_null_stack_detection_is_rejected(self) -> None:
-        payload = _load("sample_input.json")
-        payload["stack_detection"] = None
-        with pytest.raises(MissingStackDetectionError):
-            validate_input(payload)
+# --------------------------------------------------------------------------
+# Nominal cases
+# --------------------------------------------------------------------------
 
 
-class TestOtherSchemaErrors:
-    def test_missing_required_nested_field_raises_input_validation_error(self) -> None:
-        payload = _load("sample_input.json")
-        del payload["stack_detection"]["container"]
-        with pytest.raises(InputValidationError):
-            validate_input(payload)
-
-    def test_non_dict_payload_is_rejected(self) -> None:
-        with pytest.raises(InputValidationError):
-            validate_input(["not", "a", "dict"])  # type: ignore[arg-type]
+@pytest.mark.parametrize("filename,expected_job_id", VALID_FIXTURES)
+def test_valid_fixtures_are_accepted(filename: str, expected_job_id: str) -> None:
+    raw = _load_fixture(filename)
+    parsed = validate_input(raw)
+    assert parsed.job_id == expected_job_id
+    assert parsed.status == "completed"
+    assert parsed.stack_detection.confidence >= 0.5
 
 
-class TestOptionalFieldWarnings:
-    def test_missing_compose_detected_logs_warning_but_still_succeeds(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        payload = _load("sample_input.json")
-        del payload["stack_detection"]["container"]["compose_detected"]
-        with caplog.at_level(logging.WARNING):
-            result = validate_input(payload)
-        assert result.stack_detection.container.compose_detected is None
-        assert any(
-            "compose_detected" in record.message for record in caplog.records
-        )
-
-    def test_no_warning_when_optional_fields_present(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        payload = _load("sample_input.json")
-        with caplog.at_level(logging.WARNING):
-            validate_input(payload)
-        assert len(caplog.records) == 0
+def test_confidence_exactly_at_threshold_is_accepted() -> None:
+    raw = _load_fixture("sample_input.json")
+    raw["stack_detection"]["confidence"] = 0.5
+    parsed = validate_input(raw)
+    assert parsed.stack_detection.confidence == 0.5
 
 
-class TestParseAndValidateInput:
-    def test_valid_json_string(self) -> None:
-        raw = (FIXTURES_DIR / "sample_input.json").read_text(encoding="utf-8")
-        result = parse_and_validate_input(raw)
-        assert result.job_id == "550e8400-e29b-41d4-a716-446655440000"
+# --------------------------------------------------------------------------
+# Limit / edge cases
+# --------------------------------------------------------------------------
 
-    def test_malformed_json_raises_input_validation_error(self) -> None:
-        with pytest.raises(InputValidationError):
-            parse_and_validate_input("{not valid json")
+
+def test_missing_optional_field_logs_warning_but_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw = _load_fixture("sample_input.json")
+    del raw["stack_detection"]["container"]["compose_detected"]
+    del raw["security_score"]
+
+    with caplog.at_level(logging.WARNING, logger="core.input_validator"):
+        parsed = validate_input(raw)
+
+    assert parsed.stack_detection.container.compose_detected is False
+    assert parsed.security_score is None
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("compose_detected" in w for w in warnings)
+    assert any("security_score" in w for w in warnings)
+
+
+def test_explicit_null_optional_field_does_not_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw = _load_fixture("sample_input_variant_lambda_candidate.json")
+    assert raw["stack_detection"]["database"] is None  # already explicit null
+
+    with caplog.at_level(logging.WARNING, logger="core.input_validator"):
+        validate_input(raw)
+
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert not any("database" in w for w in warnings)
+
+
+# --------------------------------------------------------------------------
+# Error cases
+# --------------------------------------------------------------------------
+
+
+def test_low_confidence_is_rejected() -> None:
+    raw = _load_fixture("sample_input_variant_low_confidence.json")
+    with pytest.raises(LowConfidenceError) as excinfo:
+        validate_input(raw)
+    assert excinfo.value.job_id == "job-variant-003"
+
+
+def test_status_not_completed_is_rejected() -> None:
+    raw = _load_fixture("sample_input.json")
+    raw["status"] = "processing"
+    with pytest.raises(InvalidStatusError):
+        validate_input(raw)
+
+
+def test_missing_status_is_rejected() -> None:
+    raw = _load_fixture("sample_input.json")
+    del raw["status"]
+    with pytest.raises(InvalidStatusError):
+        validate_input(raw)
+
+
+def test_missing_stack_detection_is_rejected() -> None:
+    raw = _load_fixture("sample_input.json")
+    del raw["stack_detection"]
+    with pytest.raises(MissingStackDetectionError):
+        validate_input(raw)
+
+
+def test_null_stack_detection_is_rejected() -> None:
+    raw = _load_fixture("sample_input.json")
+    raw["stack_detection"] = None
+    with pytest.raises(MissingStackDetectionError):
+        validate_input(raw)
+
+
+def test_malformed_repo_metadata_is_rejected() -> None:
+    raw = _load_fixture("sample_input.json")
+    del raw["repo_metadata"]["loc"]
+    with pytest.raises(MalformedInputError):
+        validate_input(raw)
+
+
+def test_negative_confidence_is_rejected_as_malformed() -> None:
+    raw = _load_fixture("sample_input.json")
+    raw["stack_detection"]["confidence"] = -0.1
+    with pytest.raises(MalformedInputError):
+        validate_input(raw)
+
+
+def test_fixtures_are_not_mutated_by_validation() -> None:
+    raw = _load_fixture("sample_input.json")
+    snapshot = copy.deepcopy(raw)
+    validate_input(raw)
+    assert raw == snapshot
+
+
+

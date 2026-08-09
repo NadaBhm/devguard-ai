@@ -1,21 +1,56 @@
 variable "region" {
   description = "AWS region to deploy into"
   type        = string
-  default     = "{{ region | hcl_string }}"
+  default     = "{{ region }}"
 }
 
 variable "environment" {
-  description = "Deployment environment name"
+  description = "Deployment environment"
   type        = string
-  default     = "{{ environment | hcl_string }}"
+  default     = "{{ environment }}"
 }
 
 variable "vpc_id" {
-  description = "VPC to deploy the ECS service into"
+  description = "ID of an existing VPC to deploy the load balancer and ECS tasks into"
   type        = string
 }
 
 variable "subnet_ids" {
-  description = "Subnets to deploy the ECS service into"
+  description = "IDs of existing subnets (at least 2, in different availability zones) for the load balancer and ECS tasks"
   type        = list(string)
 }
+{% if database %}
+
+# A "{{ database }}" database was detected in this repo. This module does
+# NOT create one (a real database has a real recurring cost, and picking its
+# size/engine version is a separate decision) -- fill these in with a real,
+# already-existing database's connection details before running
+# `terraform apply`. For production use, prefer AWS Secrets Manager over
+# passing db_password as a plain Terraform variable.
+
+variable "db_host" {
+  description = "Hostname of an existing {{ database }} database"
+  type        = string
+}
+
+variable "db_port" {
+  description = "Port of an existing {{ database }} database"
+  type        = number
+}
+
+variable "db_name" {
+  description = "Database name to connect to"
+  type        = string
+}
+
+variable "db_user" {
+  description = "Database user"
+  type        = string
+}
+
+variable "db_password" {
+  description = "Database password"
+  type        = string
+  sensitive   = true
+}
+{% endif %}

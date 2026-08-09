@@ -1,35 +1,41 @@
 {
-  "schema_version": "1.0",
-  "job_id": "job-example-ec2-001",
+  "schema_version": "1.1",
+  "job_id": "job-ec2-sample-001",
   "compute_type": "ec2",
   "artifacts": {
     "terraform": {
       "files": {
-        "main.tf": "resource \"aws_instance\" \"app\" { ami = \"ami-0abcdef1234567890\" instance_type = \"t3.small\" }",
-        "variables.tf": "variable \"region\" { default = \"us-east-1\" }",
-        "outputs.tf": "output \"instance_ips\" { value = aws_instance.app[*].public_ip }"
+        "main.tf": "terraform {\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"\n    }\n  }\n}\n\nprovider \"aws\" {\n  region = var.region\n}\n\nresource \"aws_instance\" \"this\" {\n  count         = 1\n  ami           = \"ami-0000000000000000\"\n  instance_type = \"t3.medium\"\n  key_name      = \"devguard-key\"\n\n  tags = {\n    Name = \"devguard-app\"\n  }\n}",
+        "variables.tf": "variable \"region\" {\n  description = \"AWS region to deploy into\"\n  type        = string\n  default     = \"us-east-1\"\n}\n\nvariable \"environment\" {\n  description = \"Deployment environment\"\n  type        = string\n  default     = \"dev\"\n}",
+        "outputs.tf": "output \"instance_ids\" {\n  value = aws_instance.this[*].id\n}\n\noutput \"public_ips\" {\n  value = aws_instance.this[*].public_ip\n}"
       },
-      "variables": { "region": "us-east-1", "environment": "dev" }
+      "variables": {
+        "region": "us-east-1",
+        "environment": "dev"
+      }
     },
-    "dockerfile": "FROM ubuntu:22.04\nWORKDIR /app\nCOPY . .\nRUN ./install.sh\nCMD [\"./run.sh\"]",
-    "docker_image": { "name": "legacy-monolith-app", "tag": "c9d8e7f6a5b4" },
-    "source_code": "/tmp/repo_job-example-ec2-001"
+    "dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+    "docker_image": {
+      "name": "devguard-app",
+      "tag": "sha-ec2f00d"
+    },
+    "source_code": "/tmp/repo_job-ec2-sample-001"
   },
   "aws_config": {
     "region": "us-east-1",
+    "estimated_monthly_cost": {
+      "amount": 31.97,
+      "currency": "USD",
+      "range_min": 25.57,
+      "range_max": 38.36
+    },
     "ecs": null,
     "lambda": null,
     "ec2": {
-      "instance_type": "t3.small",
-      "ami_id": "ami-0abcdef1234567890",
-      "instance_count": 2,
-      "key_pair_name": "devguard-keypair"
-    },
-    "estimated_monthly_cost": {
-      "amount": 30.35,
-      "currency": "USD",
-      "range_min": 24.28,
-      "range_max": 36.42
+      "instance_type": "t3.medium",
+      "ami_id": "ami-0000000000000000",
+      "instance_count": 1,
+      "key_pair_name": "devguard-key"
     }
   },
   "deployment_config": {
@@ -37,16 +43,19 @@
     "lambda": null,
     "ec2": {
       "strategy": "rolling",
-      "health_check_path": "/status",
-      "health_check_port": 80,
-      "timeout_minutes": 10
+      "health_check_path": "/health",
+      "health_check_port": 8080,
+      "timeout_minutes": 5
     }
   },
-  "approval": { "status": "rejected", "approved_by": "mohamedkarim.moalla@ensi-uma.tn" },
+  "approval": {
+    "status": "pending",
+    "approved_by": null
+  },
   "enrichment": {
-    "architecture_explanation": "This workload requires low-level OS access and long-lived local state incompatible with ECS or Lambda's ephemeral filesystems, so a self-managed EC2 fleet was chosen instead.",
-    "cost_summary": "Two t3.small instances running continuously are estimated at $30.35/month (range: $24.28-$36.42).",
-    "finops_justification": "Reserved Instances are recommended over Spot because the deployment has no automated instance replacement logic to tolerate Spot interruptions.",
-    "enrichment_source": "gemini"
+    "architecture_explanation": "Mock response: modules 5-10 (load scenarios, finops, llm enrichment) are not built yet.",
+    "cost_summary": "estimated_monthly_cost is real (module 4, cost_estimator), but a human-readable summary of it needs module 10 (llm_enrichment), not built yet.",
+    "finops_justification": "Mock response: modules 5-10 (load scenarios, finops, llm enrichment) are not built yet.",
+    "enrichment_source": "fallback"
   }
 }

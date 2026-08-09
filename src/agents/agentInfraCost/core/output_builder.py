@@ -1,198 +1,269 @@
-"""Module 7: assembles the final InfraCostOutput contract sent to Agent 3.
+"""Step 7 of the InfraCost pipeline: assemble the final output contract.
 
-Pure assembly of results already computed by decision_engine, cost_estimator,
-terraform_generator, approval_manager and llm_enrichment. The single piece of
-logic that lives here (rather than upstream) is the Docker image tag
-fallback, since it depends only on values already known at assembly time and
-the output contract explicitly calls it out as this module's job.
+No business logic here — every decision (which compute type, its sizing,
+its cost, its Terraform, its FinOps strategy) has already been made by
+modules 1-6 and 10. This module only routes those already-computed values
+into the exact shape of ``models.output_schema.InfraCostOutput``: which of
+``aws_config``/``deployment_config``'s three blocks gets filled in (the
+other two are always ``null``, never omitted), and the one piece of real
+assembly logic it owns — the Docker image tag fallback (``commit_sha`` if
+available, else ``"latest"`` plus a warning, never silently).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Final
 
-from ..models.internal_models import CostEstimateResult, DecisionResult
-from ..models.output_models import (
+from core.decision_engine import DecisionResult
+from models.input_schema import RepoAnalysisInput
+from models.output_schema import (
     Approval,
+    ApprovalStatus,
     Artifacts,
-    AwsConfig,
-    DeploymentConfig,
+    AwsConfigEc2,
+    AwsConfigEcs,
+    AwsConfigLambda,
+    DeploymentConfigEc2,
+    DeploymentConfigEcs,
+    DeploymentConfigLambda,
     DockerImage,
     Ec2AwsConfig,
     Ec2DeploymentConfig,
+    Ec2InfraCostOutput,
     EcsAwsConfig,
     EcsDeploymentConfig,
+    EcsInfraCostOutput,
     Enrichment,
-    EstimatedMonthlyCost,
     InfraCostOutput,
     LambdaAwsConfig,
     LambdaDeploymentConfig,
+    LambdaInfraCostOutput,
+    Money,
     TerraformArtifacts,
+    TerraformFiles,
 )
 
 logger = logging.getLogger(__name__)
 
+# Naming/operational conventions this agent applies consistently — not
+# decisions module 2 makes, just fixed defaults for whichever compute type
+# was chosen. Mirrors the constants terraform_generator.py already uses.
+_DOCKER_IMAGE_NAME: Final[str] = "devguard-app"
+_ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
+_ECS_SERVICE_NAME: Final[str] = "app-service"
+_ECS_HEALTH_CHECK_PATH: Final[str] = "/health"
+_ECS_HEALTH_CHECK_PORT: Final[int] = 8080
+_LAMBDA_FUNCTION_NAME: Final[str] = "app-handler"
+_LAMBDA_HANDLER: Final[str] = "handler.main"
+_LAMBDA_RUNTIME: Final[str] = "python3.12"
+_LAMBDA_TIMEOUT_SECONDS: Final[int] = 30
+_EC2_AMI_ID: Final[str] = "ami-0000000000000000"
+_EC2_KEY_PAIR_NAME: Final[str] = "devguard-key"
 
-def resolve_docker_image(*, repo_name: str, commit_sha: Optional[str]) -> DockerImage:
-    """Picks the Docker image tag, preferring commit_sha over 'latest'.
 
-    Falling back to 'latest' is accepted but logged as a warning, since it is
-    not a safe production practice (see output contract notes).
+def resolve_docker_artifacts(
+    analysis: RepoAnalysisInput, decision: DecisionResult
+) -> tuple[str | None, DockerImage | None]:
+    """Decide ``dockerfile`` / ``docker_image`` — ``None`` for a Lambda zip
+    deploy (no container detected upstream), otherwise a real Dockerfile
+    and image tag, falling back to ``"latest"`` with a warning if
+    ``commit_sha`` is unavailable — never silently.
+
+    Public (not ``_``-prefixed): module 3 (``terraform_generator``) needs
+    the resolved image string *before* rendering ECS/EC2 templates, so the
+    caller (today, ``main.py``; later, module 9's ``pipeline.py``) must be
+    able to call this ahead of ``build_output`` rather than only getting it
+    buried inside the final assembly.
     """
+    is_lambda_zip = (
+        decision.compute_type == "lambda"
+        and not analysis.stack_detection.container.detected
+    )
+    if is_lambda_zip:
+        return None, None
+
+    commit_sha = analysis.repo_metadata.commit_sha
     if commit_sha:
-        return DockerImage(name=repo_name, tag=commit_sha[:12])
-    logger.warning(
-        "No commit_sha available for repo '%s'; falling back to the 'latest' "
-        "Docker tag, which is not recommended for production deployments.",
-        repo_name,
+        tag = f"sha-{commit_sha[:7]}"
+    else:
+        tag = "latest"
+        logger.warning(
+            "job_id=%s has no commit_sha; falling back to docker tag 'latest'",
+            analysis.job_id,
+        )
+    base_image = analysis.stack_detection.container.base_image or "python:3.12-slim"
+    dockerfile = f"FROM {base_image}\nCOPY . /app\n"
+    return dockerfile, DockerImage(name=_DOCKER_IMAGE_NAME, tag=tag)
+
+
+def _build_artifacts(
+    analysis: RepoAnalysisInput,
+    terraform_files: TerraformFiles,
+    dockerfile: str | None,
+    docker_image: DockerImage | None,
+    source_code: str = ".",
+) -> Artifacts:
+    terraform = TerraformArtifacts(
+        files=terraform_files,
+        variables={"region": "us-east-1", "environment": "dev"},
     )
-    return DockerImage(name=repo_name, tag="latest")
-
-
-def _to_wire_cost(cost: CostEstimateResult) -> EstimatedMonthlyCost:
-    """Converts cost_estimator's internal CostEstimateResult into the wire
-    contract's EstimatedMonthlyCost. The two shapes are identical by design
-    but are distinct Pydantic classes (internal vs. output_models), so
-    Pydantic does not coerce one into the other automatically."""
-    return EstimatedMonthlyCost(
-        amount=cost.amount,
-        currency=cost.currency,
-        range_min=cost.range_min,
-        range_max=cost.range_max,
+    return Artifacts(
+        terraform=terraform,
+        dockerfile=dockerfile,
+        docker_image=docker_image,
+        source_code=source_code,
     )
 
 
-def _build_aws_config(
+def _build_ecs_output(
+    analysis: RepoAnalysisInput,
     decision: DecisionResult,
-    region: str,
-    estimated_monthly_cost: CostEstimateResult,
-) -> AwsConfig:
-    ecs_block: Optional[EcsAwsConfig] = None
-    lambda_block: Optional[LambdaAwsConfig] = None
-    ec2_block: Optional[Ec2AwsConfig] = None
-
-    if decision.compute_type == "ecs" and decision.ecs is not None:
-        ecs_block = EcsAwsConfig(
-            cluster=decision.ecs.cluster,
-            service_name=decision.ecs.service_name,
-            task_cpu=str(decision.ecs.task_cpu),
-            task_memory=str(decision.ecs.task_memory),
-        )
-    elif decision.compute_type == "lambda" and decision.lambda_ is not None:
-        lambda_block = LambdaAwsConfig(
-            function_name=decision.lambda_.function_name,
-            runtime=decision.lambda_.runtime,
-            memory_mb=decision.lambda_.memory_mb,
-            timeout_seconds=decision.lambda_.timeout_seconds,
-            handler=decision.lambda_.handler,
-        )
-    elif decision.compute_type == "ec2" and decision.ec2 is not None:
-        ec2_block = Ec2AwsConfig(
-            instance_type=decision.ec2.instance_type,
-            ami_id=decision.ec2.ami_id,
-            instance_count=decision.ec2.instance_count,
-            key_pair_name=decision.ec2.key_pair_name,
-        )
-    else:
-        raise ValueError(
-            f"DecisionResult.compute_type='{decision.compute_type}' but the "
-            f"matching sizing block is missing"
-        )
-
-    return AwsConfig(
-        region=region,
-        ecs=ecs_block,
-        lambda_=lambda_block,
-        ec2=ec2_block,
-        estimated_monthly_cost=_to_wire_cost(estimated_monthly_cost),
+    artifacts: Artifacts,
+    cost: Money,
+    enrichment: Enrichment,
+    approval_status: ApprovalStatus,
+) -> EcsInfraCostOutput:
+    sizing = decision.sizing
+    return EcsInfraCostOutput(
+        job_id=analysis.job_id,
+        artifacts=artifacts,
+        aws_config=AwsConfigEcs(
+            region="us-east-1",
+            estimated_monthly_cost=cost,
+            ecs=EcsAwsConfig(
+                cluster=_ECS_CLUSTER_NAME,
+                service_name=_ECS_SERVICE_NAME,
+                task_cpu=str(sizing["task_cpu"]),
+                task_memory=str(sizing["task_memory"]),
+            ),
+        ),
+        deployment_config=DeploymentConfigEcs(
+            ecs=EcsDeploymentConfig(
+                strategy="rolling",
+                health_check_path=_ECS_HEALTH_CHECK_PATH,
+                health_check_port=_ECS_HEALTH_CHECK_PORT,
+                timeout_minutes=5,
+                min_healthy_percent=50,
+                max_percent=200,
+            )
+        ),
+        approval=Approval(status=approval_status),
+        enrichment=enrichment,
     )
 
 
-def _build_deployment_config(decision: DecisionResult) -> DeploymentConfig:
-    ecs_block: Optional[EcsDeploymentConfig] = None
-    lambda_block: Optional[LambdaDeploymentConfig] = None
-    ec2_block: Optional[Ec2DeploymentConfig] = None
+def _build_lambda_output(
+    analysis: RepoAnalysisInput,
+    decision: DecisionResult,
+    artifacts: Artifacts,
+    cost: Money,
+    enrichment: Enrichment,
+    approval_status: ApprovalStatus,
+) -> LambdaInfraCostOutput:
+    sizing = decision.sizing
+    return LambdaInfraCostOutput(
+        job_id=analysis.job_id,
+        artifacts=artifacts,
+        aws_config=AwsConfigLambda(
+            region="us-east-1",
+            estimated_monthly_cost=cost,
+            lambda_=LambdaAwsConfig(
+                function_name=_LAMBDA_FUNCTION_NAME,
+                runtime=_LAMBDA_RUNTIME,
+                memory_mb=int(sizing["memory_mb"]),
+                timeout_seconds=_LAMBDA_TIMEOUT_SECONDS,
+                handler=_LAMBDA_HANDLER,
+            ),
+        ),
+        deployment_config=DeploymentConfigLambda(
+            lambda_=LambdaDeploymentConfig(strategy="all_at_once", reserved_concurrency=None)
+        ),
+        approval=Approval(status=approval_status),
+        enrichment=enrichment,
+    )
 
-    if decision.compute_type == "ecs" and decision.ecs is not None:
-        ecs_block = EcsDeploymentConfig(
-            health_check_path=decision.ecs.health_check_path,
-            health_check_port=decision.ecs.health_check_port,
-            timeout_minutes=decision.ecs.timeout_minutes,
-            min_healthy_percent=decision.ecs.min_healthy_percent,
-            max_percent=decision.ecs.max_percent,
-        )
-    elif decision.compute_type == "lambda" and decision.lambda_ is not None:
-        lambda_block = LambdaDeploymentConfig(
-            reserved_concurrency=decision.lambda_.reserved_concurrency,
-        )
-    elif decision.compute_type == "ec2" and decision.ec2 is not None:
-        ec2_block = Ec2DeploymentConfig(
-            health_check_path=decision.ec2.health_check_path,
-            health_check_port=decision.ec2.health_check_port,
-            timeout_minutes=decision.ec2.timeout_minutes,
-        )
-    else:
-        raise ValueError(
-            f"DecisionResult.compute_type='{decision.compute_type}' but the "
-            f"matching sizing block is missing"
-        )
 
-    return DeploymentConfig(ecs=ecs_block, lambda_=lambda_block, ec2=ec2_block)
+def _build_ec2_output(
+    analysis: RepoAnalysisInput,
+    decision: DecisionResult,
+    artifacts: Artifacts,
+    cost: Money,
+    enrichment: Enrichment,
+    approval_status: ApprovalStatus,
+) -> Ec2InfraCostOutput:
+    sizing = decision.sizing
+    return Ec2InfraCostOutput(
+        job_id=analysis.job_id,
+        artifacts=artifacts,
+        aws_config=AwsConfigEc2(
+            region="us-east-1",
+            estimated_monthly_cost=cost,
+            ec2=Ec2AwsConfig(
+                instance_type=str(sizing["instance_type"]),
+                ami_id=_EC2_AMI_ID,
+                instance_count=1,
+                key_pair_name=_EC2_KEY_PAIR_NAME,
+            ),
+        ),
+        deployment_config=DeploymentConfigEc2(
+            ec2=Ec2DeploymentConfig(
+                strategy="rolling",
+                health_check_path=_ECS_HEALTH_CHECK_PATH,
+                health_check_port=_ECS_HEALTH_CHECK_PORT,
+                timeout_minutes=5,
+            )
+        ),
+        approval=Approval(status=approval_status),
+        enrichment=enrichment,
+    )
+
+
+_BUILDERS = {
+    "ecs": _build_ecs_output,
+    "lambda": _build_lambda_output,
+    "ec2": _build_ec2_output,
+}
 
 
 def build_output(
-    *,
-    job_id: str,
+    analysis: RepoAnalysisInput,
     decision: DecisionResult,
-    estimated_monthly_cost: CostEstimateResult,
-    terraform_files: dict[str, str],
-    terraform_variables: dict[str, str | int | float | bool],
-    region: str,
-    repo_name: str,
-    commit_sha: Optional[str],
-    container_detected: bool,
-    dockerfile_content: Optional[str],
-    source_code_path: str,
-    approval: Approval,
+    terraform_files: TerraformFiles,
+    cost: Money,
     enrichment: Enrichment,
+    dockerfile: str | None = None,
+    docker_image: DockerImage | None = None,
+    approval_status: ApprovalStatus = "pending",
+    source_code: str = ".",
 ) -> InfraCostOutput:
-    """Assembles the final InfraCostOutput sent to the deployment agent.
+    """Assemble the final contract from already-computed module outputs.
 
-    :param decision: output of decision_engine (module 2)
-    :param estimated_monthly_cost: output of cost_estimator (module 4)
-    :param terraform_files: {"main.tf": ..., "variables.tf": ..., "outputs.tf": ...}
-        from terraform_generator (module 3)
-    :param container_detected: stack_detection.container.detected from the
-        validated input; when False, dockerfile/docker_image are left null
-        even for a "lambda" compute_type built without a container image.
-    :param approval: output of approval_manager (module 8)
-    :param enrichment: output of llm_enrichment (module 10)
-    :raises ValueError: if decision.compute_type does not match a populated
-        sizing block (indicates a bug upstream in decision_engine).
+    Args:
+        analysis: Module 1's output.
+        decision: Module 2's output — routes which variant is built.
+        terraform_files: Module 3's output.
+        cost: Module 4's output.
+        enrichment: Module 10's output (or a fallback), never computed here.
+        dockerfile: Pre-resolved via ``resolve_docker_artifacts`` — passed
+            in rather than recomputed here, since module 3 already needed
+            the same value to render ECS/EC2 templates. If omitted, it is
+            resolved on the spot (convenient for callers, like tests, that
+            don't already have it from a prior ``generate_terraform`` call).
+        docker_image: Same as ``dockerfile``, resolved together.
+        approval_status: Defaults to "pending" — module 8 owns the real
+            state machine; this is just what gets stamped on assembly.
+        source_code: Where the deployable source lives for tooling that
+            consumes these artifacts (e.g. the DeployOps agent). Defaults
+            to ``"."`` — a relative build context, never a fabricated
+            ``/tmp`` checkout path that nobody created.
+
+    Returns:
+        One of the three ``InfraCostOutput`` variants, with the other two
+        ``aws_config``/``deployment_config`` blocks explicitly ``null``.
     """
-    docker_image: Optional[DockerImage] = None
-    dockerfile: Optional[str] = None
-    if container_detected:
-        dockerfile = dockerfile_content
-        docker_image = resolve_docker_image(repo_name=repo_name, commit_sha=commit_sha)
-
-    artifacts = Artifacts(
-        terraform=TerraformArtifacts(files=terraform_files, variables=terraform_variables),
-        dockerfile=dockerfile,
-        docker_image=docker_image,
-        source_code=source_code_path,
-    )
-
-    aws_config = _build_aws_config(decision, region, estimated_monthly_cost)
-    deployment_config = _build_deployment_config(decision)
-
-    return InfraCostOutput(
-        job_id=job_id,
-        compute_type=decision.compute_type,
-        artifacts=artifacts,
-        aws_config=aws_config,
-        deployment_config=deployment_config,
-        approval=approval,
-        enrichment=enrichment,
-    )
+    if dockerfile is None and docker_image is None:
+        dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+    artifacts = _build_artifacts(analysis, terraform_files, dockerfile, docker_image, source_code)
+    builder = _BUILDERS[decision.compute_type]
+    return builder(analysis, decision, artifacts, cost, enrichment, approval_status)

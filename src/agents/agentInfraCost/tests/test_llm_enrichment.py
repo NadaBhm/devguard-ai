@@ -1,184 +1,166 @@
-"""Tests for llm_enrichment.py.
+"""Tests for core.llm_enrichment — fallback mode ONLY.
 
-Per the module spec, these tests run in fallback mode only: no real
-GEMINI_API_KEY and no network call is ever made. Where the Gemini branch
-itself needs exercising (call failure, empty response, success), the
-module's own `_call_gemini_sync` is monkeypatched directly rather than the
-shared GeminiClient — this avoids depending on `google-generativeai` being
-installed at all (it isn't, in this environment) while still covering
-`_generate_text`'s full branching logic honestly.
+Per the mission: no real GEMINI_API_KEY, no network call, ever, in this
+test file. Every test either unsets GEMINI_API_KEY (forcing the fallback
+path deterministically) or, where an API key is simulated, monkeypatches
+the Gemini client itself so nothing ever leaves the process.
 """
 
 import pytest
 
-import agentInfraCost.core.llm_enrichment as llm_enrichment
-from agentInfraCost.core.llm_enrichment import (
-    enrich,
+from core.decision_engine import DecisionResult
+from core.finops_optimizer import FinOpsRecommendation, OptimizationOption
+from core.llm_enrichment import (
+    _call_gemini,
+    build_enrichment,
     explain_architecture_decision,
     explain_finops_choice,
     summarize_cost_estimation,
 )
-from agentInfraCost.models.internal_models import (
-    CostEstimateResult,
-    DecisionResult,
-    EcsSizing,
-    FinOpsOption,
-    FinOpsResult,
-    ScoreBreakdown,
+from models.output_schema import Money
+
+_DECISION = DecisionResult(
+    compute_type="ecs",
+    sizing={"task_cpu": "512", "task_memory": "1024"},
+    score_breakdown={"ecs": 7.0, "lambda": -5.0, "ec2": 2.0},
+)
+_COST = Money(amount=14.42, currency="USD", range_min=11.53, range_max=17.30)
+_FINOPS = FinOpsRecommendation(
+    recommended=OptimizationOption(name="spot", reason="Sûr ici, scaling horizontal détecté."),
+    discarded=[OptimizationOption(name="graviton", reason="Déjà pris en compte dans le coût de base.")],
+    context={"compose_detected": True, "horizontal_scaling_detected": True},
 )
 
 
 @pytest.fixture(autouse=True)
 def _no_gemini_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test in this file starts with no GEMINI_API_KEY set, matching
-    the "must work with zero configuration" requirement. Individual tests
-    override this via monkeypatch.setenv when they need to exercise the
-    Gemini branch (still without a real key or network call)."""
+    """Every test in this file runs with no API key unless it opts in
+    explicitly — the mission requires fallback-only testing here."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
 
-def _decision() -> DecisionResult:
-    return DecisionResult(
+# --------------------------------------------------------------------------
+# Nominal cases
+# --------------------------------------------------------------------------
+
+
+def test_explain_architecture_decision_falls_back_without_key() -> None:
+    text, source = explain_architecture_decision(_DECISION)
+    assert source == "fallback"
+    assert "ecs" in text
+    assert "7.0" in text
+
+
+def test_explain_architecture_decision_uses_llm_reasoning_when_source_is_llm() -> None:
+    """When decision_source is "llm", the fallback text must use the LLM's
+    own reasoning -- not claim the (informational-only) scores decided it."""
+    llm_decision = DecisionResult(
+        compute_type="lambda",
+        sizing={"memory_mb": 256},
+        score_breakdown={"ecs": 7.0, "lambda": -5.0, "ec2": 2.0},  # ecs is highest here
+        decision_source="llm",
+        llm_reasoning="Projet petit et sans état, une fonction suffit.",
+    )
+
+    text, source = explain_architecture_decision(llm_decision)
+
+    assert source == "fallback"
+    assert "Projet petit et sans état, une fonction suffit." in text
+    assert "score le plus élevé" not in text
+
+
+def test_summarize_cost_estimation_falls_back_without_key() -> None:
+    text, source = summarize_cost_estimation(_DECISION, _COST)
+    assert source == "fallback"
+    assert "14.42" in text
+    assert "USD" in text
+
+
+def test_explain_finops_choice_falls_back_without_key() -> None:
+    text, source = explain_finops_choice(_FINOPS)
+    assert source == "fallback"
+    assert "spot" in text
+    assert "graviton" in text
+
+
+def test_build_enrichment_assembles_all_three_as_fallback() -> None:
+    enrichment = build_enrichment(_DECISION, _COST, _FINOPS)
+
+    assert enrichment.enrichment_source == "fallback"
+    assert "ecs" in enrichment.architecture_explanation
+    assert "14.42" in enrichment.cost_summary
+    assert "spot" in enrichment.finops_justification
+
+
+# --------------------------------------------------------------------------
+# Limit / edge cases
+# --------------------------------------------------------------------------
+
+
+def test_call_gemini_returns_none_without_key() -> None:
+    assert _call_gemini("prompt", "system") is None
+
+
+def test_call_gemini_falls_back_on_any_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key IS present here, but the client itself is monkeypatched to
+    raise — proving the try/except covers real failures too, never just
+    the missing-key case. No real network call happens."""
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
+
+    class _ExplodingClient:
+        def __init__(self, api_key: str) -> None:
+            raise RuntimeError("simulated Gemini outage")
+
+    monkeypatch.setattr("shared.llm.gemini.gemini_client.GeminiClient", _ExplodingClient)
+
+    assert _call_gemini("prompt", "system") is None
+
+
+def test_enrichment_source_is_fallback_even_if_only_one_of_three_would_succeed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """enrichment_source must never claim "gemini" unless ALL three texts
+    really came from it — simulate one real success and two fallbacks."""
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
+    calls = {"n": 0}
+
+    def _fake_call_gemini(prompt: str, system_instruction: str) -> str | None:
+        calls["n"] += 1
+        return "a real gemini answer" if calls["n"] == 1 else None
+
+    monkeypatch.setattr("core.llm_enrichment._call_gemini", _fake_call_gemini)
+
+    enrichment = build_enrichment(_DECISION, _COST, _FINOPS)
+
+    assert enrichment.enrichment_source == "fallback"
+
+
+# --------------------------------------------------------------------------
+# Error cases
+# --------------------------------------------------------------------------
+
+
+def test_malformed_score_breakdown_raises_not_silently_swallowed() -> None:
+    """The try/except only shields the Gemini call itself — our own
+    fallback-text formatting must still fail loudly on bad input."""
+    broken_decision = DecisionResult(
         compute_type="ecs",
-        ecs=EcsSizing(
-            cluster="devguard-cluster",
-            service_name="repo-name-service",
-            task_cpu=512,
-            task_memory=1024,
-            health_check_path="/health",
-            health_check_port=8080,
-            timeout_minutes=5,
-            min_healthy_percent=50,
-            max_percent=200,
-        ),
-        score_breakdown=ScoreBreakdown(
-            ecs_score=8.0, lambda_score=0.0, ec2_score=2.5, signals={"container_detected": True}
-        ),
-        reasoning=["container_detected=True", "selected compute_type='ecs'"],
+        sizing={"task_cpu": "512", "task_memory": "1024"},
+        score_breakdown={"ecs": 7.0},  # lambda/ec2 missing on purpose
     )
+    with pytest.raises(KeyError):
+        explain_architecture_decision(broken_decision)
 
 
-def _cost() -> CostEstimateResult:
-    return CostEstimateResult(amount=18.02, currency="USD", range_min=14.42, range_max=21.62)
+def test_enrichment_rejects_invalid_source() -> None:
+    from pydantic import ValidationError
 
+    from models.output_schema import Enrichment
 
-def _finops() -> FinOpsResult:
-    return FinOpsResult(
-        recommended_option="reserved",
-        discarded_options=[
-            FinOpsOption(name="spot", recommended=False, reason="too risky here"),
-            FinOpsOption(name="graviton", recommended=False, reason="reserved already chosen"),
-            FinOpsOption(name="on_demand", recommended=False, reason="undiscounted baseline"),
-        ],
-        context_used={"critical_stateful": True, "compute_type": "ecs"},
-    )
-
-
-class TestFallbackModeNoApiKey:
-    def test_explain_architecture_decision_falls_back(self) -> None:
-        text, source = explain_architecture_decision(_decision())
-        assert source == "fallback"
-        assert "ECS" in text
-        assert isinstance(text, str) and len(text) > 0
-
-    def test_summarize_cost_estimation_falls_back(self) -> None:
-        text, source = summarize_cost_estimation(_decision(), _cost())
-        assert source == "fallback"
-        assert "18.02" in text
-        assert "USD" in text
-
-    def test_explain_finops_choice_falls_back(self) -> None:
-        text, source = explain_finops_choice(_finops())
-        assert source == "fallback"
-        assert "reserved" in text
-
-    def test_enrich_produces_full_block_with_fallback_source(self) -> None:
-        result = enrich(decision=_decision(), cost=_cost(), finops=_finops())
-        assert result.enrichment_source == "fallback"
-        assert "ECS" in result.architecture_explanation
-        assert "18.02" in result.cost_summary
-        assert "reserved" in result.finops_justification
-
-    def test_enrich_never_raises_and_never_needs_network(self) -> None:
-        """Nominal, zero-configuration path required by the pipeline spec:
-        must work end to end with no GEMINI_API_KEY, no exception."""
-        result = enrich(decision=_decision(), cost=_cost(), finops=_finops())
-        assert result.enrichment_source in ("gemini", "fallback")
-
-
-class TestGeminiBranchViaMonkeypatchedCall:
-    """Exercises _generate_text's Gemini branch without touching the real
-    GeminiClient or making any network call."""
-
-    def test_successful_gemini_call_is_used_verbatim(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-testing-only")
-        monkeypatch.setattr(
-            llm_enrichment, "_call_gemini_sync", lambda prompt, *, timeout_seconds: "  Gemini text.  "
+    with pytest.raises(ValidationError):
+        Enrichment(
+            architecture_explanation="x",
+            cost_summary="y",
+            finops_justification="z",
+            enrichment_source="made_up_source",  # type: ignore[arg-type]
         )
-        text, source = explain_architecture_decision(_decision())
-        assert source == "gemini"
-        assert text == "Gemini text."
-
-    def test_gemini_failure_falls_back_without_raising(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-testing-only")
-
-        def _raise(*args, **kwargs):
-            raise TimeoutError("simulated network timeout")
-
-        monkeypatch.setattr(llm_enrichment, "_call_gemini_sync", _raise)
-        text, source = explain_architecture_decision(_decision())
-        assert source == "fallback"
-        assert "ECS" in text
-
-    def test_gemini_empty_response_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-testing-only")
-        monkeypatch.setattr(
-            llm_enrichment, "_call_gemini_sync", lambda prompt, *, timeout_seconds: "   "
-        )
-        text, source = explain_architecture_decision(_decision())
-        assert source == "fallback"
-
-    def test_enrich_is_only_gemini_source_when_all_three_succeed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-testing-only")
-        monkeypatch.setattr(
-            llm_enrichment, "_call_gemini_sync", lambda prompt, *, timeout_seconds: "ok"
-        )
-        result = enrich(decision=_decision(), cost=_cost(), finops=_finops())
-        assert result.enrichment_source == "gemini"
-
-    def test_enrich_is_fallback_source_when_only_one_of_three_fails(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-testing-only")
-        calls = {"n": 0}
-
-        def _flaky(prompt, *, timeout_seconds):
-            calls["n"] += 1
-            if calls["n"] == 2:
-                raise RuntimeError("simulated failure on the second call")
-            return "ok"
-
-        monkeypatch.setattr(llm_enrichment, "_call_gemini_sync", _flaky)
-        result = enrich(decision=_decision(), cost=_cost(), finops=_finops())
-        assert result.enrichment_source == "fallback"
-
-
-class TestMissingOptionalDependencyIsHandledGracefully:
-    def test_real_call_path_raises_import_error_which_is_caught(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """With a (fake) key set and _call_gemini_sync NOT monkeypatched,
-        the real lazy import of google-generativeai is attempted. In this
-        environment that dependency isn't installed, so it raises
-        ImportError — which must be caught by _generate_text's broad
-        except, not propagate."""
-        monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-testing-only")
-        text, source = explain_architecture_decision(_decision(), timeout_seconds=1.0)
-        assert source == "fallback"
-        assert "ECS" in text

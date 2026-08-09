@@ -1,285 +1,185 @@
-"""Module 2: determines ECS vs Lambda vs EC2 via generic weighted scoring.
+"""Step 2 of the InfraCost pipeline: decide compute_type and its sizing.
 
-The compute-type decision is a weighted sum over structural properties of
-the detected stack — container presence, Docker Compose presence, presence
-of *any* web framework, database presence, codebase size — never a specific
-framework or database name. This is what lets the same logic classify a
-FastAPI+Postgres repo and an Express+MySQL repo identically (both ECS)
-while classifying a small, containerless script as Lambda: the reasoning
-never inspects *which* framework or database was detected, only whether
-one was detected at all.
-
-Sizing (task_cpu/task_memory, Lambda memory/timeout, EC2 instance type) is
-computed from a small "complexity points" tally over the same kind of
-generic signals, mapped onto standard AWS tiers — never copied from an
-example.
+Reads the validated ``RepoAnalysisInput`` produced by ``input_validator`` and
+picks one of ``ecs`` / ``lambda`` / ``ec2`` using a weighted scoring system
+over *generic* properties of the detected stack (container presence,
+docker-compose presence, database presence, framework presence, project
+size) — never a specific framework name. This is what lets
+``sample_input.json`` (FastAPI) and ``sample_input_variant_node_ecs.json``
+(Express) both resolve to ``ecs`` despite sharing no framework in common:
+the rule only looks at what they structurally have in common (a detected
+container plus a docker-compose file).
 """
 
 from __future__ import annotations
 
-import logging
+from typing import Final, Literal
 
-from ..models.common import ComputeType
-from ..models.input_models import InfraCostAgentInput
-from ..models.internal_models import (
-    DecisionResult,
-    Ec2Sizing,
-    EcsSizing,
-    LambdaSizing,
-    ScoreBreakdown,
+from pydantic import BaseModel
+
+from models.input_schema import RepoAnalysisInput
+
+ComputeType = Literal["ecs", "lambda", "ec2"]
+DecisionSource = Literal["deterministic", "llm"]
+
+# Below this many lines of code, an un-containerized project is considered
+# small enough to run as a single stateless function rather than needing a
+# persistent server.
+SMALL_PROJECT_LOC_THRESHOLD: Final[int] = 2_000
+
+# ECS Fargate task_cpu/task_memory must be one of AWS's valid paired
+# combinations; these three are valid low/mid/high tiers.
+_ECS_SIZE_TIERS: Final[tuple[tuple[int, str, str], ...]] = (
+    (5_000, "256", "512"),
+    (15_000, "512", "1024"),
 )
+_ECS_SIZE_DEFAULT: Final[tuple[str, str]] = ("1024", "2048")
 
-logger = logging.getLogger(__name__)
+_LAMBDA_SIZE_TIERS: Final[tuple[tuple[int, int], ...]] = (
+    (200, 128),
+    (1_000, 256),
+)
+_LAMBDA_SIZE_DEFAULT: Final[int] = 512
 
-# --- platform-wide defaults: identical for every job, never derived from input ---
-
-ECS_CLUSTER_NAME = "devguard-cluster"
-EC2_KEY_PAIR_NAME = "devguard-keypair"
-EC2_DEFAULT_AMI_ID = "ami-0000000000000000"  # placeholder pending real AMI lookup (v2)
-DEFAULT_HEALTH_CHECK_PATH = "/health"
-DEFAULT_HEALTH_CHECK_PORT = 8080
-DEFAULT_TIMEOUT_MINUTES = 5
-DEFAULT_MIN_HEALTHY_PERCENT = 50
-DEFAULT_MAX_PERCENT = 200
-
-LARGE_CODEBASE_LOC_THRESHOLD = 1000
-
-_LAMBDA_RUNTIME_BY_LANGUAGE = {
-    "python": "python3.12",
-    "javascript": "nodejs20.x",
-    "typescript": "nodejs20.x",
-    "java": "java21",
-    "go": "provided.al2023",
-    "ruby": "ruby3.3",
-}
-_LAMBDA_HANDLER_BY_LANGUAGE = {
-    "python": "main.handler",
-    "javascript": "index.handler",
-    "typescript": "index.handler",
-    "java": "Main::handleRequest",
-    "go": "bootstrap",
-    "ruby": "main.handler",
-}
-_DEFAULT_LAMBDA_RUNTIME = "provided.al2023"
-_DEFAULT_LAMBDA_HANDLER = "main.handler"
-
-# Standard resource tiers, indexed by a 0-4 "complexity points" score.
-_ECS_TASK_TIERS: list[tuple[int, int]] = [
-    (256, 512),
-    (256, 1024),
-    (512, 1024),
-    (512, 2048),
-    (1024, 2048),
-]
-_LAMBDA_TIERS: list[tuple[int, int]] = [(128, 15), (256, 30), (512, 60), (1024, 120)]
-_EC2_INSTANCE_TIERS: list[str] = ["t3.micro", "t3.small", "t3.medium", "t3.large"]
-
-# --- scoring weights (tunable; encode relative importance of each generic signal) ---
-
-_ECS_WEIGHTS = {
-    "container_detected": 3.0,
-    "compose_detected": 2.0,
-    "has_framework": 1.5,
-    "database_present": 1.0,
-    "is_large_codebase": 0.5,
-}
-_LAMBDA_WEIGHTS = {
-    "no_container": 3.0,
-    "no_framework": 1.5,
-    "is_small_codebase": 2.0,
-    "no_database": 0.5,
-}
-_EC2_WEIGHTS = {
-    "container_detected": 1.0,
-    "container_without_compose": 1.0,
-    "database_present": 1.5,
-    "no_container_and_large": 2.0,
-}
-
-# On a tie, prefer the safest general-purpose option first.
-_TIE_BREAK_PRIORITY: tuple[ComputeType, ...] = ("ecs", "ec2", "lambda")
+_EC2_SIZE_TIERS: Final[tuple[tuple[int, str], ...]] = (
+    (5_000, "t3.micro"),
+    (20_000, "t3.small"),
+)
+_EC2_SIZE_DEFAULT: Final[str] = "t3.medium"
 
 
-def _extract_signals(payload: InfraCostAgentInput) -> dict[str, bool]:
-    """Reduces the validated stack detection to generic boolean signals.
+class DecisionResult(BaseModel):
+    """The architecture decision handed to the rest of the pipeline.
 
-    No signal here is keyed on a specific framework or database name —
-    only on whether the *category* of thing was detected at all.
+    ``sizing`` intentionally stays a loosely-typed dict here — it holds
+    whichever keys make sense for ``compute_type`` (e.g. ``task_cpu`` /
+    ``task_memory`` for ecs, ``memory_mb`` for lambda, ``instance_type`` for
+    ec2). Strict per-type typing is enforced later, in the final output
+    contract built by ``output_builder`` (module 7) — this is an internal,
+    intermediate result, not the contract itself.
     """
-    stack = payload.stack_detection
-    repo = payload.repo_metadata
 
-    return {
-        "container_detected": stack.container.detected,
-        "compose_detected": bool(stack.container.compose_detected),
-        "has_framework": len(stack.frameworks) > 0,
-        "database_present": stack.database is not None,
-        "is_large_codebase": repo.loc >= LARGE_CODEBASE_LOC_THRESHOLD,
-    }
+    compute_type: ComputeType
+    sizing: dict[str, int | str]
+    score_breakdown: dict[str, float]
 
-
-def _score_compute_types(signals: dict[str, bool]) -> ScoreBreakdown:
-    container_detected = signals["container_detected"]
-    compose_detected = signals["compose_detected"]
-    has_framework = signals["has_framework"]
-    database_present = signals["database_present"]
-    is_large_codebase = signals["is_large_codebase"]
-
-    ecs_score = (
-        _ECS_WEIGHTS["container_detected"] * container_detected
-        + _ECS_WEIGHTS["compose_detected"] * compose_detected
-        + _ECS_WEIGHTS["has_framework"] * has_framework
-        + _ECS_WEIGHTS["database_present"] * database_present
-        + _ECS_WEIGHTS["is_large_codebase"] * is_large_codebase
-    )
-    lambda_score = (
-        _LAMBDA_WEIGHTS["no_container"] * (not container_detected)
-        + _LAMBDA_WEIGHTS["no_framework"] * (not has_framework)
-        + _LAMBDA_WEIGHTS["is_small_codebase"] * (not is_large_codebase)
-        + _LAMBDA_WEIGHTS["no_database"] * (not database_present)
-    )
-    ec2_score = (
-        _EC2_WEIGHTS["container_detected"] * container_detected
-        + _EC2_WEIGHTS["container_without_compose"]
-        * (container_detected and not compose_detected)
-        + _EC2_WEIGHTS["database_present"] * database_present
-        + _EC2_WEIGHTS["no_container_and_large"]
-        * ((not container_detected) and is_large_codebase)
-    )
-
-    return ScoreBreakdown(
-        ecs_score=ecs_score,
-        lambda_score=lambda_score,
-        ec2_score=ec2_score,
-        signals=signals,
-    )
+    # Both default so every existing caller of decide_architecture() (and
+    # every existing test constructing a DecisionResult directly) is
+    # unaffected. Only core.llm_architecture_advisor sets these to record
+    # that an LLM, not this module's scoring, picked compute_type.
+    decision_source: DecisionSource = "deterministic"
+    llm_reasoning: str | None = None
 
 
-def _pick_compute_type(scores: ScoreBreakdown) -> ComputeType:
-    by_type: dict[ComputeType, float] = {
-        "ecs": scores.ecs_score,
-        "lambda": scores.lambda_score,
-        "ec2": scores.ec2_score,
-    }
-    best_score = max(by_type.values())
-    for compute_type in _TIE_BREAK_PRIORITY:
-        if by_type[compute_type] == best_score:
-            return compute_type
-    raise AssertionError("unreachable: _TIE_BREAK_PRIORITY must cover all compute types")
+def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
+    """Score each compute type from generic stack properties.
 
-
-def _complexity_points(payload: InfraCostAgentInput, *, database_present: bool) -> int:
-    """Generic 0-4 complexity tally used to pick a resource tier.
-
-    Never reads a specific framework/database name — only counts (multiple
-    frameworks present, database present, codebase size, file count).
+    Every signal here is structural (container? compose? database? any
+    framework at all? how big is the project?) — never a specific
+    framework, database engine, or language name. That is what lets two
+    stacks with nothing in common but their shape (e.g. FastAPI+Postgres vs
+    Express+MySQL) score identically.
     """
-    stack = payload.stack_detection
-    repo = payload.repo_metadata
-    points = 0
-    if database_present:
-        points += 1
-    if len(stack.frameworks) >= 2:
-        points += 1
-    if repo.loc >= 5000:
-        points += 1
-    if repo.total_files >= 100:
-        points += 1
-    return points
+    container = analysis.stack_detection.container
+    scores = {"ecs": 0.0, "lambda": 0.0, "ec2": 0.0}
 
-
-def _size_ecs(payload: InfraCostAgentInput, points: int) -> EcsSizing:
-    tier_index = min(points, len(_ECS_TASK_TIERS) - 1)
-    task_cpu, task_memory = _ECS_TASK_TIERS[tier_index]
-    return EcsSizing(
-        cluster=ECS_CLUSTER_NAME,
-        service_name=f"{payload.repo_metadata.name}-service",
-        task_cpu=task_cpu,
-        task_memory=task_memory,
-        health_check_path=DEFAULT_HEALTH_CHECK_PATH,
-        health_check_port=DEFAULT_HEALTH_CHECK_PORT,
-        timeout_minutes=DEFAULT_TIMEOUT_MINUTES,
-        min_healthy_percent=DEFAULT_MIN_HEALTHY_PERCENT,
-        max_percent=DEFAULT_MAX_PERCENT,
-    )
-
-
-def _size_lambda(payload: InfraCostAgentInput, points: int) -> LambdaSizing:
-    tier_index = min(points, len(_LAMBDA_TIERS) - 1)
-    memory_mb, timeout_seconds = _LAMBDA_TIERS[tier_index]
-    language = payload.stack_detection.primary_language.lower()
-    return LambdaSizing(
-        function_name=payload.repo_metadata.name,
-        runtime=_LAMBDA_RUNTIME_BY_LANGUAGE.get(language, _DEFAULT_LAMBDA_RUNTIME),
-        memory_mb=memory_mb,
-        timeout_seconds=timeout_seconds,
-        handler=_LAMBDA_HANDLER_BY_LANGUAGE.get(language, _DEFAULT_LAMBDA_HANDLER),
-        reserved_concurrency=None,
-    )
-
-
-def _size_ec2(payload: InfraCostAgentInput, points: int) -> Ec2Sizing:
-    tier_index = min(points, len(_EC2_INSTANCE_TIERS) - 1)
-    return Ec2Sizing(
-        instance_type=_EC2_INSTANCE_TIERS[tier_index],
-        ami_id=EC2_DEFAULT_AMI_ID,
-        instance_count=2 if points >= 3 else 1,
-        key_pair_name=EC2_KEY_PAIR_NAME,
-        health_check_path=DEFAULT_HEALTH_CHECK_PATH,
-        health_check_port=DEFAULT_HEALTH_CHECK_PORT,
-        timeout_minutes=DEFAULT_TIMEOUT_MINUTES,
-    )
-
-
-def _build_reasoning(
-    signals: dict[str, bool], scores: ScoreBreakdown, compute_type: ComputeType
-) -> list[str]:
-    return [
-        f"container_detected={signals['container_detected']}",
-        f"compose_detected={signals['compose_detected']}",
-        f"has_framework={signals['has_framework']}",
-        f"database_present={signals['database_present']}",
-        f"is_large_codebase={signals['is_large_codebase']}",
-        f"scores: ecs={scores.ecs_score:.2f}, lambda={scores.lambda_score:.2f}, "
-        f"ec2={scores.ec2_score:.2f}",
-        f"selected compute_type='{compute_type}'",
-    ]
-
-
-def decide(payload: InfraCostAgentInput) -> DecisionResult:
-    """Determines ECS vs Lambda vs EC2 for `payload` and computes its sizing.
-
-    Assumes `payload` already passed input_validator's checks (status
-    "completed", stack_detection present, confidence >= 0.5); this function
-    does not re-validate those preconditions.
-    """
-    signals = _extract_signals(payload)
-    scores = _score_compute_types(signals)
-    compute_type = _pick_compute_type(scores)
-    points = _complexity_points(payload, database_present=signals["database_present"])
-
-    ecs_sizing: EcsSizing | None = None
-    lambda_sizing: LambdaSizing | None = None
-    ec2_sizing: Ec2Sizing | None = None
-    if compute_type == "ecs":
-        ecs_sizing = _size_ecs(payload, points)
-    elif compute_type == "lambda":
-        lambda_sizing = _size_lambda(payload, points)
+    if container.detected:
+        scores["ecs"] += 3.0
+        scores["lambda"] -= 3.0
+        scores["ec2"] += 1.0
     else:
-        ec2_sizing = _size_ec2(payload, points)
+        scores["ecs"] -= 3.0
+        if analysis.repo_metadata.loc < SMALL_PROJECT_LOC_THRESHOLD:
+            scores["lambda"] += 5.0
+        else:
+            scores["ec2"] += 5.0
 
-    reasoning = _build_reasoning(signals, scores, compute_type)
-    logger.info(
-        "decision_engine selected compute_type='%s' for job_id=%s",
-        compute_type,
-        payload.job_id,
-    )
+    if container.compose_detected:
+        scores["ecs"] += 2.0
 
+    if analysis.stack_detection.database is not None:
+        scores["ecs"] += 1.0
+        scores["lambda"] -= 1.0
+        scores["ec2"] += 1.0
+
+    if analysis.stack_detection.frameworks:
+        scores["ecs"] += 1.0
+        scores["lambda"] -= 1.0
+
+    return scores
+
+
+def _choose_compute_type(scores: dict[str, float]) -> ComputeType:
+    """Pick the highest-scoring compute type.
+
+    Ties resolve in ``scores`` insertion order (ecs, then lambda, then
+    ec2) since ``_score_stack`` always builds the dict in that order and
+    ``max`` keeps the first maximal item — a managed container service is
+    the safer default when signals are genuinely inconclusive.
+    """
+    return max(scores, key=lambda compute_type: scores[compute_type])  # type: ignore[return-value]
+
+
+def _size_ecs(analysis: RepoAnalysisInput) -> dict[str, int | str]:
+    loc = analysis.repo_metadata.loc
+    for threshold, cpu, memory in _ECS_SIZE_TIERS:
+        if loc < threshold:
+            return {"task_cpu": cpu, "task_memory": memory}
+    cpu, memory = _ECS_SIZE_DEFAULT
+    return {"task_cpu": cpu, "task_memory": memory}
+
+
+def _size_lambda(analysis: RepoAnalysisInput) -> dict[str, int | str]:
+    loc = analysis.repo_metadata.loc
+    for threshold, memory_mb in _LAMBDA_SIZE_TIERS:
+        if loc < threshold:
+            return {"memory_mb": memory_mb}
+    return {"memory_mb": _LAMBDA_SIZE_DEFAULT}
+
+
+def _size_ec2(analysis: RepoAnalysisInput) -> dict[str, int | str]:
+    loc = analysis.repo_metadata.loc
+    for threshold, instance_type in _EC2_SIZE_TIERS:
+        if loc < threshold:
+            return {"instance_type": instance_type}
+    return {"instance_type": _EC2_SIZE_DEFAULT}
+
+
+_SIZERS = {
+    "ecs": _size_ecs,
+    "lambda": _size_lambda,
+    "ec2": _size_ec2,
+}
+
+
+def compute_sizing(compute_type: ComputeType, analysis: RepoAnalysisInput) -> dict[str, int | str]:
+    """Run the deterministic sizing rules for an already-chosen compute_type.
+
+    Public entry point for callers that pick compute_type some other way
+    than decide_architecture()'s scoring (currently:
+    core.llm_architecture_advisor) but still want the exact same tested
+    sizing tiers — never a second, possibly-drifting implementation of
+    "how big should this ECS task / Lambda / EC2 instance be".
+    """
+    return _SIZERS[compute_type](analysis)
+
+
+def decide_architecture(analysis: RepoAnalysisInput) -> DecisionResult:
+    """Choose a compute type and its sizing for a validated repo analysis.
+
+    Args:
+        analysis: The validated payload produced by ``input_validator``.
+
+    Returns:
+        A ``DecisionResult`` naming the chosen ``compute_type``, its
+        computed ``sizing``, and the full ``score_breakdown`` used to reach
+        that decision.
+    """
+    scores = _score_stack(analysis)
+    compute_type = _choose_compute_type(scores)
+    sizing = _SIZERS[compute_type](analysis)
     return DecisionResult(
         compute_type=compute_type,
-        ecs=ecs_sizing,
-        lambda_=lambda_sizing,
-        ec2=ec2_sizing,
+        sizing=sizing,
         score_breakdown=scores,
-        reasoning=reasoning,
     )

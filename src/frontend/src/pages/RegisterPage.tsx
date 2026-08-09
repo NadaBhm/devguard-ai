@@ -53,7 +53,6 @@ export function RegisterPage() {
               id="first_name"
               required
               autoComplete="given-name"
-              placeholder="Ada"
               value={form.first_name}
               onChange={(e) => update("first_name", e.target.value)}
             />
@@ -63,7 +62,6 @@ export function RegisterPage() {
               id="last_name"
               required
               autoComplete="family-name"
-              placeholder="Lovelace"
               value={form.last_name}
               onChange={(e) => update("last_name", e.target.value)}
             />
@@ -75,7 +73,6 @@ export function RegisterPage() {
             type="email"
             required
             autoComplete="email"
-            placeholder="you@company.com"
             value={form.email}
             onChange={(e) => update("email", e.target.value)}
           />
@@ -87,7 +84,6 @@ export function RegisterPage() {
             required
             minLength={8}
             autoComplete="new-password"
-            placeholder="Create a password"
             value={form.password}
             onChange={(e) => update("password", e.target.value)}
           />

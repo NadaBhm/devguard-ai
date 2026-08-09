@@ -60,7 +60,7 @@ jobs:
         run: mypy src/
 
       - name: Run tests (pytest)
-        run: pytest --maxfail=1 --disable-warnings -q
+        run: pytest --continue-on-collection-errors --disable-warnings -q
 
   frontend-lint-and-build:
     name: Frontend (React) - lint & build

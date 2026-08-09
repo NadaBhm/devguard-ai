@@ -26,8 +26,15 @@ ps:
 	docker compose -f $(COMPOSE_FILE) ps
 
 ## Run backend unit tests locally (outside Docker)
+# --continue-on-collection-errors: one broken test file (e.g. a missing
+# optional dependency) must not silently abort every other suite before it
+# even runs -- --maxfail=1 was doing exactly that, since a collection
+# error counts as an immediate failure. Note this does NOT cover a broken
+# conftest.py specifically (pytest treats that as fatal regardless); a
+# missing dependency behind a package's own __init__.py (e.g. src/lib/rag)
+# can still take down that one directory's conftest.
 test:
-	pytest --maxfail=1 --disable-warnings -q
+	pytest --continue-on-collection-errors --disable-warnings -q
 
 ## Lint + type-check the Python codebase
 lint:

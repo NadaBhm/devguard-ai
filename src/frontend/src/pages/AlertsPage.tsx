@@ -48,7 +48,7 @@ function Row({ alert }: { alert: CostAlert }) {
 export function AlertsPage() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["alerts"],
-    queryFn: alertsApi.list,
+    queryFn: () => alertsApi.list(),
   })
 
   return (

@@ -26,6 +26,7 @@ passlib[bcrypt]>=1.7.4
 # ========== AWS ==========
 boto3>=1.34.0
 botocore>=1.34.0
+aws-xray-sdk>=2.14.0  # imported by deployops/agent.py; missing here meant it couldn't even be collected in CI
 
 # ========== LLM ==========
 google-generativeai>=0.7.0
@@ -60,5 +61,6 @@ jsonschema>=4.21.0
 # ========== Development Tools ==========
 ruff>=0.4
 mypy>=1.10
-
-aws-xray-sdk>=2.14.0
+moto[ec2,ecs,s3,iam,sts]>=5.0  # mocks AWS APIs in tests that touch boto3 (InfraCost, DeployOps)
+# aws-xray-sdk already listed above under AWS -- hbib's commit (2b45a22)
+# added it a second time here; kept the single entry, dropped the duplicate.

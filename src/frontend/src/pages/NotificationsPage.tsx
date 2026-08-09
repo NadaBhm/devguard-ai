@@ -47,7 +47,7 @@ function Row({ n }: { n: Notification }) {
 export function NotificationsPage() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["notifications"],
-    queryFn: notificationsApi.list,
+    queryFn: () => notificationsApi.list(),
   })
 
   const unread = (data ?? []).filter((n) => !n.is_read).length

@@ -37,6 +37,15 @@ class DeployOpsAgent:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
 
+    @staticmethod
+    def _workspace_dir(job_id: str) -> Path:
+        """Single source of truth for a job's workspace path -- was
+        hardcoded to /tmp/deployops/{job_id} in three separate places,
+        which would have silently gone out of sync the moment only one of
+        them got a configurable root."""
+        root = Path(os.getenv("DEPLOYOPS_WORKSPACE_ROOT", "/tmp/deployops"))
+        return root / job_id
+
     @xray_recorder.capture("deploy")
     async def deploy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy infrastructure using Terraform artifacts and Docker images."""
@@ -57,7 +66,13 @@ class DeployOpsAgent:
         if deploy_payload.metadata.get("ecs_update_only"):
             return await self._deploy_existing_ecs_revision(deploy_payload)
 
-        workspace_dir = Path(f"/tmp/deployops/{job_id}")
+        # Configurable via DEPLOYOPS_WORKSPACE_ROOT (_workspace_dir) so a
+        # real deployment can point this at a persistent volume -- /tmp is
+        # wiped on every container/host restart, which previously meant
+        # every job's workspace (and, more importantly, its local
+        # Terraform state -- see _write_artifacts' backend.tf generation)
+        # was ephemeral by accident, not by choice.
+        workspace_dir = self._workspace_dir(job_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
 
         # Write Terraform artifacts to workspace
@@ -362,12 +377,51 @@ class DeployOpsAgent:
         return False
         
             
+    @staticmethod
+    def _write_remote_state_backend(tf_dir: Path, job_id: str) -> None:
+        """Write an S3 remote-state backend.tf, only if the team has
+        actually configured one (TF_STATE_BUCKET set).
+
+        Without this, `terraform init` defaults to local state --
+        terraform.tfstate sitting inside the job's own workspace directory,
+        which lives under DEPLOYOPS_WORKSPACE_ROOT (/tmp by default) and is
+        lost on restart, with no locking against two concurrent runs
+        touching the same infrastructure. This was previously unconditional
+        (no backend.tf ever written) rather than a deliberate choice.
+
+        No bucket/table name is invented here: if TF_STATE_BUCKET isn't
+        set, this silently does nothing and Terraform keeps behaving
+        exactly as before -- local state, not a regression, just not
+        remote until the team supplies real infrastructure to point at.
+        """
+        bucket = os.getenv("TF_STATE_BUCKET")
+        if not bucket:
+            return
+
+        region = os.getenv("TF_STATE_REGION", "us-east-1")
+        dynamodb_table = os.getenv("TF_STATE_DYNAMODB_TABLE")  # optional: enables state locking
+
+        lock_line = f'    dynamodb_table = "{dynamodb_table}"\n' if dynamodb_table else ""
+        backend_tf = (
+            'terraform {\n'
+            '  backend "s3" {\n'
+            f'    bucket  = "{bucket}"\n'
+            f'    key     = "deployops/{job_id}/terraform.tfstate"\n'
+            f'    region  = "{region}"\n'
+            f'{lock_line}'
+            '    encrypt = true\n'
+            '  }\n'
+            '}\n'
+        )
+        (tf_dir / "backend.tf").write_text(backend_tf)
+
     async def _write_artifacts(self, artifacts: Artifacts, workspace: Path) -> None:
         """Write terraform files and docker images to workspace"""
-        
+
         # Write terraform files
         tf_dir = workspace / "terraform"
         tf_dir.mkdir(parents=True, exist_ok=True)
+        self._write_remote_state_backend(tf_dir, job_id=workspace.name)
 
         """ The payload is self-contained: every Terraform file required by the
          configuration must be included in artifacts.terraform.files. """
@@ -429,7 +483,7 @@ class DeployOpsAgent:
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
 
-        workspace = Path(f"/tmp/deployops/{job_id}")
+        workspace = self._workspace_dir(job_id)
 
         image_name = docker_image.name
         image_tag = docker_image.tag
@@ -475,7 +529,7 @@ class DeployOpsAgent:
 
         # Build Docker image with platform for Fargate compatibility
         # Build context is relative to workspace
-        build_context = Path(f"/tmp/deployops/{job_id}") / docker_image.context
+        build_context = self._workspace_dir(job_id) / docker_image.context
         build_cmd = ["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)]
         result = await asyncio.create_subprocess_exec(
             *build_cmd,

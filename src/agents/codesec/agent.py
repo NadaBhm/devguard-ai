@@ -170,8 +170,10 @@ class CodeSecAgent:
                 check=False,
             )
             if result.returncode != 0:
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
                 # Try default branch if main fails
-                cmd[5] = "--branch=master"
+                cmd[4] = "--branch=master"
                 result = subprocess.run(
                     cmd,
                     capture_output=True,

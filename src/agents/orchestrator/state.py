@@ -25,7 +25,7 @@ from typing import Literal, Optional, TypedDict
 # rather than repeating the string, so the value reported in state metadata
 # and the value logged at compile time can never drift apart again (they did:
 # state said 1.0.5 while the graph said 1.0.7).
-GRAPH_VERSION = "1.2.1"
+GRAPH_VERSION = "1.3.1"
 
 
 # =============================================================================

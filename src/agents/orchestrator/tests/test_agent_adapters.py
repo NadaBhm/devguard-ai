@@ -2,9 +2,12 @@
 Tests for agent_adapters.py (T-2.17 / T-3.16)
 Place dans: src/agents/orchestrator/tests/test_agent_adapters.py
 
-Focus is the InfraCost -> DeployOps translation, because that is where the
-two agents' contracts genuinely disagree and where a silent mistranslation
-would only surface much later, inside AWS.
+Rewritten after discovering Karim's InfraCost API on master is not what an
+earlier version of this adapter (and these tests) targeted:
+run_pipeline_with_context() and core.orchestrator_adapter don't exist on
+master - only run_pipeline() -> InfraCostOutput (see models/output_models.py).
+These fixtures use that real shape (compute_type + aws_config.ecs.* +
+deployment_config.ecs.* + artifacts.docker_image/dockerfile/source_code).
 
 Lancer avec: pytest depuis la racine du repo.
 """
@@ -12,6 +15,7 @@ Lancer avec: pytest depuis la racine du repo.
 import pytest
 
 from src.agents.orchestrator.agent_adapters import (
+    normalize_infracost_result,
     run_sync,
     translate_deployops_result,
     translate_infracost_to_deploy_payload,
@@ -22,47 +26,77 @@ from src.agents.orchestrator.agent_adapters import (
 
 
 @pytest.fixture
-def deploy_inputs():
-    """The `_deploy_inputs` block as InfraCost's model_dump(by_alias=True) emits it."""
+def infracost_result():
+    """
+    What call_infracost() actually returns in real mode: Karim's
+    to_orchestrator_result() output (already orchestrator-shaped), plus the
+    "_deploy_inputs" block _run_infracost_pipeline() stashes alongside it.
+    """
     return {
-        "compute_type": "ecs",
-        "artifacts": {
-            "terraform": {
-                "files": {
-                    "main.tf": 'resource "aws_ecs_cluster" "app" {}',
-                    "variables.tf": 'variable "region" {}',
-                    "outputs.tf": 'output "alb_dns" {}',
+        "architecture_recommendation": "ecs_fargate",
+        "justification": "FastAPI with moderate traffic suits ECS Fargate.",
+        "generated_terraform": {
+            "files": {
+                "main.tf": 'resource "aws_ecs_cluster" "app" {}',
+                "variables.tf": 'variable "region" {}',
+                "outputs.tf": 'output "alb_dns" {}',
+            },
+            "variables": {"region": "us-east-1"},
+        },
+        "cost_estimate": {
+            "amount": 145.32, "currency": "USD",
+            "range_min": 120.0, "range_max": 170.0,
+        },
+        "load_scenarios": [
+            {"users": 1000, "estimated_monthly_cost": {"amount": 145.32}},
+        ],
+        "optimizations": [
+            {"name": "graviton", "reason": "20% cheaper", "selected": True},
+        ],
+        "region_comparison": [
+            {"region": "us-east-1", "estimated_monthly_cost": {"amount": 145.32}},
+        ],
+        "_deploy_inputs": {
+            "compute_type": "ecs",
+            "artifacts": {
+                "terraform": {
+                    "files": {
+                        "main.tf": 'resource "aws_ecs_cluster" "app" {}',
+                        "variables.tf": 'variable "region" {}',
+                        "outputs.tf": 'output "alb_dns" {}',
+                    },
+                    "variables": {"region": "us-east-1"},
                 },
-                "variables": {"region": "us-east-1"},
+                "dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+                "docker_image": {"name": "devguard-app", "tag": "sha-abc123"},
+                "source_code": "/tmp/repo_job-abc",
             },
-            "dockerfile": "FROM python:3.12-slim",
-            "docker_image": {"name": "devguard-app", "tag": "v1"},
-            "source_code": "/tmp/repo_abc",
-        },
-        "aws_config": {
-            "region": "eu-west-1",
-            "ecs": {
-                "cluster": "my-cluster",
-                "service_name": "my-svc",
-                "task_cpu": "256",
-                "task_memory": "512",
+            "aws_config": {
+                "region": "eu-west-1",
+                "ecs": {
+                    "cluster": "my-cluster", "service_name": "my-svc",
+                    "task_cpu": "256", "task_memory": "512",
+                },
+                "lambda": None,
+                "ec2": None,
             },
-            "lambda": None,
-            "ec2": None,
-        },
-        "deployment_config": {
-            "ecs": {
-                "strategy": "rolling",
-                "health_check_path": "/healthz",
-                "health_check_port": 8080,
-                "timeout_minutes": 10,
-                "min_healthy_percent": 50,
-                "max_percent": 200,
+            "deployment_config": {
+                "ecs": {
+                    "strategy": "rolling", "health_check_path": "/healthz",
+                    "health_check_port": 8080, "timeout_minutes": 10,
+                    "min_healthy_percent": 50, "max_percent": 200,
+                },
+                "lambda": None,
+                "ec2": None,
             },
-            "lambda": None,
-            "ec2": None,
         },
     }
+
+
+@pytest.fixture
+def deploy_inputs(infracost_result):
+    """Just the _deploy_inputs block, as translate_infracost_to_deploy_payload receives it."""
+    return infracost_result["_deploy_inputs"]
 
 
 class TestFeatureFlags:
@@ -70,10 +104,8 @@ class TestFeatureFlags:
 
     def test_all_agents_mocked_by_default(self, monkeypatch):
         for var in (
-            "DEVGUARD_REAL_AGENTS",
-            "DEVGUARD_REAL_CODESEC",
-            "DEVGUARD_REAL_INFRACOST",
-            "DEVGUARD_REAL_DEPLOYOPS",
+            "DEVGUARD_REAL_AGENTS", "DEVGUARD_REAL_CODESEC",
+            "DEVGUARD_REAL_INFRACOST", "DEVGUARD_REAL_DEPLOYOPS",
         ):
             monkeypatch.delenv(var, raising=False)
         assert use_real_codesec() is False
@@ -94,33 +126,55 @@ class TestFeatureFlags:
         assert use_real_deployops() is False
 
 
-class TestInfraCostToDeployPayload:
-    """The core contract mismatch: singular docker_image -> docker_images list."""
+class TestNormalizeInfraCostResult:
+    """
+    Defensive layer on top of Karim's to_orchestrator_result(), which
+    correctly renames 6 of 7 fields but leaves cost_estimate as a raw Money
+    dump ({amount,...}) instead of the schema's {monthly_cost_usd,...}.
+    """
 
+    def test_fixes_cost_estimate_field_name(self, infracost_result):
+        infracost_result["cost_estimate"] = {
+            "amount": 99.5, "currency": "USD", "range_min": 80.0, "range_max": 120.0,
+        }
+        result = normalize_infracost_result(infracost_result)
+        assert result["cost_estimate"]["monthly_cost_usd"] == 99.5
+        assert result["cost_estimate"]["range_min"] == 80.0
+
+    def test_already_normalized_cost_is_untouched(self, infracost_result):
+        infracost_result["cost_estimate"] = {"monthly_cost_usd": 50.0, "currency": "USD"}
+        result = normalize_infracost_result(infracost_result)
+        assert result["cost_estimate"]["monthly_cost_usd"] == 50.0
+
+    def test_other_fields_pass_through_unchanged(self, infracost_result):
+        result = normalize_infracost_result(infracost_result)
+        assert result["architecture_recommendation"] == "ecs_fargate"
+        assert result["_deploy_inputs"] == infracost_result["_deploy_inputs"]
+
+    def test_mock_passes_through_unchanged(self):
+        from src.agents.orchestrator.nodes import build_mock_infracost_result
+        mock = build_mock_infracost_result()
+        assert normalize_infracost_result(mock) == mock
+
+
+class TestInfraCostToDeployPayload:
     def test_docker_image_becomes_a_list(self, deploy_inputs):
         payload = translate_infracost_to_deploy_payload(
             "job-abc", deploy_inputs, approved_by="hbib@test.com"
         )
         images = payload["artifacts"]["docker_images"]
-        assert isinstance(images, list)
-        # The whole point: DeployOps silently accepts an empty list and then
-        # builds/pushes nothing. One image in, one image out.
         assert len(images) == 1
         assert images[0]["name"] == "devguard-app"
-        assert images[0]["dockerfile"] == "FROM python:3.12-slim"
-        assert images[0]["tag"] == "v1"
+        assert images[0]["dockerfile"] == "FROM python:3.12-slim\nCOPY . /app\n"
+        assert images[0]["tag"] == "sha-abc123"
 
-    def test_context_and_platform_are_defaulted(self, deploy_inputs):
-        """Neither field exists upstream; both are required for a usable build."""
+    def test_platform_is_defaulted(self, deploy_inputs):
         payload = translate_infracost_to_deploy_payload(
             "job-abc", deploy_inputs, approved_by="hbib@test.com"
         )
-        image = payload["artifacts"]["docker_images"][0]
-        assert image["context"] == "/tmp/repo_abc"  # from artifacts.source_code
-        assert image["platform"] == "linux/amd64"   # Fargate default
+        assert payload["artifacts"]["docker_images"][0]["platform"] == "linux/amd64"
 
     def test_aws_config_is_flattened(self, deploy_inputs):
-        """InfraCost nests under aws_config.ecs.cluster; DeployOps wants ecs_cluster."""
         payload = translate_infracost_to_deploy_payload(
             "job-abc", deploy_inputs, approved_by="hbib@test.com"
         )
@@ -138,7 +192,6 @@ class TestInfraCostToDeployPayload:
         assert cfg["timeout_minutes"] == 10
 
     def test_blue_green_strategy_is_renamed(self, deploy_inputs):
-        """InfraCost says "blue-green"; DeployOps's enum spells it "blue_green"."""
         deploy_inputs["deployment_config"]["ecs"]["strategy"] = "blue-green"
         payload = translate_infracost_to_deploy_payload(
             "job-abc", deploy_inputs, approved_by="hbib@test.com"
@@ -149,8 +202,9 @@ class TestInfraCostToDeployPayload:
         payload = translate_infracost_to_deploy_payload(
             "job-abc", deploy_inputs, approved_by="hbib@test.com"
         )
-        files = payload["artifacts"]["terraform"]["files"]
-        assert set(files) == {"main.tf", "variables.tf", "outputs.tf"}
+        assert set(payload["artifacts"]["terraform"]["files"]) == {
+            "main.tf", "variables.tf", "outputs.tf"
+        }
 
     def test_approval_is_recorded(self, deploy_inputs):
         payload = translate_infracost_to_deploy_payload(
@@ -169,15 +223,20 @@ class TestInfraCostToDeployPayload:
 class TestTranslationFailsLoudly:
     """Every one of these would otherwise be a silent no-op deep inside AWS."""
 
-    def test_lambda_is_rejected(self, deploy_inputs):
+    def test_non_ecs_compute_type_is_rejected(self, deploy_inputs):
         deploy_inputs["compute_type"] = "lambda"
         deploy_inputs["aws_config"]["ecs"] = None
         with pytest.raises(ValueError, match="only supports ECS"):
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
 
-    def test_missing_dockerfile_is_rejected(self, deploy_inputs):
+    def test_missing_dockerfile_content_is_rejected(self, deploy_inputs):
+        """
+        This InfraCost build generates Dockerfile content itself, but must
+        still fail loudly (not silently build an empty image) if that ever
+        regresses to empty/None - e.g. for a Lambda-only deployment.
+        """
         deploy_inputs["artifacts"]["dockerfile"] = None
-        with pytest.raises(ValueError, match="requires a Dockerfile"):
+        with pytest.raises(ValueError, match="no Dockerfile content"):
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
 
     def test_missing_terraform_is_rejected(self, deploy_inputs):
@@ -186,7 +245,6 @@ class TestTranslationFailsLoudly:
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
 
     def test_missing_cluster_is_rejected(self, deploy_inputs):
-        """DeployOps.rollback() does payload["aws_config"]["ecs_cluster"] unguarded."""
         deploy_inputs["aws_config"]["ecs"]["cluster"] = None
         with pytest.raises(ValueError, match="missing cluster/service_name"):
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
@@ -197,8 +255,7 @@ class TestDeployOpsResultTranslation:
 
     def test_success_is_mapped(self):
         raw = {
-            "status": "success",
-            "job_id": "job-1",
+            "status": "success", "job_id": "job-1",
             "deployed_url": "https://x.elb.amazonaws.com",
             "resources": {
                 "ecs_cluster_name": {"value": "c"},
@@ -218,7 +275,7 @@ class TestDeployOpsResultTranslation:
         assert result["deployment_status"] == "failed"
         assert result["health_check"]["passed"] is False
         assert result["error"] == "terraform apply failed"
-        assert result["job_id"] == "job-2"  # falls back to the orchestrator's id
+        assert result["job_id"] == "job-2"
 
     def test_health_check_failure_flags_rollback(self):
         raw = {"status": "failed", "error": "health check failed"}
@@ -228,17 +285,13 @@ class TestDeployOpsResultTranslation:
 
 
 class TestRunSyncBridge:
-    """The async->sync bridge that lets sync LangGraph nodes call async agents."""
-
     def test_runs_a_coroutine_from_sync_code(self):
         async def coro():
             return {"ok": True}
-
         assert run_sync(coro()) == {"ok": True}
 
     def test_propagates_exceptions(self):
         async def boom():
             raise ValueError("agent exploded")
-
         with pytest.raises(ValueError, match="agent exploded"):
             run_sync(boom())

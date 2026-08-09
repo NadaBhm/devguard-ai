@@ -60,3 +60,5 @@ jsonschema>=4.21.0
 # ========== Development Tools ==========
 ruff>=0.4
 mypy>=1.10
+
+aws-xray-sdk>=2.14.0

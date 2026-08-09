@@ -1,11 +1,12 @@
 name: CI
 
-# Sprint 1 skeleton (T-1.1): lint + test scaffolding for both the Python
-# backend/agents and the React frontend. Kept intentionally lenient
-# (continue-on-error where noted) since most modules are still mocks -
-# the goal for Sprint 1 is a GREEN pipeline that runs, not 100% coverage.
-# Sprint 5 (T-5.6/T-5.7) will harden this (strict linting, real coverage
-# gates, no continue-on-error).
+# Was a deliberately lenient Sprint 1 skeleton (continue-on-error
+# everywhere, so the pipeline stayed green while most modules were still
+# mocks). Hardened per T-5.6/T-5.7: lint/type-check/test/build failures now
+# fail the job for real. As of this change that means CI is red on this
+# branch until the ~912 pre-existing ruff findings (`ruff check src/
+# --fix` resolves most of them) and any real test/type failures are
+# addressed -- known and expected, not a regression introduced here.
 
 on:
   push:
@@ -48,19 +49,18 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov ruff mypy qdrant-client sentence-transformers google-generativeai
+          # requirements.txt already pins pytest/ruff/mypy/qdrant-client/
+          # google-generativeai -- this used to re-list them by hand as a
+          # separate step; now redundant, dropped.
 
       - name: Lint (ruff)
-        run: ruff check src/ || true
-        continue-on-error: true # Sprint 1: not all modules exist yet
+        run: ruff check src/
 
       - name: Type check (mypy)
-        run: mypy src/ || true
-        continue-on-error: true # Sprint 1: not all modules exist yet
+        run: mypy src/
 
       - name: Run tests (pytest)
-        run: pytest --maxfail=1 --disable-warnings -q || true
-        continue-on-error: true # Sprint 1: most agents are still mocks
+        run: pytest --maxfail=1 --disable-warnings -q
 
   frontend-lint-and-build:
     name: Frontend (React) - lint & build
@@ -99,17 +99,14 @@ jobs:
       - name: Install dependencies
         if: steps.check_frontend.outputs.exists == 'true'
         working-directory: src/frontend
-        run: npm ci || npm install
-        continue-on-error: true
+        run: npm ci
 
       - name: Lint (ESLint)
         if: steps.check_frontend.outputs.exists == 'true'
         working-directory: src/frontend
-        run: npm run lint || true
-        continue-on-error: true
+        run: npm run lint
 
       - name: Build
         if: steps.check_frontend.outputs.exists == 'true'
         working-directory: src/frontend
-        run: npm run build || true
-        continue-on-error: true
+        run: npm run build

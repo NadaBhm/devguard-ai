@@ -1,17 +1,17 @@
-import { STUB, mockList } from "./stub"
+import { client } from "./client"
 import type { Notification } from "../types/notification"
 
-const SAMPLE: Notification[] = []
+interface NotificationListResponse {
+  notifications: Notification[]
+}
 
 export const notificationsApi = {
-  STUB,
-  async list(): Promise<Notification[]> {
-    return mockList(SAMPLE)
+  async list(unreadOnly = false): Promise<Notification[]> {
+    const qs = unreadOnly ? "?unread_only=true" : ""
+    const res = await client.get<NotificationListResponse>(`/notifications/${qs}`)
+    return res.notifications
   },
-  async markRead(_id: string): Promise<Notification> {
-    throw new Error("notifications.markRead: not implemented (backend pending)")
-  },
-  async markAllRead(): Promise<void> {
-    throw new Error("notifications.markAllRead: not implemented (backend pending)")
+  async markRead(id: string): Promise<Notification> {
+    return client.put<Notification>(`/notifications/${id}/read`)
   },
 }

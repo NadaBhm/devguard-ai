@@ -60,3 +60,4 @@ jsonschema>=4.21.0
 # ========== Development Tools ==========
 ruff>=0.4
 mypy>=1.10
+moto[ec2,ecs,s3,iam,sts]>=5.0  # mocks AWS APIs in tests that touch boto3 (InfraCost, DeployOps)

@@ -14,6 +14,23 @@ on:
     branches: ["main", "master"]
 
 jobs:
+  secrets-scan:
+    name: Secrets scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks needs full history to scan past commits, not just the current tree
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # No continue-on-error here on purpose: unlike the lint/test jobs
+        # below (Sprint 1, most modules still mocks), a real committed
+        # secret is a real incident regardless of what sprint it is.
+
   backend-lint-and-test:
     name: Backend (Python) - lint & test
     runs-on: ubuntu-latest

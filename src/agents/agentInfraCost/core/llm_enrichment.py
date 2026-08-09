@@ -1,16 +1,14 @@
-"""Module 10 (optional): turns already-computed results into natural-language
-explanations, via Gemini when available, via static templates otherwise.
+"""Step 10 (optional) of the InfraCost pipeline: explanatory text via Gemini.
 
-Strict rules enforced here:
-  - Never influences a decision, a number, or Terraform content — only adds
-    explanatory text to the output's "enrichment" block.
-  - If GEMINI_API_KEY is absent, or the `google-generativeai` package itself
-    isn't installed, or the call fails/times out/returns empty for any
-    reason: falls back to a static template built from the same already-
-    computed variables. Never raises, never blocks the pipeline.
-  - Every Gemini call has a hard timeout (DEFAULT_TIMEOUT_SECONDS).
-  - Called last, after decision_engine / cost_estimator / finops_optimizer
-    have already produced their (deterministic) results.
+Turns results already computed by modules 2 (decision), 4 (cost) and 6
+(FinOps) into human-readable text for the ``enrichment`` block. Strict
+rules: this module NEVER influences a decision or a number — only text,
+built from figures already frozen by the time it runs (last in the
+pipeline). If ``GEMINI_API_KEY`` is unset, or the call fails or exceeds
+``_GEMINI_TIMEOUT_SECONDS`` for any reason, it falls back to static,
+deterministic Python text templates — never an error, never a block.
+``enrichment_source`` reports "gemini" only if every one of the three texts
+actually came from a real call; otherwise "fallback".
 """
 
 from __future__ import annotations
@@ -18,195 +16,155 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Literal
+import sys
+from pathlib import Path
+from typing import Final
 
-from ..models.internal_models import CostEstimateResult, DecisionResult, FinOpsResult
-from ..models.output_models import Enrichment
+from core.decision_engine import DecisionResult
+from core.finops_optimizer import FinOpsRecommendation
+from models.output_schema import Enrichment, EnrichmentSource, Money
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT_SECONDS = 10.0
+_GEMINI_TIMEOUT_SECONDS: Final[float] = 10.0
 
-EnrichmentSource = Literal["gemini", "fallback"]
-
-
-# --- prompts (only used when a Gemini call is actually attempted) ----------
-
-
-def _architecture_prompt(decision: DecisionResult) -> str:
-    return (
-        "In 2-3 plain-English sentences for a non-technical reader, explain why "
-        f"'{decision.compute_type}' was chosen as the AWS compute target. "
-        f"Scoring signals used: {decision.score_breakdown.signals}. "
-        f"Scores: ecs={decision.score_breakdown.ecs_score:.2f}, "
-        f"lambda={decision.score_breakdown.lambda_score:.2f}, "
-        f"ec2={decision.score_breakdown.ec2_score:.2f}. "
-        "Do not invent facts beyond what is given; do not mention alternative "
-        "numbers or change the decision."
-    )
+# The shared Gemini client lives at src/shared/, a sibling of src/agents/ —
+# outside this package's own sys.path bootstrap (which only covers
+# agentInfraCost/). Add src/ once so `shared.llm.gemini...` is importable
+# regardless of the caller's working directory.
+_SRC_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
 
 
-def _cost_prompt(decision: DecisionResult, cost: CostEstimateResult) -> str:
-    return (
-        "In 2-3 plain-English sentences for a non-technical, budget-conscious "
-        f"reader, summarize this AWS cost estimate: compute_type="
-        f"'{decision.compute_type}', estimated monthly cost={cost.amount} "
-        f"{cost.currency} (range {cost.range_min}-{cost.range_max}). "
-        "Do not invent a different number."
-    )
-
-
-def _finops_prompt(finops: FinOpsResult) -> str:
-    discarded = ", ".join(f"{o.name} ({o.reason})" for o in finops.discarded_options)
-    return (
-        "In 2-3 plain-English sentences, justify why "
-        f"'{finops.recommended_option}' is the recommended AWS pricing "
-        f"optimization, given this context: {finops.context_used}. "
-        f"The discarded alternatives and their reasons were: {discarded}. "
-        "Do not recommend a different option than the one given."
-    )
-
-
-# --- fallback templates (used whenever Gemini is unavailable or fails) -----
-
-
-def _fallback_architecture_explanation(decision: DecisionResult) -> str:
-    scores = decision.score_breakdown
-    return (
-        f"{decision.compute_type.upper()} was selected based on the detected stack "
-        f"signals (ECS score={scores.ecs_score:.1f}, Lambda score={scores.lambda_score:.1f}, "
-        f"EC2 score={scores.ec2_score:.1f}). " + " ".join(decision.reasoning)
-    )
-
-
-def _fallback_cost_summary(decision: DecisionResult, cost: CostEstimateResult) -> str:
-    return (
-        f"Estimated monthly cost for this {decision.compute_type.upper()} deployment is "
-        f"{cost.amount:.2f} {cost.currency} (range: {cost.range_min:.2f}-"
-        f"{cost.range_max:.2f} {cost.currency})."
-    )
-
-
-def _fallback_finops_justification(finops: FinOpsResult) -> str:
-    discarded_names = ", ".join(o.name for o in finops.discarded_options)
-    return (
-        f"Recommended cost optimization: '{finops.recommended_option}'. Alternatives "
-        f"considered and discarded: {discarded_names}."
-    )
-
-
-# --- Gemini call plumbing ---------------------------------------------------
-
-
-def _call_gemini_sync(prompt: str, *, timeout_seconds: float) -> str:
-    """Runs a single Gemini call synchronously with a hard timeout.
-
-    The shared GeminiClient (src/shared/llm/gemini) is imported lazily here,
-    not at module load time, so this whole module still imports cleanly even
-    if the optional `google-generativeai` dependency isn't installed — that
-    case simply surfaces as an ImportError, caught by the caller's broad
-    except alongside every other failure mode (network, quota, empty
-    response, ...).
+def _call_gemini(prompt: str, system_instruction: str) -> str | None:
+    """Return generated text, or ``None`` if Gemini is unavailable or fails
+    for any reason (missing key, network error, timeout, malformed
+    response, ...) — every failure mode maps to the same "use the
+    fallback" signal, never an exception the caller has to handle.
     """
-    from src.shared.llm.gemini import GeminiClient  # noqa: PLC0415 - intentionally lazy
-
-    async def _call() -> str:
-        client = GeminiClient()
-        response = await asyncio.wait_for(client.generate(prompt), timeout=timeout_seconds)
-        return response.text
-
-    return asyncio.run(_call())
-
-
-def _generate_text(
-    prompt: str,
-    fallback_text: str,
-    *,
-    timeout_seconds: float,
-) -> tuple[str, EnrichmentSource]:
-    """Returns (text, source). Tries Gemini only if GEMINI_API_KEY is set;
-    any failure at all (missing dependency, network, timeout, empty
-    response) falls back to `fallback_text` instead of raising."""
-    if not os.environ.get("GEMINI_API_KEY"):
-        return fallback_text, "fallback"
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return None
 
     try:
-        text = _call_gemini_sync(prompt, timeout_seconds=timeout_seconds)
-        if not text or not text.strip():
-            raise ValueError("Gemini returned an empty response")
-        return text.strip(), "gemini"
-    except Exception as exc:  # noqa: BLE001 - must never propagate past this module
-        logger.warning("Gemini call failed (%s); using fallback text instead.", exc)
-        return fallback_text, "fallback"
+        from shared.llm.gemini.gemini_client import GeminiClient
+
+        client = GeminiClient(api_key=api_key)
+
+        async def _generate() -> str:
+            response = await asyncio.wait_for(
+                client.generate(prompt, system_instruction=system_instruction),
+                timeout=_GEMINI_TIMEOUT_SECONDS,
+            )
+            return response.text
+
+        return asyncio.run(_generate())
+    except Exception:
+        logger.warning("Gemini call failed; falling back to static text", exc_info=True)
+        return None
 
 
-# --- public API --------------------------------------------------------------
+def explain_architecture_decision(decision: DecisionResult) -> tuple[str, EnrichmentSource]:
+    """Explain, in prose, why ``decision.compute_type`` won — using only
+    the already-computed ``score_breakdown`` (module 2), never re-deciding."""
+    scores = decision.score_breakdown
 
+    if decision.decision_source == "llm" and decision.llm_reasoning:
+        # The score breakdown here is informational only (kept for context,
+        # see decide_architecture_via_llm's docstring) — it did NOT decide
+        # compute_type here, so the fallback text must not claim it did.
+        fallback = f"Architecture recommandée : {decision.compute_type}. {decision.llm_reasoning}"
+        prompt = (
+            f"Reformule en 2-3 phrases, en français, cette explication déjà donnée par un agent "
+            f"de décision pour le choix d'architecture '{decision.compute_type}' : "
+            f"{decision.llm_reasoning} N'invente aucune information nouvelle."
+        )
+    else:
+        fallback = (
+            f"Architecture recommandée : {decision.compute_type}. "
+            f"Scores calculés — ecs: {scores['ecs']:.1f}, lambda: {scores['lambda']:.1f}, "
+            f"ec2: {scores['ec2']:.1f}. Le type retenu a obtenu le score le plus élevé."
+        )
+        prompt = (
+            f"Explique en 2-3 phrases, en français, pourquoi l'architecture '{decision.compute_type}' "
+            f"a été choisie, à partir de ces scores déjà calculés : {scores}. "
+            "N'invente aucun chiffre, utilise seulement ceux fournis."
+        )
 
-def explain_architecture_decision(
-    decision: DecisionResult, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-) -> tuple[str, EnrichmentSource]:
-    """Explains decision_engine's compute_type choice in plain English."""
-    return _generate_text(
-        _architecture_prompt(decision),
-        _fallback_architecture_explanation(decision),
-        timeout_seconds=timeout_seconds,
+    text = _call_gemini(
+        prompt=prompt,
+        system_instruction=(
+            "Tu écris une explication factuelle et concise pour un rapport DevOps. "
+            "Tu ne prends aucune décision, tu expliques seulement une décision déjà prise."
+        ),
     )
+    return (text, "gemini") if text else (fallback, "fallback")
 
 
-def summarize_cost_estimation(
-    decision: DecisionResult,
-    cost: CostEstimateResult,
-    *,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-) -> tuple[str, EnrichmentSource]:
-    """Summarizes cost_estimator's result for a non-technical reader."""
-    return _generate_text(
-        _cost_prompt(decision, cost),
-        _fallback_cost_summary(decision, cost),
-        timeout_seconds=timeout_seconds,
+def summarize_cost_estimation(decision: DecisionResult, cost: Money) -> tuple[str, EnrichmentSource]:
+    """Summarize the already-computed monthly cost (module 4) in prose."""
+    fallback = (
+        f"Coût mensuel estimé pour {decision.compute_type} : {cost.amount} {cost.currency} "
+        f"(fourchette {cost.range_min}-{cost.range_max} {cost.currency}, incertitude ±20%)."
     )
-
-
-def explain_finops_choice(
-    finops: FinOpsResult, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-) -> tuple[str, EnrichmentSource]:
-    """Justifies finops_optimizer's recommended option in plain English."""
-    return _generate_text(
-        _finops_prompt(finops),
-        _fallback_finops_justification(finops),
-        timeout_seconds=timeout_seconds,
+    text = _call_gemini(
+        prompt=(
+            f"Résume en 2-3 phrases, en français, cette estimation de coût mensuel déjà "
+            f"calculée pour une architecture '{decision.compute_type}' : montant={cost.amount}, "
+            f"fourchette=[{cost.range_min}, {cost.range_max}] {cost.currency}. "
+            "N'invente aucun chiffre, utilise seulement ceux fournis."
+        ),
+        system_instruction=(
+            "Tu résumes un coût déjà calculé pour un rapport DevOps, factuellement et brièvement."
+        ),
     )
+    return (text, "gemini") if text else (fallback, "fallback")
 
 
-def enrich(
-    *,
-    decision: DecisionResult,
-    cost: CostEstimateResult,
-    finops: FinOpsResult,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+def explain_finops_choice(finops: FinOpsRecommendation) -> tuple[str, EnrichmentSource]:
+    """Explain the already-decided FinOps strategy (module 6) in prose."""
+    discarded_names = ", ".join(option.name for option in finops.discarded)
+    fallback = (
+        f"Stratégie FinOps recommandée : {finops.recommended.name}. {finops.recommended.reason} "
+        f"Options écartées : {discarded_names}."
+    )
+    text = _call_gemini(
+        prompt=(
+            f"Explique en 2-3 phrases, en français, cette recommandation FinOps déjà décidée : "
+            f"stratégie retenue='{finops.recommended.name}' ({finops.recommended.reason}), "
+            f"options écartées={discarded_names}. N'invente aucune raison, utilise seulement celles fournies."
+        ),
+        system_instruction=(
+            "Tu expliques une décision d'optimisation de coût déjà prise, pour un rapport DevOps."
+        ),
+    )
+    return (text, "gemini") if text else (fallback, "fallback")
+
+
+def build_enrichment(
+    decision: DecisionResult, cost: Money, finops: FinOpsRecommendation
 ) -> Enrichment:
-    """Builds the full Enrichment block for the output contract.
+    """Assemble the full ``enrichment`` block from modules 2, 4 and 6.
 
-    `enrichment_source` is "gemini" only if all three pieces of text came
-    from Gemini; if even one fell back to a template, the whole block is
-    conservatively marked "fallback" rather than overclaiming.
+    Args:
+        decision: Module 2's output.
+        cost: Module 4's output.
+        finops: Module 6's output.
+
+    Returns:
+        An ``Enrichment`` whose ``enrichment_source`` is ``"gemini"`` only
+        if all three texts actually came from a real call — any single
+        fallback marks the whole block ``"fallback"``, never overclaiming.
     """
-    architecture_text, arch_source = explain_architecture_decision(
-        decision, timeout_seconds=timeout_seconds
-    )
-    cost_text, cost_source = summarize_cost_estimation(
-        decision, cost, timeout_seconds=timeout_seconds
-    )
-    finops_text, finops_source = explain_finops_choice(finops, timeout_seconds=timeout_seconds)
+    architecture_explanation, arch_source = explain_architecture_decision(decision)
+    cost_summary, cost_source = summarize_cost_estimation(decision, cost)
+    finops_justification, finops_source = explain_finops_choice(finops)
 
-    overall_source: EnrichmentSource = (
-        "gemini" if {arch_source, cost_source, finops_source} == {"gemini"} else "fallback"
-    )
-
+    all_from_gemini = arch_source == cost_source == finops_source == "gemini"
     return Enrichment(
-        architecture_explanation=architecture_text,
-        cost_summary=cost_text,
-        finops_justification=finops_text,
-        enrichment_source=overall_source,
+        architecture_explanation=architecture_explanation,
+        cost_summary=cost_summary,
+        finops_justification=finops_justification,
+        enrichment_source="gemini" if all_from_gemini else "fallback",
     )

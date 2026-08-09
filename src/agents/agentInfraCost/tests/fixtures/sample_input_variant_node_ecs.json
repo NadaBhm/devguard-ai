@@ -17,10 +17,8 @@
     "database": "mysql",
     "build_tool": "npm",
     "container": {
-      "detected": true,
-      "base_image": "node:20-alpine",
-      "dockerfile_path": "Dockerfile",
-      "compose_detected": true
+      "detected": true, "base_image": "node:20-alpine",
+      "dockerfile_path": "Dockerfile", "compose_detected": true
     },
     "confidence": 0.95,
     "detected_files": ["package.json", "Dockerfile", "server.js", "docker-compose.yml"]

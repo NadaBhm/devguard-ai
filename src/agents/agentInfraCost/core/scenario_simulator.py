@@ -1,117 +1,148 @@
-"""Module 5: simulates estimated cost at 1K / 10K / 100K active-user load tiers.
+"""Step 5 of the InfraCost pipeline: simulate cost at three load levels.
 
-Unlike a naive "rule of three" scaling of the base cost_estimator result,
-this module recalculates the actual resource DIMENSIONING needed at each
-load tier — the number of running ECS tasks / EC2 instances, or the number
-of monthly Lambda invocations — using simple, generic capacity-per-unit
-ratios, then reprices that recalculated dimensioning via cost_estimator.
+For 1,000 / 10,000 / 100,000 active users, this recomputes the actual
+sizing each level needs — how many parallel ECS tasks, how many EC2
+instances, how many Lambda invocations per month — and derives the cost
+from that recomputed sizing. It never takes the module 4 baseline cost and
+scales it by a ratio of user counts (a "rule of three"): AWS capacity is a
+step function (you add whole replicas, never a fraction of one), and only
+recomputing the sizing captures that correctly.
+
+AWS publishes no formula mapping "X vCPU" or "X instance type" to a request
+throughput — that number is workload-dependent and unknowable from a static
+repo analysis. So, like the confidence threshold in module 1 or the size
+brackets in module 2, this module leans on small, explicitly named,
+documented capacity assumptions rather than inventing false precision. Two
+things keep those assumptions honest instead of arbitrary: they are named
+constants (not magic numbers buried in a formula), and ECS/EC2 capacity
+scales with the *actual* size module 2 already chose — a bigger task or a
+pricier instance is assumed to serve proportionally more users, never a
+flat count blind to the sizing decision.
 """
 
 from __future__ import annotations
 
-import logging
 import math
+from typing import Final
 
-from ..models.internal_models import CostEstimateResult, DecisionResult, ScenarioResult
-from .cost_estimator import estimate_ec2_cost, estimate_ecs_cost, estimate_lambda_cost
+from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+from core.cost_estimator import (
+    CostEstimationContext,
+    estimate_cost,
+    _FARGATE_CPU_UNITS_PER_VCPU,
+    _get_pricing,
+    _load_pricing_data,
+)
+from core.decision_engine import DecisionResult
+from models.output_schema import Money
 
-SCENARIO_USER_LOADS: tuple[int, ...] = (1_000, 10_000, 100_000)
+_LOAD_SCENARIOS: Final[tuple[int, ...]] = (1_000, 10_000, 100_000)
 
-# Generic capacity assumptions used in the absence of real traffic telemetry
-# (Agent 1 does not provide any). Deliberately round, conservative numbers,
-# not tuned to any specific fixture.
-CONCURRENT_USERS_PER_ECS_TASK = 500
-CONCURRENT_USERS_PER_EC2_INSTANCE = 300
-REQUESTS_PER_ACTIVE_USER_PER_MONTH = 50
+# --------------------------------------------------------------------------
+# Capacity assumptions — documented, not measured. Each is expressed in the
+# same unit throughout (active users per month), never mixed with
+# requests/second or concurrent connections.
+# --------------------------------------------------------------------------
 
-# Kept identical to cost_estimator's own baseline assumption so a Lambda
-# scenario at "typical" load reproduces the same per-invocation cost model.
-LAMBDA_AVG_DURATION_SECONDS = 0.2
+# Lambda scales invocations automatically; only the request volume matters.
+_LAMBDA_REQUESTS_PER_USER_PER_MONTH: Final[int] = 100
+
+# ECS Fargate: capacity is assumed proportional to the vCPU allocated to
+# ONE task replica (the size module 2 already chose) — a task with more
+# vCPU serves proportionally more users, it is never a flat count.
+_ECS_USERS_PER_VCPU: Final[int] = 500
+
+# EC2: with no per-instance-type vCPU table to reference, on-demand hourly
+# price is used as a proxy for relative compute capacity (AWS's own pricing
+# scales with instance capability). Capacity is defined for one reference
+# instance type and scaled by the ratio of hourly prices for any other type.
+_EC2_REFERENCE_INSTANCE_TYPE: Final[str] = "t3.micro"
+_EC2_USERS_PER_REFERENCE_INSTANCE: Final[int] = 400
 
 
-def _scale_cost(cost: CostEstimateResult, factor: int) -> CostEstimateResult:
-    """Scales an already-computed per-unit CostEstimateResult by `factor`
-    identical units. Linear scaling preserves the +-20% range ratio."""
-    return CostEstimateResult(
-        amount=round(cost.amount * factor, 2),
-        currency=cost.currency,
-        range_min=round(cost.range_min * factor, 2),
-        range_max=round(cost.range_max * factor, 2),
+class ScenarioResult(BaseModel):
+    """The recomputed sizing and cost for one load level."""
+
+    users: int
+    sizing: dict[str, int | str]
+    estimated_monthly_cost: Money
+
+
+def _scale_money(money: Money, factor: int) -> Money:
+    return Money(
+        amount=round(money.amount * factor, 2),
+        currency=money.currency,
+        range_min=round(money.range_min * factor, 2),
+        range_max=round(money.range_max * factor, 2),
     )
 
 
-def _simulate_ecs(
-    decision: DecisionResult, user_load: int, *, use_graviton: bool
-) -> ScenarioResult:
-    if decision.ecs is None:
-        raise ValueError("DecisionResult.compute_type='ecs' but decision.ecs is None")
-    task_count = max(1, math.ceil(user_load / CONCURRENT_USERS_PER_ECS_TASK))
-    per_task_cost = estimate_ecs_cost(
-        vcpu=decision.ecs.task_cpu / 1024.0,
-        memory_gb=decision.ecs.task_memory / 1024.0,
-        use_graviton=use_graviton,
-    )
+def _replica_count(users: int, capacity_per_replica: float) -> int:
+    """Users needing service, divided by what one replica can serve —
+    always rounded up (never truncated), and never below 1 replica."""
+    return max(1, math.ceil(users / capacity_per_replica))
+
+
+def _ecs_capacity_per_task(decision: DecisionResult) -> float:
+    nb_vcpu = int(decision.sizing["task_cpu"]) / _FARGATE_CPU_UNITS_PER_VCPU
+    return nb_vcpu * _ECS_USERS_PER_VCPU
+
+
+def _ec2_capacity_per_instance(decision: DecisionResult) -> float:
+    pricing = _load_pricing_data()
+    instance_type = str(decision.sizing["instance_type"])
+    hourly_rate = _get_pricing(pricing, "ec2_on_demand_hourly", instance_type)
+    reference_rate = _get_pricing(pricing, "ec2_on_demand_hourly", _EC2_REFERENCE_INSTANCE_TYPE)
+    return (hourly_rate / reference_rate) * _EC2_USERS_PER_REFERENCE_INSTANCE
+
+
+def _simulate_ecs(decision: DecisionResult, users: int) -> ScenarioResult:
+    task_count = _replica_count(users, _ecs_capacity_per_task(decision))
+    per_task_cost = estimate_cost(decision)
+    sizing = {**decision.sizing, "task_count": task_count}
     return ScenarioResult(
-        user_load=user_load,
-        compute_units=task_count,
-        cost=_scale_cost(per_task_cost, task_count),
+        users=users,
+        sizing=sizing,
+        estimated_monthly_cost=_scale_money(per_task_cost, task_count),
     )
 
 
-def _simulate_lambda(
-    decision: DecisionResult, user_load: int, *, use_graviton: bool
-) -> ScenarioResult:
-    if decision.lambda_ is None:
-        raise ValueError("DecisionResult.compute_type='lambda' but decision.lambda_ is None")
-    monthly_invocations = user_load * REQUESTS_PER_ACTIVE_USER_PER_MONTH
-    cost = estimate_lambda_cost(
-        memory_mb=decision.lambda_.memory_mb,
-        avg_duration_seconds=LAMBDA_AVG_DURATION_SECONDS,
-        monthly_invocations=monthly_invocations,
-        use_graviton=use_graviton,
-    )
-    return ScenarioResult(user_load=user_load, compute_units=monthly_invocations, cost=cost)
+def _simulate_lambda(decision: DecisionResult, users: int) -> ScenarioResult:
+    monthly_invocations = users * _LAMBDA_REQUESTS_PER_USER_PER_MONTH
+    cost = estimate_cost(decision, CostEstimationContext(monthly_invocations=monthly_invocations))
+    sizing = {**decision.sizing, "monthly_invocations": monthly_invocations}
+    return ScenarioResult(users=users, sizing=sizing, estimated_monthly_cost=cost)
 
 
-def _simulate_ec2(decision: DecisionResult, user_load: int) -> ScenarioResult:
-    if decision.ec2 is None:
-        raise ValueError("DecisionResult.compute_type='ec2' but decision.ec2 is None")
-    instance_count = max(1, math.ceil(user_load / CONCURRENT_USERS_PER_EC2_INSTANCE))
-    per_instance_cost = estimate_ec2_cost(instance_type=decision.ec2.instance_type, instance_count=1)
+def _simulate_ec2(decision: DecisionResult, users: int) -> ScenarioResult:
+    instance_count = _replica_count(users, _ec2_capacity_per_instance(decision))
+    per_instance_cost = estimate_cost(decision)
+    sizing = {**decision.sizing, "instance_count": instance_count}
     return ScenarioResult(
-        user_load=user_load,
-        compute_units=instance_count,
-        cost=_scale_cost(per_instance_cost, instance_count),
+        users=users,
+        sizing=sizing,
+        estimated_monthly_cost=_scale_money(per_instance_cost, instance_count),
     )
 
 
-def simulate_scenarios(
-    decision: DecisionResult, *, use_graviton: bool = False
-) -> list[ScenarioResult]:
-    """Computes a ScenarioResult for each of SCENARIO_USER_LOADS (1K/10K/100K).
+_SIMULATORS = {
+    "ecs": _simulate_ecs,
+    "lambda": _simulate_lambda,
+    "ec2": _simulate_ec2,
+}
 
-    Re-derives the compute dimensioning per scenario (task/instance count for
-    ECS/EC2, invocation volume for Lambda) rather than scaling the base
-    monthly cost linearly.
 
-    :raises ValueError: if decision.compute_type has no matching sizing block
+def simulate_load_scenarios(decision: DecisionResult) -> list[ScenarioResult]:
+    """Simulate cost at 1K / 10K / 100K active users.
+
+    Args:
+        decision: Module 2's output — the base architecture decision.
+
+    Returns:
+        Three ``ScenarioResult``, one per load level in ``_LOAD_SCENARIOS``,
+        each with its own recomputed sizing and cost — never the module 4
+        baseline cost scaled by a ratio of user counts.
     """
-    results: list[ScenarioResult] = []
-    for user_load in SCENARIO_USER_LOADS:
-        if decision.compute_type == "ecs":
-            results.append(_simulate_ecs(decision, user_load, use_graviton=use_graviton))
-        elif decision.compute_type == "lambda":
-            results.append(_simulate_lambda(decision, user_load, use_graviton=use_graviton))
-        elif decision.compute_type == "ec2":
-            results.append(_simulate_ec2(decision, user_load))
-        else:
-            raise ValueError(f"Unknown compute_type: {decision.compute_type!r}")
-
-    logger.info(
-        "scenario_simulator computed %d scenarios for compute_type='%s'",
-        len(results),
-        decision.compute_type,
-    )
-    return results
+    simulator = _SIMULATORS[decision.compute_type]
+    return [simulator(decision, users) for users in _LOAD_SCENARIOS]

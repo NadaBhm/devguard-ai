@@ -16,12 +16,7 @@
     "frameworks": [],
     "database": null,
     "build_tool": null,
-    "container": {
-      "detected": false,
-      "base_image": null,
-      "dockerfile_path": null,
-      "compose_detected": false
-    },
+    "container": { "detected": false, "base_image": null, "dockerfile_path": null, "compose_detected": false },
     "confidence": 0.31,
     "detected_files": ["README.md"]
   },

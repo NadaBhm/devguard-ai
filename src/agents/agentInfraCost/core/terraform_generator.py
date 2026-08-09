@@ -1,158 +1,143 @@
-"""Module 3: renders main.tf / variables.tf / outputs.tf from Jinja2 templates.
+"""Step 3 of the InfraCost pipeline: render Terraform files from templates.
 
-Deterministic by construction: Terraform is always produced from the fixed
-templates under templates/{ecs,lambda,ec2}/, never generated as free text by
-an LLM. Every value interpolated into a quoted HCL string is passed through
-the `hcl_string` filter, which escapes backslashes and double quotes, so a
-value containing either can never break the generated file's syntax.
+Generation is entirely deterministic — no LLM writes any Terraform here.
+Each compute type has its own set of three Jinja2 templates under
+``templates/<compute_type>/`` (``main.tf.j2``, ``variables.tf.j2``,
+``outputs.tf.j2``). This module only picks the right template set for
+``decision.compute_type`` and fills in values already computed by module 2
+(``decision_engine``) plus a small amount of non-decision context (job id,
+region, docker image) — it never invents architecture choices itself.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Final
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from pydantic import BaseModel
 
-from ..models.internal_models import DecisionResult, TerraformGenerationResult
+from core.decision_engine import DecisionResult
+from models.output_schema import TerraformFiles
 
-logger = logging.getLogger(__name__)
+_TEMPLATES_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "templates"
 
-_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+_ENV: Final[Environment] = Environment(
+    loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+    undefined=StrictUndefined,
+    trim_blocks=True,
+    lstrip_blocks=True,
+    autoescape=False,
+)
 
-_TEMPLATE_FILES: tuple[str, ...] = ("main.tf", "variables.tf", "outputs.tf")
+_TEMPLATE_FILENAMES: Final[tuple[str, ...]] = ("main.tf", "variables.tf", "outputs.tf")
 
+# --------------------------------------------------------------------------
+# Conventions used to fill in template variables that module 2 does not
+# decide (naming, ports, IAM role shape, ...). These mirror the same
+# defaults used by main.py's mock response builder; module 7
+# (output_builder) will be the single source of truth for them once built.
+# --------------------------------------------------------------------------
 
-def _hcl_string(value: Any) -> str:
-    """Escapes a value for safe interpolation inside a double-quoted HCL string."""
-    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+_ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
+_ECS_SERVICE_NAME: Final[str] = "app-service"
+_ECS_HEALTH_CHECK_PORT: Final[int] = 8080
+_ECS_HEALTH_CHECK_PATH: Final[str] = "/health"
 
+_LAMBDA_FUNCTION_NAME: Final[str] = "app-handler"
+_LAMBDA_HANDLER: Final[str] = "handler.main"
+_LAMBDA_RUNTIME: Final[str] = "python3.12"
+_LAMBDA_TIMEOUT_SECONDS: Final[int] = 30
 
-def _make_environment() -> Environment:
-    env = Environment(
-        loader=FileSystemLoader(str(_TEMPLATES_DIR)),
-        trim_blocks=True,
-        lstrip_blocks=True,
-        keep_trailing_newline=True,
-        undefined=StrictUndefined,
-    )
-    env.filters["hcl_string"] = _hcl_string
-    return env
-
-
-_JINJA_ENV = _make_environment()
-
-
-def _render_all(compute_type: str, context: dict[str, Any]) -> dict[str, str]:
-    files: dict[str, str] = {}
-    for filename in _TEMPLATE_FILES:
-        template = _JINJA_ENV.get_template(f"{compute_type}/{filename}.j2")
-        files[filename] = template.render(**context)
-    return files
-
-
-def _generate_ecs(
-    decision: DecisionResult, *, region: str, environment: str, docker_image_uri: Optional[str]
-) -> TerraformGenerationResult:
-    if decision.ecs is None:
-        raise ValueError("DecisionResult.compute_type='ecs' but decision.ecs is None")
-    if not docker_image_uri:
-        raise ValueError("docker_image_uri is required to generate Terraform for compute_type='ecs'")
-
-    context = {
-        "cluster": decision.ecs.cluster,
-        "service_name": decision.ecs.service_name,
-        "task_cpu": decision.ecs.task_cpu,
-        "task_memory": decision.ecs.task_memory,
-        "health_check_port": decision.ecs.health_check_port,
-        "min_healthy_percent": decision.ecs.min_healthy_percent,
-        "max_percent": decision.ecs.max_percent,
-        "docker_image": docker_image_uri,
-        "region": region,
-        "environment": environment,
-    }
-    files = _render_all("ecs", context)
-    variables = {"region": region, "environment": environment}
-    return TerraformGenerationResult(files=files, variables=variables)
+_EC2_AMI_ID: Final[str] = "ami-0000000000000000"
+_EC2_KEY_PAIR_NAME: Final[str] = "devguard-key"
+_EC2_INSTANCE_COUNT: Final[int] = 1
+_EC2_INSTANCE_NAME: Final[str] = "devguard-app"
 
 
-def _generate_lambda(
-    decision: DecisionResult, *, region: str, environment: str
-) -> TerraformGenerationResult:
-    if decision.lambda_ is None:
-        raise ValueError("DecisionResult.compute_type='lambda' but decision.lambda_ is None")
+class TerraformContext(BaseModel):
+    """Inputs needed to render Terraform that module 2 doesn't provide.
 
-    context = {
-        "function_name": decision.lambda_.function_name,
-        "runtime": decision.lambda_.runtime,
-        "memory_mb": decision.lambda_.memory_mb,
-        "timeout_seconds": decision.lambda_.timeout_seconds,
-        "handler": decision.lambda_.handler,
-        "reserved_concurrency": decision.lambda_.reserved_concurrency,
-        "region": region,
-        "environment": environment,
-    }
-    files = _render_all("lambda", context)
-    variables = {"region": region, "environment": environment}
-    return TerraformGenerationResult(files=files, variables=variables)
-
-
-def _generate_ec2(
-    decision: DecisionResult, *, region: str, environment: str, docker_image_uri: Optional[str]
-) -> TerraformGenerationResult:
-    if decision.ec2 is None:
-        raise ValueError("DecisionResult.compute_type='ec2' but decision.ec2 is None")
-
-    context = {
-        "instance_type": decision.ec2.instance_type,
-        "ami_id": decision.ec2.ami_id,
-        "instance_count": decision.ec2.instance_count,
-        "key_pair_name": decision.ec2.key_pair_name,
-        "health_check_port": decision.ec2.health_check_port,
-        "docker_image": docker_image_uri,
-        "region": region,
-        "environment": environment,
-    }
-    files = _render_all("ec2", context)
-    variables = {"region": region, "environment": environment}
-    return TerraformGenerationResult(files=files, variables=variables)
-
-
-def generate_terraform(
-    decision: DecisionResult,
-    *,
-    region: str,
-    environment: str = "dev",
-    docker_image_uri: Optional[str] = None,
-) -> TerraformGenerationResult:
-    """Renders main.tf / variables.tf / outputs.tf for `decision.compute_type`.
-
-    :param docker_image_uri: e.g. "repo-name:a1b2c3d4e5f6". Required for
-        "ecs" (the task definition always needs an image). Optional for
-        "ec2" (adds a Docker-run user_data block when given, otherwise the
-        instance is provisioned bare). Ignored for "lambda", which always
-        deploys from a zipped package via the deployment_package_path
-        variable.
-    :raises ValueError: if decision.compute_type has no matching sizing
-        block, or if docker_image_uri is missing for "ecs".
+    These are identity/environment details, not architecture choices —
+    the architecture choice itself (compute_type, sizing) always comes
+    from the ``DecisionResult`` passed alongside this context.
     """
-    if decision.compute_type == "ecs":
-        result = _generate_ecs(
-            decision, region=region, environment=environment, docker_image_uri=docker_image_uri
-        )
-    elif decision.compute_type == "lambda":
-        result = _generate_lambda(decision, region=region, environment=environment)
-    elif decision.compute_type == "ec2":
-        result = _generate_ec2(
-            decision, region=region, environment=environment, docker_image_uri=docker_image_uri
-        )
-    else:
-        raise ValueError(f"Unknown compute_type: {decision.compute_type!r}")
 
-    logger.info(
-        "terraform_generator rendered %d files for compute_type='%s'",
-        len(result.files),
-        decision.compute_type,
-    )
-    return result
+    job_id: str
+    region: str = "us-east-1"
+    environment: str = "dev"
+    docker_image: str | None = None
+    source_code_path: str | None = None
+    database: str | None = None
+    """The database engine module 1 detected (e.g. "postgresql"), if any —
+    ``analysis.stack_detection.database`` passed straight through. Only used
+    by the ECS template today, to declare (not create) the connection
+    variables a deployer must fill in — see ``_ecs_render_context``.
+    """
+
+
+def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
+    return {
+        "region": context.region,
+        "environment": context.environment,
+        "cluster_name": _ECS_CLUSTER_NAME,
+        "service_name": _ECS_SERVICE_NAME,
+        "task_cpu": decision.sizing["task_cpu"],
+        "task_memory": decision.sizing["task_memory"],
+        "docker_image": context.docker_image or "devguard-app:latest",
+        "health_check_port": _ECS_HEALTH_CHECK_PORT,
+        "health_check_path": _ECS_HEALTH_CHECK_PATH,
+        "database": context.database,
+    }
+
+
+def _lambda_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
+    return {
+        "region": context.region,
+        "environment": context.environment,
+        "function_name": _LAMBDA_FUNCTION_NAME,
+        "runtime": _LAMBDA_RUNTIME,
+        "handler": _LAMBDA_HANDLER,
+        "memory_mb": decision.sizing["memory_mb"],
+        "timeout_seconds": _LAMBDA_TIMEOUT_SECONDS,
+        "source_code_path": context.source_code_path or f"/tmp/repo_{context.job_id}.zip",
+    }
+
+
+def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
+    return {
+        "region": context.region,
+        "environment": context.environment,
+        "ami_id": _EC2_AMI_ID,
+        "instance_type": decision.sizing["instance_type"],
+        "instance_count": _EC2_INSTANCE_COUNT,
+        "key_pair_name": _EC2_KEY_PAIR_NAME,
+        "instance_name": _EC2_INSTANCE_NAME,
+    }
+
+
+_CONTEXT_BUILDERS = {
+    "ecs": _ecs_render_context,
+    "lambda": _lambda_render_context,
+    "ec2": _ec2_render_context,
+}
+
+
+def generate_terraform(decision: DecisionResult, context: TerraformContext) -> TerraformFiles:
+    """Render main.tf / variables.tf / outputs.tf for the decided architecture.
+
+    Args:
+        decision: Module 2's output — names which template set to use
+            (``decision.compute_type``) and supplies the computed sizing.
+        context: Non-decision values (job id, region, docker image, ...)
+            needed to fill in the rest of the templates.
+
+    Returns:
+        A ``TerraformFiles`` with all three files rendered.
+    """
+    render_context = _CONTEXT_BUILDERS[decision.compute_type](decision, context)
+    rendered = {
+        filename: _ENV.get_template(f"{decision.compute_type}/{filename}.j2").render(**render_context)
+        for filename in _TEMPLATE_FILENAMES
+    }
+    return TerraformFiles.model_validate(rendered)

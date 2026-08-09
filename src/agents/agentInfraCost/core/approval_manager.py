@@ -1,62 +1,80 @@
-"""Module 8: manages the pending -> approved/rejected state transition.
+"""Step 8 of the InfraCost pipeline: local/CLI/test-only approval state.
 
-The wire contract's Approval.status enum (pending/approved/rejected) is a
-one-way state machine from this module's perspective: a job can be approved
-or rejected exactly once, from "pending", and never transitions again after
-that. Approving an already-decided job (approved or rejected) is a
-programming/workflow error caught here, never silently overwritten.
+A small pending -> approved | rejected state machine. This is NOT the
+approval authority when this agent runs inside the shared orchestrator
+(``src/subgroup2/orchestrator/graph.py``) — there, the orchestrator's own
+``interrupt()``-based human gates (``gate_1_pre_infracost``,
+``gate_2_pre_deployops``) are the sole source of truth, and this class is
+simply never consulted on that path. It exists only for running this agent
+standalone (its own API, a CLI, or tests), where no orchestrator gate
+exists to ask instead.
 
-Transitions are pure: each function returns a new ApprovalRecord rather than
-mutating the one it was given.
+(Decided 2026-07-27, verified against the orchestrator's actual code before
+building this — see project memory — rather than assumed.)
 """
 
 from __future__ import annotations
 
-import logging
-
-from ..models.exceptions import InfraCostAgentError
-from ..models.internal_models import ApprovalRecord
-
-logger = logging.getLogger(__name__)
+from models.output_schema import Approval, ApprovalStatus
 
 
-class InvalidApprovalTransitionError(InfraCostAgentError):
-    """Raised when an approve/reject is attempted from a non-"pending" state."""
+class InvalidApprovalTransitionError(Exception):
+    """An approve/reject action was attempted from a non-``pending`` state."""
 
-    def __init__(self, job_id: str, current_status: str, attempted_transition: str) -> None:
+    def __init__(self, job_id: str, current_status: ApprovalStatus, attempted_action: str) -> None:
         self.job_id = job_id
         self.current_status = current_status
-        self.attempted_transition = attempted_transition
+        self.attempted_action = attempted_action
         super().__init__(
-            f"Cannot {attempted_transition} job '{job_id}': it is already "
+            f"job_id={job_id}: cannot {attempted_action} — current status is "
             f"'{current_status}', not 'pending'"
         )
 
 
-def create_approval_record(job_id: str) -> ApprovalRecord:
-    """Creates a new approval record in the initial 'pending' state."""
-    return ApprovalRecord(job_id=job_id, status="pending", approved_by=None)
+class ApprovalManager:
+    """Tracks one job's approval state through pending -> approved|rejected.
 
-
-def approve(record: ApprovalRecord, *, approved_by: str) -> ApprovalRecord:
-    """Transitions `record` from 'pending' to 'approved'.
-
-    :raises InvalidApprovalTransitionError: if `record.status` is not
-        'pending' (already approved or already rejected)
+    Once a decision is made (either way), it is final — approving twice,
+    or rejecting an already-approved (or already-rejected) job, always
+    raises rather than silently overwriting the earlier decision.
     """
-    if record.status != "pending":
-        raise InvalidApprovalTransitionError(record.job_id, record.status, "approve")
-    logger.info("Job '%s' approved by %s", record.job_id, approved_by)
-    return ApprovalRecord(job_id=record.job_id, status="approved", approved_by=approved_by)
 
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        self._status: ApprovalStatus = "pending"
+        self._approved_by: str | None = None
 
-def reject(record: ApprovalRecord) -> ApprovalRecord:
-    """Transitions `record` from 'pending' to 'rejected'.
+    @property
+    def status(self) -> ApprovalStatus:
+        return self._status
 
-    :raises InvalidApprovalTransitionError: if `record.status` is not
-        'pending' (already approved or already rejected)
-    """
-    if record.status != "pending":
-        raise InvalidApprovalTransitionError(record.job_id, record.status, "reject")
-    logger.info("Job '%s' rejected", record.job_id)
-    return ApprovalRecord(job_id=record.job_id, status="rejected", approved_by=None)
+    @property
+    def approved_by(self) -> str | None:
+        return self._approved_by
+
+    def approve(self, approved_by: str) -> None:
+        """Move ``pending`` -> ``approved``.
+
+        Raises:
+            InvalidApprovalTransitionError: the job isn't ``pending``
+                (already approved, or already rejected).
+        """
+        if self._status != "pending":
+            raise InvalidApprovalTransitionError(self.job_id, self._status, "approve")
+        self._status = "approved"
+        self._approved_by = approved_by
+
+    def reject(self) -> None:
+        """Move ``pending`` -> ``rejected``.
+
+        Raises:
+            InvalidApprovalTransitionError: the job isn't ``pending``
+                (already approved, or already rejected).
+        """
+        if self._status != "pending":
+            raise InvalidApprovalTransitionError(self.job_id, self._status, "reject")
+        self._status = "rejected"
+
+    def to_approval(self) -> Approval:
+        """The current state, in the shape module 7's output contract expects."""
+        return Approval(status=self._status, approved_by=self._approved_by)

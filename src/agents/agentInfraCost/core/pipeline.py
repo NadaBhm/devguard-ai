@@ -1,152 +1,153 @@
-"""Module 9: orchestrates modules 1-8 and 10 in order, end to end.
+"""Step 9 of the InfraCost pipeline: orchestrate modules 1-4, 6, 7 and 10.
 
-Every stage is wrapped so a failure surfaces as a PipelineStageError naming
-exactly which stage failed (`.stage`) and preserving the original typed
-exception (`.original_error`) — never a silent crash or a bare traceback
-from deep inside one module.
+Architecture decision (module 2) now goes through
+``decide_architecture_via_llm`` (Phase B): an LLM picks ``compute_type``
+when ``OPENROUTER_API_KEY`` is set and the call succeeds, otherwise it
+transparently falls back to ``decide_architecture``'s deterministic scoring
+— see ``core/llm_architecture_advisor.py`` for the full contract. The
+Terraform deployment context (region/environment, module 3's inputs) goes
+through ``decide_deployment_context`` (Phase C) the same way — see
+``core/llm_deployment_advisor.py``.
 
-`run_pipeline` produces an InfraCostOutput with approval.status="pending":
-it is Agent 2's complete output, awaiting the human approval step that sits
-between this agent and Agent 3 in the overall pipeline. `apply_approval`
-performs that separate step afterwards, via approval_manager.
+A single synchronous entry point, ``run_pipeline``, calling every module in
+order. Deliberately a plain function, not ``async def``: the shared
+orchestrator (``src/subgroup2/orchestrator/graph.py``) integrates every
+agent as a synchronous, in-process call today — no agent anywhere in this
+project is async yet. Any future async caller can wrap this in
+``asyncio.to_thread(run_pipeline, raw)`` without this module changing at
+all; making it async pre-emptively, with no async caller to justify it,
+would be the wrong default.
+
+Error handling is precise per stage: module 1's own typed exceptions
+(``InvalidStatusError``, ``LowConfidenceError``, ...) already name exactly
+what went wrong and carry a ``job_id`` — they propagate unwrapped, since
+wrapping them would only obscure that detail. Every other stage's failure
+is wrapped in ``PipelineStageError``, naming which stage failed — never a
+bare, ambiguous traceback.
 """
 
 from __future__ import annotations
 
-import logging
-from typing import Any, Callable, Optional, TypeVar
+from pydantic import BaseModel
 
-from ..models.exceptions import PipelineStageError
-from ..models.internal_models import ApprovalRecord
-from ..models.output_models import Approval, InfraCostOutput
-from . import (
-    approval_manager,
-    cost_estimator,
-    decision_engine,
-    finops_optimizer,
-    input_validator,
-    llm_enrichment,
-    output_builder,
-    scenario_simulator,
-    terraform_generator,
-)
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_REGION = "us-east-1"
-DEFAULT_ENVIRONMENT = "dev"
-
-_T = TypeVar("_T")
+from core.cost_estimator import estimate_cost
+from core.decision_engine import DecisionResult
+from core.finops_optimizer import FinOpsRecommendation, optimize_finops
+from core.input_validator import InputValidationError, validate_input
+from core.llm_architecture_advisor import decide_architecture_via_llm
+from core.llm_deployment_advisor import decide_deployment_context
+from core.llm_enrichment import build_enrichment
+from core.output_builder import build_output, resolve_docker_artifacts
+from core.terraform_generator import generate_terraform
+from models.output_schema import InfraCostOutput
 
 
-def _run_stage(stage_name: str, fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+class PipelineContext(BaseModel):
+    """Everything ``run_pipeline()`` computes internally, for callers that
+    need more than the final ``InfraCostOutput`` contract exposes.
+
+    Currently used by ``core.orchestrator_adapter``, which needs
+    ``decision`` and ``finops`` to derive fields (load scenarios, region
+    comparison, FinOps options) that ``InfraCostOutput`` itself never
+    carries — see that module's docstring for why.
+    """
+
+    output: InfraCostOutput
+    decision: DecisionResult
+    finops: FinOpsRecommendation
+
+
+class PipelineStageError(Exception):
+    """A pipeline stage other than module 1 failed.
+
+    Names exactly which stage, and keeps the original exception attached
+    (both as ``original_exception`` and via ``raise ... from``) — never an
+    ambiguous, unattributed crash.
+    """
+
+    def __init__(self, stage: str, original_exception: Exception) -> None:
+        self.stage = stage
+        self.original_exception = original_exception
+        super().__init__(f"Pipeline failed at stage '{stage}': {original_exception}")
+
+
+def _run_pipeline_internal(raw: dict) -> PipelineContext:
+    """The actual pipeline. Both public entry points below call this and
+    only differ in how much of the result they hand back — the steps
+    themselves, and every error-handling decision, live here exactly once.
+    """
+    analysis = validate_input(raw)  # not wrapped: already typed + carries job_id
+
     try:
-        return fn(*args, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - this is the pipeline's single error boundary
-        logger.error("Pipeline stage '%s' failed: %s", stage_name, exc)
-        raise PipelineStageError(stage_name, exc) from exc
+        decision = decide_architecture_via_llm(analysis)
+    except Exception as exc:
+        raise PipelineStageError("decision_engine", exc) from exc
 
-
-def run_pipeline(
-    raw_payload: dict[str, Any],
-    *,
-    region: str = DEFAULT_REGION,
-    environment: str = DEFAULT_ENVIRONMENT,
-) -> InfraCostOutput:
-    """Runs the full InfraCost pipeline and returns a pending-approval output.
-
-    Stage order: input_validator -> decision_engine -> cost_estimator ->
-    scenario_simulator (computed for completeness/logging; not part of the
-    wire output) -> finops_optimizer -> terraform_generator ->
-    approval_manager (creates the initial 'pending' record) ->
-    llm_enrichment (always last) -> output_builder.
-
-    :raises PipelineStageError: if any stage fails; `.stage` names which one
-        and `.original_error` carries the underlying typed exception (e.g. a
-        LowConfidenceStackDetectionError from input_validator).
-    """
-    payload = _run_stage("input_validation", input_validator.validate_input, raw_payload)
-    decision = _run_stage("decision_engine", decision_engine.decide, payload)
-    cost = _run_stage("cost_estimator", cost_estimator.estimate_cost, decision)
-    _run_stage("scenario_simulator", scenario_simulator.simulate_scenarios, decision)
-    finops = _run_stage("finops_optimizer", finops_optimizer.optimize, payload, decision)
-
-    container_detected = payload.stack_detection.container.detected
-    docker_image_uri: Optional[str] = None
-    if container_detected:
-        image = output_builder.resolve_docker_image(
-            repo_name=payload.repo_metadata.name,
-            commit_sha=payload.repo_metadata.commit_sha,
+    try:
+        dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+        # Prefer the real Dockerfile content the CodeSec agent extracted
+        # (agent.payload["dockerfile_content"]), never a synthesized stand-in.
+        if raw.get("dockerfile_content"):
+            dockerfile = raw["dockerfile_content"]
+        terraform_context = decide_deployment_context(
+            analysis,
+            job_id=analysis.job_id,
+            docker_image=f"{docker_image.name}:{docker_image.tag}" if docker_image else None,
         )
-        docker_image_uri = f"{image.name}:{image.tag}"
+        terraform_files = generate_terraform(decision, terraform_context)
+    except Exception as exc:
+        raise PipelineStageError("terraform_generator", exc) from exc
 
-    terraform = _run_stage(
-        "terraform_generator",
-        terraform_generator.generate_terraform,
-        decision,
-        region=region,
-        environment=environment,
-        docker_image_uri=docker_image_uri,
-    )
+    try:
+        cost = estimate_cost(decision)
+    except Exception as exc:
+        raise PipelineStageError("cost_estimator", exc) from exc
 
-    approval_record = _run_stage(
-        "approval_manager", approval_manager.create_approval_record, payload.job_id
-    )
+    try:
+        finops = optimize_finops(analysis, decision)
+    except Exception as exc:
+        raise PipelineStageError("finops_optimizer", exc) from exc
 
-    enrichment = _run_stage(
-        "llm_enrichment",
-        llm_enrichment.enrich,
-        decision=decision,
-        cost=cost,
-        finops=finops,
-    )
+    try:
+        enrichment = build_enrichment(decision, cost, finops)
+    except Exception as exc:
+        raise PipelineStageError("llm_enrichment", exc) from exc
 
-    output = _run_stage(
-        "output_builder",
-        output_builder.build_output,
-        job_id=payload.job_id,
-        decision=decision,
-        estimated_monthly_cost=cost,
-        terraform_files=terraform.files,
-        terraform_variables=terraform.variables,
-        region=region,
-        repo_name=payload.repo_metadata.name,
-        commit_sha=payload.repo_metadata.commit_sha,
-        container_detected=container_detected,
-        # Agent 1 only reports the Dockerfile's path, not its contents;
-        # Agent 3 reads the actual file from the checked-out source_code.
-        dockerfile_content=None,
-        source_code_path=f"/tmp/repo_{payload.job_id}",
-        approval=Approval(status=approval_record.status, approved_by=approval_record.approved_by),
-        enrichment=enrichment,
-    )
-    return output
+    try:
+        output = build_output(
+            analysis, decision, terraform_files, cost, enrichment, dockerfile, docker_image
+        )
+    except Exception as exc:
+        raise PipelineStageError("output_builder", exc) from exc
+
+    return PipelineContext(output=output, decision=decision, finops=finops)
 
 
-def apply_approval(
-    output: InfraCostOutput, *, approved: bool, approved_by: Optional[str] = None
-) -> InfraCostOutput:
-    """Applies the human approval/rejection decision to a pending output.
+def run_pipeline(raw: dict) -> InfraCostOutput:
+    """Run the full InfraCost pipeline on a raw Agent 1 payload.
 
-    Returns a new InfraCostOutput with an updated `approval` block; does not
-    mutate `output`.
+    Args:
+        raw: Agent 1's raw analysis payload (already-decoded JSON).
 
-    :raises InvalidApprovalTransitionError: if `output.approval.status` is
-        not already "pending" (already approved or rejected)
-    :raises ValueError: if approved=True but `approved_by` is not provided
+    Returns:
+        The final ``InfraCostOutput`` contract.
+
+    Raises:
+        InputValidationError: (or a subclass) module 1 rejected the
+            payload — propagates unwrapped, already precisely typed.
+        PipelineStageError: any other stage failed; ``.stage`` names which
+            one, ``.original_exception`` holds the real cause.
     """
-    record = ApprovalRecord(
-        job_id=output.job_id,
-        status=output.approval.status,
-        approved_by=output.approval.approved_by,
-    )
-    if approved:
-        if not approved_by:
-            raise ValueError("approved_by is required when approving a job")
-        record = approval_manager.approve(record, approved_by=approved_by)
-    else:
-        record = approval_manager.reject(record)
+    return _run_pipeline_internal(raw).output
 
-    return output.model_copy(
-        update={"approval": Approval(status=record.status, approved_by=record.approved_by)}
-    )
+
+def run_pipeline_with_context(raw: dict) -> PipelineContext:
+    """Like ``run_pipeline``, but also returns the internal ``DecisionResult``
+    and ``FinOpsRecommendation`` computed for this same job.
+
+    Same arguments and exceptions as ``run_pipeline`` — this is not a
+    different pipeline, just a richer view into the one pipeline that
+    exists. Intended for ``core.orchestrator_adapter``; the HTTP endpoint
+    in ``main.py`` should keep using plain ``run_pipeline``.
+    """
+    return _run_pipeline_internal(raw)

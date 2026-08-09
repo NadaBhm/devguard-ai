@@ -41,6 +41,9 @@ jobs:
         run: mypy src/ || true
         continue-on-error: true # Sprint 1: not all modules exist yet
 
+      - name: Set JWT secret (fail-fast requires non-empty)
+        run: echo "SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
       - name: Run tests (pytest)
         run: pytest --maxfail=1 --disable-warnings -q || true
         continue-on-error: true # Sprint 1: most agents are still mocks

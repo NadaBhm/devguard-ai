@@ -1,6 +1,10 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from .. import models
+from ..auth import get_current_user
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -17,12 +21,12 @@ class IngestRequest(BaseModel):
     job_id: str
 
 @router.post("/ask", response_model=ChatResponse)
-async def ask_question(req: ChatRequest):
+async def ask_question(req: ChatRequest, current_user: models.User = Depends(get_current_user)):
     """Ask a question about an ingested repository."""
     try:
         from ...lib.rag.retrieval import ask_repo
         result = ask_repo(req.query, req.job_id)
-        
+
         # Handle both (answer, sources) and just answer
         if isinstance(result, tuple):
             answer, sources = result
@@ -31,13 +35,13 @@ async def ask_question(req: ChatRequest):
         else:
             answer = result
             sources = []
-            
+
         return ChatResponse(answer=answer, sources=sources)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/ingest")
-async def ingest_repository(req: IngestRequest):
+async def ingest_repository(req: IngestRequest, current_user: models.User = Depends(get_current_user)):
     """Ingest a repository into the RAG vector store."""
     try:
         from ...lib.rag.ingestion import ingest_repo

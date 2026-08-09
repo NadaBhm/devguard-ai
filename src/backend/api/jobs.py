@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..auth import get_current_user
 from ..database import get_db
 from ..persistence import persist_results, serialize_state, update_run_state
 from ..redis_client import publish_gate, publish_progress, publish_results_ready
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 # The orchestrator's repo_url is the same as the project's github_url.
-SYSTEM_USER_EMAIL = "system@devguard.ai"
+# Jobs are created by the authenticated user, who owns the project and run.
 
 
 class JobCreate(BaseModel):
@@ -55,26 +56,6 @@ class ApproveRequest(BaseModel):
     approved: bool
     comment: str = ""
     approved_by: str = ""
-
-
-def _get_or_create_system_user(db: Session) -> models.User:
-    """Minimal ownership fallback: a single system user for jobs created
-    without an authenticated user. Swap for JWT auth when ready."""
-    user = db.query(models.User).filter(models.User.email == SYSTEM_USER_EMAIL).first()
-    if user:
-        return user
-    from ..auth import get_password_hash
-    user = models.User(
-        email=SYSTEM_USER_EMAIL,
-        hashed_password=get_password_hash("system-user-not-for-login"),
-        first_name="System",
-        last_name="User",
-        is_verified=True,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
 
 
 def _get_or_create_project(
@@ -124,12 +105,15 @@ def _publish(state: dict, progress: int, message: str) -> None:
 
 
 @router.post("/", status_code=201)
-def create_job(body: JobCreate, db: Session = Depends(get_db)):
+def create_job(
+    body: JobCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Start a job: create Project + AnalysisRun, run the orchestrator up to
     the first human gate, and persist the resulting state."""
-    user = _get_or_create_system_user(db)
-    project = _get_or_create_project(db, user.id, body.repo_url, body.default_branch)
-    run = _create_run(db, project, user.id, body.commit_sha, body.commit_message)
+    project = _get_or_create_project(db, current_user.id, body.repo_url, body.default_branch)
+    run = _create_run(db, project, current_user.id, body.commit_sha, body.commit_message)
 
     logger.info(f"Starting orchestrator for run {run.id} | repo {body.repo_url}")
     publish_progress(str(run.id), phase="start", progress=5, message="Job started")
@@ -159,7 +143,12 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/{job_id}/approve")
-def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)):
+def approve_job(
+    job_id: str,
+    body: ApproveRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Resume a paused workflow at its human gate with an approval/rejection."""
     run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
     if not run:
@@ -170,7 +159,7 @@ def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)
         resume_data = {
             "approved": body.approved,
             "comment": body.comment,
-            "approved_by": body.approved_by or SYSTEM_USER_EMAIL,
+            "approved_by": body.approved_by or current_user.email,
         }
         state = resume_workflow(thread_id=job_id, resume_data=resume_data)
     except Exception as exc:
@@ -201,7 +190,11 @@ def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)
 
 
 @router.get("/{job_id}/results")
-def get_job_results(job_id: str, db: Session = Depends(get_db)):
+def get_job_results(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Return the normalized result tables for a run (findings, cost, IaC, deploy)."""
     run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
     if not run:
@@ -242,7 +235,11 @@ def get_job_results(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{job_id}")
-def get_job(job_id: str, db: Session = Depends(get_db)):
+def get_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Return the persisted job state (analysis run + full orchestrator state)."""
     run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
     if not run:
@@ -262,7 +259,10 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/")
-def list_jobs(db: Session = Depends(get_db)):
+def list_jobs(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """List all analysis runs with their coarse status."""
     runs = (
         db.query(models.AnalysisRun)

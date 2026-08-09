@@ -1,11 +1,11 @@
 import asyncio
 import logging
-from typing import Optional
 
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import auth, chat, jobs
+from .config import settings
 from .database import init_db
 from .websocket import redis_progress_relay, websocket_endpoint
 
@@ -13,11 +13,11 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="DevGuard AI", version="0.1.0")
 
-_relay_task: Optional[asyncio.Task] = None
+_relay_task: asyncio.Task | None = None
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

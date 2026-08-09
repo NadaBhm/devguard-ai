@@ -1,0 +1,90 @@
+name: CD
+
+# What this actually automates today: on a push to master, build the
+# backend and frontend production images and publish them to GHCR
+# (ghcr.io) -- using the repo's built-in GITHUB_TOKEN, so this runs with
+# zero secrets to configure and nothing fabricated.
+#
+# What it deliberately does NOT do: apply Terraform, touch a real AWS
+# account, or deploy anywhere. The `deploy` job is a placeholder gated by
+# the `production` GitHub Environment -- it will only run once someone
+# with repo admin rights creates that environment (Settings > Environments)
+# and adds required reviewers, and its single step is a clearly-labelled
+# TODO, not a real deployment command. Wiring it to a real target (which
+# AWS account, which Terraform state backend, which secrets) needs a team
+# decision, not something to invent silently in a workflow file.
+
+on:
+  push:
+    branches: ["master", "main"]
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push-backend:
+    name: Build & push backend image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/Dockerfile.backend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/backend:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/backend:latest
+
+  build-and-push-frontend:
+    name: Build & push frontend image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: src/frontend
+          file: infrastructure/Dockerfile.frontend.prod
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/frontend:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/frontend:latest
+
+  deploy:
+    name: Deploy (placeholder, gated)
+    needs: [build-and-push-backend, build-and-push-frontend]
+    runs-on: ubuntu-latest
+    # Requires a "production" Environment to exist under Settings >
+    # Environments with required reviewers configured -- until then, this
+    # job simply waits forever / must be created first. That's intentional:
+    # no deployment should run unattended before the team has actually
+    # decided on a target and approval process.
+    environment: production
+    steps:
+      - name: Deploy
+        run: |
+          echo "TODO: no real deployment target configured yet."
+          echo "Images are published at ghcr.io/${{ github.repository }}/{backend,frontend}:${{ github.sha }}"
+          echo "This step should apply Terraform / update the real AWS target once the team decides on one."
+          exit 1

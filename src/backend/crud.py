@@ -1,6 +1,8 @@
 from sqlalchemy.orm import Session
+
 from . import models, schemas
 from .auth import get_password_hash
+
 
 def get_user(db: Session, user_id: str):  # FIX: was int, now str
     return db.query(models.User).filter(models.User.id == user_id).first()
@@ -18,6 +20,7 @@ def create_user(db: Session, user: schemas.UserCreate):
         hashed_password=hashed_password,
         first_name=user.first_name,
         last_name=user.last_name,
+        is_verified=True,
     )
     db.add(db_user)
     db.commit()

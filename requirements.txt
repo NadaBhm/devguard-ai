@@ -1,4 +1,3 @@
-```txt
 # =====================================================
 # DevGuard AI - Unified Requirements
 # Production + Development Dependencies
@@ -73,4 +72,3 @@ jsonschema>=4.21.0
 
 ruff>=0.4
 mypy>=1.10
-```

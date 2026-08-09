@@ -1,14 +1,11 @@
-import { STUB, mockList } from "./stub"
+import { client } from "./client"
 import type { User, UserRole } from "../types/auth"
 
-const SAMPLE: User[] = []
-
 export const adminApi = {
-  STUB,
   async listUsers(): Promise<User[]> {
-    return mockList(SAMPLE)
+    return client.get<User[]>("/admin/users")
   },
-  async updateRole(_userId: string, _role: UserRole): Promise<User> {
-    throw new Error("admin.updateRole: not implemented (backend pending)")
+  async updateRole(userId: string, role: UserRole): Promise<User> {
+    return client.put<User>(`/admin/users/${userId}/role?role=${role}`)
   },
 }

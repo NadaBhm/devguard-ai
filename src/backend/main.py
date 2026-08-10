@@ -52,6 +52,16 @@ def on_shutdown():
     if _relay_task is not None:
         _relay_task.cancel()
         _relay_task = None
+    # FIX: the SQLAlchemy engine was never disposed on shutdown. On Linux
+    # this went unnoticed (the OS releases the file handle once the process
+    # exits regardless), but on Windows the sqlite file stays locked as long
+    # as the engine's connection pool is alive - test_jobs.py's teardown
+    # fixture (TEST_DB.unlink() right after the TestClient context manager
+    # closes, which triggers this very shutdown event) failed with
+    # PermissionError [WinError 32] because of exactly this. Disposing the
+    # engine here releases the file handle for real, on every platform.
+    from .database import engine
+    engine.dispose()
 
 
 # REST API routes

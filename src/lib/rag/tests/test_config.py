@@ -11,9 +11,9 @@ class TestRAGConfig:
         config = RAGConfig()
         assert config.qdrant_url == "http://localhost:6333"
         assert config.qdrant_collection == "devguard_repos"
-        assert config.hf_model == "BAAI/bge-large-en-v1.5"  # was bge-base; config.py switched models, test never updated
-        assert config.embedding_dim == 768
-        assert config.gemini_model == "gemini-1.5-flash"
+        assert config.hf_model == "BAAI/bge-large-en-v1.5"
+        assert config.embedding_dim == 1024
+        assert config.gemini_model == "gemini-flash-latest"
         assert config.chunk_size == 1000
         assert config.chunk_overlap == 200
 

@@ -1,4 +1,3 @@
-
 """
 CodeSec Dependency Vulnerability Scanner
 =========================================
@@ -8,11 +7,11 @@ US-1.1.x: Detect vulnerable dependencies with known CVEs.
 
 Technology Decision (ADR):
 - Primary: pip-audit — maintained by PyPA, queries PyPI Advisory Database,
-  zero configuration, Apache-2.0, JSON output. Best baseline CI gate. citeweb_search:5#3
+  zero configuration, Apache-2.0, JSON output. Best baseline CI gate.
 - Secondary: Safety — mature Python-specific scanner, free tier available.
-  Used as second opinion when pip-audit is unavailable. citeweb_search:5#3
+  Used as second opinion when pip-audit is unavailable.
 - Tertiary: Trivy — multi-ecosystem (npm, go, maven, etc.), excellent for
-  non-Python repos. OSS, maintained by Aqua Security. citeweb_search:5#3
+  non-Python repos. OSS, maintained by Aqua Security.
 - Not chosen: Snyk — commercial, requires API key, rate-limited free tier.
 
 """
@@ -44,24 +43,30 @@ def _parse_pip_audit_output(stdout: str) -> list[VulnerablePackage]:
     for vuln in data.get("dependencies", []):
         name = vuln.get("name", "unknown")
         version = vuln.get("version", "unknown")
-        for fix in vuln.get("fix_versions", []):
-            for adv in vuln.get("vulns", []):
-                severity_str = adv.get("severity", "low")
+        fix_versions = vuln.get("fix_versions", [])
+        # FIX #5: use first fix version instead of cross-product N×M
+        best_fix = fix_versions[0] if fix_versions else None
+        
+        for adv in vuln.get("vulns", []):
+            severity_str = adv.get("severity", "low")
+            # FIX #5 bis: protect against unknown severity values
+            try:
+                severity = Severity(severity_str.lower()) if severity_str else Severity.LOW
+            except ValueError:
+                logger.warning("Unknown severity '%s' for %s, defaulting to LOW", severity_str, name)
                 severity = Severity.LOW
-                if severity_str:
-                    severity = Severity(severity_str.lower())
 
-                findings.append(
-                    VulnerablePackage(
-                        package=name,
-                        installed_version=version,
-                        fixed_version=fix if fix else None,
-                        cve_id=adv.get("id"),
-                        severity=severity,
-                        cvss_score=adv.get("cvss"),
-                        description=adv.get("description"),
-                    )
+            findings.append(
+                VulnerablePackage(
+                    package=name,
+                    installed_version=version,
+                    fixed_version=best_fix,
+                    cve_id=adv.get("id"),
+                    severity=severity,
+                    cvss_score=adv.get("cvss"),
+                    description=adv.get("description"),
                 )
+            )
     return findings
 
 
@@ -113,13 +118,18 @@ def _run_safety(repo_path: Path) -> list[VulnerablePackage]:
             result = run_subprocess(cmd, cwd=repo_path, timeout=tool.timeout_seconds)
             data = json.loads(result.stdout)
             for vuln in data.get("vulnerabilities", []):
+                severity_str = vuln.get("severity", "low")
+                try:
+                    severity = Severity(severity_str.lower()) if severity_str else Severity.LOW
+                except ValueError:
+                    severity = Severity.LOW
                 all_findings.append(
                     VulnerablePackage(
                         package=vuln.get("package_name", "unknown"),
                         installed_version=vuln.get("installed_version", "unknown"),
                         fixed_version=vuln.get("fixed_version"),
                         cve_id=vuln.get("cve"),
-                        severity=Severity(vuln.get("severity", "low").lower()),
+                        severity=severity,
                         cvss_score=vuln.get("cvssv3"),
                         description=vuln.get("advisory"),
                     )

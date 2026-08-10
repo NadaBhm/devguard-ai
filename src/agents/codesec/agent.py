@@ -53,7 +53,6 @@ from .models import (
     CodeSecResult,
     DependenciesResult,
     Grade,
-    LanguageBreakdown,
     PhaseInfo,
     PhaseStatus,
     RepoMetadata,
@@ -177,7 +176,6 @@ class CodeSecAgent:
             if result.returncode != 0:
                 if target_dir.exists():
                     shutil.rmtree(target_dir)
-                # Try default branch if main fails
                 cmd[4] = "--branch=master"
                 result = subprocess.run(
                     cmd,
@@ -252,40 +250,56 @@ class CodeSecAgent:
             language_breakdown=lang_breakdown,
         )
 
-    async def _run_scanners(self, repo_path: Path, stack_result: StackDetection) -> dict[str, Any]:
+    async def _run_scanners(
+        self, repo_path: Path, stack_result: StackDetection, _add_phase
+    ) -> dict[str, Any]:
         """
-        Run all scanners. Stack detection is already done, passed as parameter.
+        Run all scanners in parallel with real per-scanner timing.
 
         Args:
             repo_path: Path to cloned repository.
             stack_result: Pre-computed stack detection result.
+            _add_phase: Callback to record phase timestamps.
 
         Returns:
             Dictionary of scanner results.
         """
-        # Phase 2: Run remaining scanners in parallel
         loop = asyncio.get_event_loop()
 
-        sast_task = loop.run_in_executor(None, run_sast, repo_path)
-        secrets_task = loop.run_in_executor(None, run_secrets_scan, repo_path)
-        deps_task = loop.run_in_executor(None, run_dependency_scan, repo_path)
-        dockerfile_task = loop.run_in_executor(None, run_dockerfile_scan, repo_path)
-        sbom_task = loop.run_in_executor(None, generate_sbom, repo_path)
+        async def _run(name: str, func, *args):
+            start = datetime.now(timezone.utc)
+            _add_phase(name, PhaseStatus.RUNNING, started=start)
+            try:
+                result = await loop.run_in_executor(None, func, *args)
+                end = datetime.now(timezone.utc)
+                _add_phase(name, PhaseStatus.COMPLETED, started=start, completed=end)
+                return name, result, None
+            except Exception as exc:
+                end = datetime.now(timezone.utc)
+                _add_phase(name, PhaseStatus.FAILED, started=start, completed=end, err=str(exc))
+                return name, None, exc
 
-        sast_result = await sast_task
-        secrets_result = await secrets_task
-        deps_result = await deps_task
-        dockerfile_result = await dockerfile_task
-        sbom_result = await sbom_task
+        tasks = [
+            _run("sast", run_sast, repo_path),
+            _run("secrets", run_secrets_scan, repo_path),
+            _run("dependencies", run_dependency_scan, repo_path),
+            _run("dockerfile", run_dockerfile_scan, repo_path),
+            _run("sbom", generate_sbom, repo_path),
+        ]
+        results_list = await asyncio.gather(*tasks)
 
-        return {
-            "stack": stack_result,
-            "sast": sast_result,
-            "secrets": secrets_result,
-            "dependencies": deps_result,
-            "dockerfile": dockerfile_result,
-            "sbom": sbom_result,
-        }
+        results: dict[str, Any] = {"stack": stack_result}
+        errors: list[Exception] = []
+        for name, result, exc in results_list:
+            if exc:
+                errors.append(exc)
+            else:
+                results[name] = result
+
+        if errors:
+            raise errors[0]
+
+        return results
 
     async def analyze(self, repo_url: str, job_id: str | None = None) -> CodeSecResult:
         """
@@ -370,20 +384,10 @@ class CodeSecAgent:
             _add_phase("stack_detection", PhaseStatus.FAILED, started=stack_start, completed=stack_end, err=str(exc))
             stack_result = StackDetection(primary_language="unknown", confidence=0.0)
 
-        # Run remaining scanners in parallel (stack_result passed, not re-detected)
-        scan_start = datetime.now(timezone.utc)
-        for name in ["sast", "secrets", "dependencies", "dockerfile_scan", "sbom"]:
-            _add_phase(name, PhaseStatus.RUNNING, started=scan_start)
-
+        # Run remaining scanners in parallel with individual timing
         try:
-            results = await self._run_scanners(repo_path, stack_result)
-            scan_end = datetime.now(timezone.utc)
-            for name in ["sast", "secrets", "dependencies", "dockerfile_scan", "sbom"]:
-                _add_phase(name, PhaseStatus.COMPLETED, started=scan_start, completed=scan_end)
+            results = await self._run_scanners(repo_path, stack_result, _add_phase)
         except Exception as exc:
-            scan_end = datetime.now(timezone.utc)
-            for name in ["sast", "secrets", "dependencies", "dockerfile_scan", "sbom"]:
-                _add_phase(name, PhaseStatus.FAILED, started=scan_start, completed=scan_end, err=str(exc))
             results = {
                 "stack": stack_result,
                 "sast": [],
@@ -487,6 +491,7 @@ class CodeSecAgent:
             dockerfile_findings=results["dockerfile"],
             sbom=results["sbom"],
             security_score=security_score,
+            dockerfile_content=dockerfile_content,
         )
 
         logger.info(

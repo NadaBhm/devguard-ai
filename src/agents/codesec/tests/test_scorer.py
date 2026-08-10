@@ -255,8 +255,12 @@ class TestCalculateSBOMScore:
 
     def test_vulnerable_components_penalty(self):
         """1 vulnerable among 5 licensed components → -10. No incomplete penalty."""
-        comp = SbomComponent(name="badlib", version="1.0", licenses=[LicenseInfo(id="MIT")])
-        object.__setattr__(comp, "vulnerabilities", ["CVE-2023-1"])
+        comp = SbomComponent(
+            name="badlib",
+            version="1.0",
+            licenses=[LicenseInfo(id="MIT")],
+            cve_ids=["CVE-2023-1"],  # FIX: use cve_ids (field existant sur le modèle)
+        )
         comps = [
             SbomComponent(name="good1", version="1.0", licenses=[LicenseInfo(id="MIT")]),
             SbomComponent(name="good2", version="2.0", licenses=[LicenseInfo(id="MIT")]),

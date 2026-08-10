@@ -15,10 +15,10 @@ DEFAULT_QDRANT_COLLECTION: Final[str] = os.getenv("QDRANT_COLLECTION", "devguard
 
 # Hugging Face embeddings (local, free)
 DEFAULT_HF_MODEL: Final[str] = os.getenv("HF_MODEL", "BAAI/bge-large-en-v1.5")
-DEFAULT_EMBEDDING_DIM: Final[int] = int(os.getenv("EMBEDDING_DIM", "768"))
+DEFAULT_EMBEDDING_DIM: Final[int] = int(os.getenv("EMBEDDING_DIM", "1024"))  # FIX: bge-large = 1024
 
 # Gemini LLM (free tier)
-DEFAULT_GEMINI_MODEL: Final[str] = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+DEFAULT_GEMINI_MODEL: Final[str] = os.getenv("GEMINI_MODEL", "gemini-flash-latest")  # FIX: alias stable
 
 # Chunking
 DEFAULT_CHUNK_SIZE: Final[int] = int(os.getenv("CHUNK_SIZE", "1000"))

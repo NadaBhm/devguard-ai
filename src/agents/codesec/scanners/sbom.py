@@ -36,36 +36,46 @@ logger = logging.getLogger(__name__)
 def _parse_requirements_txt(content: str) -> list[SbomComponent]:
     """Parse requirements.txt into SbomComponent list."""
     components: list[SbomComponent] = []
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or line.startswith("-"):
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        # Skip empty lines and pure comments
+        if not line or line.startswith("#"):
             continue
-        # Handle formats: package==1.0, package>=1.0, package~=1.0
-        match = re.match(r"^([a-zA-Z0-9_.-]+)([<>=~!]+)([a-zA-Z0-9_.-]+)", line)
+        # Remove inline comments
+        if "#" in line:
+            line = line.split("#")[0].strip()
+        # Skip markdown fences and options (e.g. -r, -e, --index-url)
+        if line.startswith("```") or line.startswith("-"):
+            continue
+        # Handle formats: package==1.0, package>=1.0, package~=1.0, package[extra]==1.0
+        match = re.match(r"^([a-zA-Z0-9_.\-]+(?:\[[a-zA-Z0-9_,.\-]+\])?)\s*([<>=~!]+)\s*([a-zA-Z0-9_.\-]+)", line)
         if match:
             name, _op, version = match.groups()
+            # Strip extras from name for PURL
+            clean_name = name.split("[")[0]
             components.append(
                 SbomComponent(
                     type="library",
-                    name=name,
+                    name=clean_name,
                     version=version,
-                    purl=f"pkg:pypi/{name}@{version}",
+                    purl=f"pkg:pypi/{clean_name}@{version}",
                     licenses=[],
                     source_file="requirements.txt",
                 )
             )
         else:
-            # Package without version specifier
-            components.append(
-                SbomComponent(
-                    type="library",
-                    name=line,
-                    version="unknown",
-                    purl=f"pkg:pypi/{line}",
-                    licenses=[],
-                    source_file="requirements.txt",
+            # Package without version specifier — only if it looks like a real package name
+            if re.match(r"^[a-zA-Z0-9_.\-]+$", line) and not line.startswith("-"):
+                components.append(
+                    SbomComponent(
+                        type="library",
+                        name=line,
+                        version="unknown",
+                        purl=f"pkg:pypi/{line}",
+                        licenses=[],
+                        source_file="requirements.txt",
+                    )
                 )
-            )
     return components
 
 

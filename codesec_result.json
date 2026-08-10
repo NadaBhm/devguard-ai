@@ -1,0 +1,850 @@
+{
+  "job_id": "demo-001",
+  "status": "completed",
+  "error": null,
+  "repo_url": "https://github.com/Oussama928/Card-Learning-App.git",
+  "repo_metadata": {
+    "name": "Card-Learning-App.git",
+    "branch": "main",
+    "commit_sha": "57f108c35368",
+    "total_files": 263,
+    "loc": 17799,
+    "language_breakdown": {
+      "typescript": 16756,
+      "javascript": 1043
+    }
+  },
+  "phases": [
+    {
+      "name": "validation",
+      "status": "completed",
+      "started_at": null,
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "clone",
+      "status": "running",
+      "started_at": "2026-08-08T18:37:30.035279Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "clone",
+      "status": "completed",
+      "started_at": "2026-08-08T18:37:30.035279Z",
+      "completed_at": "2026-08-08T18:38:26.229360Z",
+      "error_message": null
+    },
+    {
+      "name": "stack_detection",
+      "status": "running",
+      "started_at": "2026-08-08T18:38:40.826250Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "stack_detection",
+      "status": "completed",
+      "started_at": "2026-08-08T18:38:40.826250Z",
+      "completed_at": "2026-08-08T18:38:41.526610Z",
+      "error_message": null
+    },
+    {
+      "name": "sast",
+      "status": "running",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "secrets",
+      "status": "running",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "dependencies",
+      "status": "running",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "dockerfile_scan",
+      "status": "running",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "sbom",
+      "status": "running",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "sast",
+      "status": "completed",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": "2026-08-08T18:38:45.586195Z",
+      "error_message": null
+    },
+    {
+      "name": "secrets",
+      "status": "completed",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": "2026-08-08T18:38:45.586195Z",
+      "error_message": null
+    },
+    {
+      "name": "dependencies",
+      "status": "completed",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": "2026-08-08T18:38:45.586195Z",
+      "error_message": null
+    },
+    {
+      "name": "dockerfile_scan",
+      "status": "completed",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": "2026-08-08T18:38:45.586195Z",
+      "error_message": null
+    },
+    {
+      "name": "sbom",
+      "status": "completed",
+      "started_at": "2026-08-08T18:38:41.526610Z",
+      "completed_at": "2026-08-08T18:38:45.586195Z",
+      "error_message": null
+    },
+    {
+      "name": "scoring",
+      "status": "running",
+      "started_at": "2026-08-08T18:38:45.586195Z",
+      "completed_at": null,
+      "error_message": null
+    },
+    {
+      "name": "scoring",
+      "status": "completed",
+      "started_at": "2026-08-08T18:38:45.586195Z",
+      "completed_at": "2026-08-08T18:38:45.586195Z",
+      "error_message": null
+    }
+  ],
+  "summary": {
+    "files_scanned": 263,
+    "sast_findings_count": 0,
+    "secrets_found_count": 0,
+    "vulnerable_dependencies_count": 0,
+    "dockerfile_issues_count": 0,
+    "total_critical": 0,
+    "total_high": 0,
+    "total_medium": 0,
+    "total_low": 0,
+    "total_info": 0
+  },
+  "stack_detection": {
+    "primary_language": "typescript",
+    "languages": [
+      "typescript",
+      "javascript"
+    ],
+    "frameworks": [
+      "react",
+      "express",
+      "prisma",
+      "mongoose"
+    ],
+    "database": "postgresql",
+    "build_tool": "npm",
+    "container": {
+      "detected": true,
+      "base_image": "node:20-alpine",
+      "dockerfile_path": "Dockerfile",
+      "compose_detected": false
+    },
+    "confidence": 0.95,
+    "detected_files": [
+      "auth.ts",
+      "middleware.ts",
+      "next.config.ts",
+      "sanity.cli.ts",
+      "sanity.config.ts",
+      "Dockerfile"
+    ]
+  },
+  "sast_findings": [],
+  "secrets": [],
+  "dependencies": {
+    "total_packages": 175,
+    "direct": 70,
+    "transitive": 105,
+    "vulnerable_packages": []
+  },
+  "dockerfile_findings": [],
+  "sbom": {
+    "format": "CycloneDX",
+    "spec_version": "1.5",
+    "serial_number": "urn:uuid:f5e91617-0f0c-4d89-a08a-40a4b666410d",
+    "version": 1,
+    "components_count": 70,
+    "components": [
+      {
+        "type": "library",
+        "name": "@headlessui/react",
+        "version": "2.2.0",
+        "purl": "pkg:npm/@headlessui/react@2.2.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@heroicons/react",
+        "version": "2.2.0",
+        "purl": "pkg:npm/@heroicons/react@2.2.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@huggingface/inference",
+        "version": "4.13.13",
+        "purl": "pkg:npm/@huggingface/inference@4.13.13",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-avatar",
+        "version": "1.1.11",
+        "purl": "pkg:npm/@radix-ui/react-avatar@1.1.11",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-dialog",
+        "version": "1.1.15",
+        "purl": "pkg:npm/@radix-ui/react-dialog@1.1.15",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-dropdown-menu",
+        "version": "2.1.16",
+        "purl": "pkg:npm/@radix-ui/react-dropdown-menu@2.1.16",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-label",
+        "version": "2.1.8",
+        "purl": "pkg:npm/@radix-ui/react-label@2.1.8",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-progress",
+        "version": "1.1.8",
+        "purl": "pkg:npm/@radix-ui/react-progress@1.1.8",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-slot",
+        "version": "1.2.4",
+        "purl": "pkg:npm/@radix-ui/react-slot@1.2.4",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-tabs",
+        "version": "1.1.13",
+        "purl": "pkg:npm/@radix-ui/react-tabs@1.1.13",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-toast",
+        "version": "1.2.15",
+        "purl": "pkg:npm/@radix-ui/react-toast@1.2.15",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@radix-ui/react-tooltip",
+        "version": "1.2.8",
+        "purl": "pkg:npm/@radix-ui/react-tooltip@1.2.8",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@sanity/icons",
+        "version": "3.5.7",
+        "purl": "pkg:npm/@sanity/icons@3.5.7",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@sanity/image-url",
+        "version": "1.1.0",
+        "purl": "pkg:npm/@sanity/image-url@1.1.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@sanity/vision",
+        "version": "3.70.0",
+        "purl": "pkg:npm/@sanity/vision@3.70.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@sentry/node",
+        "version": "8.50.0",
+        "purl": "pkg:npm/@sentry/node@8.50.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@types/bcryptjs",
+        "version": "2.4.6",
+        "purl": "pkg:npm/@types/bcryptjs@2.4.6",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "bcryptjs",
+        "version": "2.4.3",
+        "purl": "pkg:npm/bcryptjs@2.4.3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "class-variance-authority",
+        "version": "0.7.1",
+        "purl": "pkg:npm/class-variance-authority@0.7.1",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "clsx",
+        "version": "2.1.1",
+        "purl": "pkg:npm/clsx@2.1.1",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "cors",
+        "version": "2.8.5",
+        "purl": "pkg:npm/cors@2.8.5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "dotenv",
+        "version": "17.2.4",
+        "purl": "pkg:npm/dotenv@17.2.4",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "formik",
+        "version": "2.4.9",
+        "purl": "pkg:npm/formik@2.4.9",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "framer-motion",
+        "version": "12.34.3",
+        "purl": "pkg:npm/framer-motion@12.34.3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "helmet",
+        "version": "8.0.0",
+        "purl": "pkg:npm/helmet@8.0.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "ioredis",
+        "version": "5.4.1",
+        "purl": "pkg:npm/ioredis@5.4.1",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "jose",
+        "version": "6.1.3",
+        "purl": "pkg:npm/jose@6.1.3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "js-cookie",
+        "version": "3.0.5",
+        "purl": "pkg:npm/js-cookie@3.0.5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "knex",
+        "version": "3.1.0",
+        "purl": "pkg:npm/knex@3.1.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "lucide-react",
+        "version": "0.575.0",
+        "purl": "pkg:npm/lucide-react@0.575.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "next",
+        "version": "15.1.5",
+        "purl": "pkg:npm/next@15.1.5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "next-auth",
+        "version": "5.0.0-beta.25",
+        "purl": "pkg:npm/next-auth@5.0.0-beta.25",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "next-sanity",
+        "version": "9.8.29-canary.0",
+        "purl": "pkg:npm/next-sanity@9.8.29-canary.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "next-themes",
+        "version": "0.4.6",
+        "purl": "pkg:npm/next-themes@0.4.6",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "node-cron",
+        "version": "3.0.3",
+        "purl": "pkg:npm/node-cron@3.0.3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "nodemailer",
+        "version": "6.10.1",
+        "purl": "pkg:npm/nodemailer@6.10.1",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "pdfkit",
+        "version": "0.15.0",
+        "purl": "pkg:npm/pdfkit@0.15.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "pg",
+        "version": "8.18.0",
+        "purl": "pkg:npm/pg@8.18.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "rate-limiter-flexible",
+        "version": "3.0.6",
+        "purl": "pkg:npm/rate-limiter-flexible@3.0.6",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "react",
+        "version": "19.0.0",
+        "purl": "pkg:npm/react@19.0.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "react-dom",
+        "version": "19.0.0",
+        "purl": "pkg:npm/react-dom@19.0.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "react-icons",
+        "version": "5.4.0",
+        "purl": "pkg:npm/react-icons@5.4.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "sanity",
+        "version": "3.70.0",
+        "purl": "pkg:npm/sanity@3.70.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "sharp",
+        "version": "0.33.5",
+        "purl": "pkg:npm/sharp@0.33.5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "socket.io",
+        "version": "4.8.3",
+        "purl": "pkg:npm/socket.io@4.8.3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "socket.io-client",
+        "version": "4.8.3",
+        "purl": "pkg:npm/socket.io-client@4.8.3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "swagger-ui-dist",
+        "version": "5.18.2",
+        "purl": "pkg:npm/swagger-ui-dist@5.18.2",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "tailwind-merge",
+        "version": "3.5.0",
+        "purl": "pkg:npm/tailwind-merge@3.5.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "tailwindcss-animate",
+        "version": "1.0.7",
+        "purl": "pkg:npm/tailwindcss-animate@1.0.7",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "uuid",
+        "version": "11.0.5",
+        "purl": "pkg:npm/uuid@11.0.5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "web-push",
+        "version": "3.6.7",
+        "purl": "pkg:npm/web-push@3.6.7",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "winston",
+        "version": "3.17.0",
+        "purl": "pkg:npm/winston@3.17.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "yup",
+        "version": "1.7.1",
+        "purl": "pkg:npm/yup@1.7.1",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "zod",
+        "version": "3.24.1",
+        "purl": "pkg:npm/zod@3.24.1",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@eslint/eslintrc",
+        "version": "3",
+        "purl": "pkg:npm/@eslint/eslintrc@3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@types/node",
+        "version": "20",
+        "purl": "pkg:npm/@types/node@20",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@types/pdfkit",
+        "version": "0.13.5",
+        "purl": "pkg:npm/@types/pdfkit@0.13.5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@types/react",
+        "version": "19",
+        "purl": "pkg:npm/@types/react@19",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@types/react-dom",
+        "version": "19",
+        "purl": "pkg:npm/@types/react-dom@19",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@types/supertest",
+        "version": "6.0.3",
+        "purl": "pkg:npm/@types/supertest@6.0.3",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@types/web-push",
+        "version": "3.6.4",
+        "purl": "pkg:npm/@types/web-push@3.6.4",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "@vitest/coverage-v8",
+        "version": "2.1.8",
+        "purl": "pkg:npm/@vitest/coverage-v8@2.1.8",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "autoprefixer",
+        "version": "10.4.20",
+        "purl": "pkg:npm/autoprefixer@10.4.20",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "eslint",
+        "version": "9",
+        "purl": "pkg:npm/eslint@9",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "eslint-config-next",
+        "version": "15.1.5",
+        "purl": "pkg:npm/eslint-config-next@15.1.5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "postcss",
+        "version": "8.5.1",
+        "purl": "pkg:npm/postcss@8.5.1",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "supertest",
+        "version": "7.0.0",
+        "purl": "pkg:npm/supertest@7.0.0",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "tailwindcss",
+        "version": "3.4.17",
+        "purl": "pkg:npm/tailwindcss@3.4.17",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "typescript",
+        "version": "5",
+        "purl": "pkg:npm/typescript@5",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      },
+      {
+        "type": "library",
+        "name": "vitest",
+        "version": "2.1.8",
+        "purl": "pkg:npm/vitest@2.1.8",
+        "licenses": [],
+        "source_file": "package.json",
+        "cve_ids": []
+      }
+    ],
+    "download_url": "/api/jobs/demo-001/sbom/download"
+  },
+  "security_score": {
+    "score": 97,
+    "grade": "A",
+    "max_score": 100,
+    "breakdown": {
+      "sast": 25,
+      "secrets": 20,
+      "dependencies": 20,
+      "dockerfile": 15,
+      "sbom": 7,
+      "stack_detection": 10
+    },
+    "severity_counts": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "recommendations": []
+  }
+}

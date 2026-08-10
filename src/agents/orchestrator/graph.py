@@ -68,6 +68,7 @@ CHANGELOG:
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -252,7 +253,8 @@ def run_workflow(
     graph = get_orchestrator_graph()
     state = create_initial_state(repo_url)
     if thread_id:
-        # Keep the orchestrator job_id aligned with the caller's run id so artifacts (reports, SBOMs) are keyed by the id the API exposes.
+        # Keep the orchestrator job_id aligned with the caller's run id so
+        # artifacts (reports, SBOMs) are keyed by the id the API exposes.
         state["job_id"] = thread_id
     config = {"configurable": {"thread_id": thread_id or state["job_id"]}}
 
@@ -346,7 +348,15 @@ def resume_workflow(
 # SECTION 9: MAIN (for testing)
 # =============================================================================
 
+# Development-only demo. Not part of the shipped code path: enable explicitly
+# with DEVGUARD_DEMO=1 to run the manual "test run" walkthrough.
 if __name__ == "__main__":
+    if os.getenv("DEVGUARD_DEMO") != "1":
+        raise SystemExit(
+            "This is a development demo. Set DEVGUARD_DEMO=1 to run it, e.g. "
+            "DEVGUARD_DEMO=1 python -m src.agents.orchestrator.graph"
+        )
+
     test_repo = "https://github.com/NadaBhm/devguard-ai"
 
     print("=" * 60)

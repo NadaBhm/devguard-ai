@@ -1,3 +1,5 @@
+# Runtime dependencies for the DevGuard AI backend + agents.
+# Dev/test tooling lives in requirements-dev.txt.
 boto3>=1.34.0
 botocore>=1.34.0
 google-generativeai>=0.7.0
@@ -7,3 +9,21 @@ pydantic>=2.7.0
 jinja2>=3.1.0
 fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
+
+# Backend (SQLAlchemy ORM, migrations, settings)
+SQLAlchemy>=2.0
+alembic>=1.13
+pydantic-settings>=2.2
+
+# Auth (JWT + password hashing + email validation)
+python-jose>=3.3
+passlib>=1.7.4
+email-validator>=2.0
+
+# Progress pub/sub + vector store (RAG)
+redis>=5.0
+qdrant-client>=1.9
+sentence-transformers>=3.0
+
+# DeployOps observability
+aws-xray-sdk>=2.12

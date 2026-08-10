@@ -91,8 +91,9 @@ from typing import Optional
 
 # LangGraph imports
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
-
+import os
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
 from .state import GRAPH_VERSION, OrchestratorState, create_initial_state
 from .error_handlers import safe_node_wrapper
 from .human_gates import human_gate_1_impl, human_gate_2_impl
@@ -115,9 +116,51 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+
+
+
+
+# =============================================================================
+# PERSISTENT CHECKPOINTER (replaces MemorySaver - T-4.3)
+# =============================================================================
+# MemorySaver kept every paused job's state in a plain Python object, living
+# only inside the current process. Any backend restart (a crash, a redeploy,
+# even `uvicorn --reload` picking up a code change) silently lost every job
+# waiting at a human gate - verified concretely today: a fresh process has no
+# way to resume a thread_id checkpointed by a process that no longer exists.
+#
+# SqliteSaver persists the same checkpoints to a file on disk instead, so a
+# freshly-built graph in a brand new process can resume exactly where an
+# earlier process left off. Verified with a two-process test: process A ran
+# up to a human gate and exited; process B, sharing nothing but the sqlite
+# file, resumed and got the correct state back.
+#
+# Chosen over PostgresSaver for now because it works immediately without a
+# running Postgres instance - useful today, and matches devguard.db (the
+# backend's own SQLite dev database). Both checkpointers implement the same
+# BaseCheckpointSaver interface, so swapping to PostgresSaver later (T-5.12,
+# once a real Postgres is deployed) is a one-line change here, not a rewrite.
+
+CHECKPOINT_DB_PATH = os.getenv("DEVGUARD_CHECKPOINT_DB", "orchestrator_checkpoints.sqlite")
+
+def _build_checkpointer() -> SqliteSaver:
+    """
+    check_same_thread=False: FastAPI's sync endpoints (jobs.py's create_job /
+    approve_job) run in a threadpool, so different requests may reach this
+    connection from different threads. WAL mode reduces "database is locked"
+    contention under that - still SQLite-grade concurrency, not meant for
+    heavy production load.
+    """
+    conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    saver = SqliteSaver(conn)
+    saver.setup()  # creates the checkpoint tables if this file is new
+    return saver
+
 # =============================================================================
 # SECTION 7: GRAPH CONSTRUCTION
 # =============================================================================
+
 
 def build_orchestrator_graph() -> StateGraph:
     """
@@ -191,8 +234,7 @@ def build_orchestrator_graph() -> StateGraph:
     )
     builder.add_edge("generate_report", END)
 
-    memory = MemorySaver()
-    graph = builder.compile(checkpointer=memory)
+    graph = builder.compile(checkpointer=_build_checkpointer())
 
     logger.info("Orchestrator graph compiled successfully (v%s).", GRAPH_VERSION)
     return graph

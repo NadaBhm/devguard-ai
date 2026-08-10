@@ -21,3 +21,5 @@ build/
 testing/
 
 **.pdf
+
+orchestrator_checkpoints.sqlite*

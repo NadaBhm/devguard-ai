@@ -64,3 +64,5 @@ mypy>=1.10
 moto[ec2,ecs,s3,iam,sts]>=5.0  # mocks AWS APIs in tests that touch boto3 (InfraCost, DeployOps)
 # aws-xray-sdk already listed above under AWS -- hbib's commit (2b45a22)
 # added it a second time here; kept the single entry, dropped the duplicate.
+
+langgraph-checkpoint-sqlite>=2.0.0

@@ -94,8 +94,9 @@ services:
     container_name: devguard-frontend
     restart: unless-stopped
     environment:
-      VITE_API_URL: http://localhost:${BACKEND_PORT:-8000}
-      VITE_WS_URL: ws://localhost:${BACKEND_PORT:-8000}
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8000}
+      DEVGUARD_API_URL: http://backend:8000
     ports:
       - "${FRONTEND_PORT:-5173}:5173"
     depends_on:

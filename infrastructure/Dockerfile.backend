@@ -20,4 +20,4 @@ EXPOSE 8000
 # NOTE: entrypoint path assumes Oussema's backend app object lives at
 # src/subgroup2/backend/main.py as "app" (per the CDC folder tree,
 # section 8). Adjust if the actual module path differs once T-1.2 lands.
-CMD ["uvicorn", "src.subgroup2.backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

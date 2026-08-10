@@ -70,7 +70,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 # LangGraph imports
 from langgraph.graph import StateGraph, END
@@ -227,7 +227,11 @@ def reset_orchestrator_graph() -> None:
 # SECTION 8: PUBLIC API
 # =============================================================================
 
-def run_workflow(repo_url: str, thread_id: Optional[str] = None) -> OrchestratorState:
+def run_workflow(
+    repo_url: str,
+    thread_id: Optional[str] = None,
+    on_node_progress: Optional[Callable[[str, dict], None]] = None,
+) -> OrchestratorState:
     """
     Run the complete orchestrator workflow for a repository.
 
@@ -240,15 +244,36 @@ def run_workflow(repo_url: str, thread_id: Optional[str] = None) -> Orchestrator
     graph instance) instead of build_orchestrator_graph() directly, so
     the MemorySaver checkpoint created here is still around when
     resume_workflow() is called later for the same thread_id.
+
+    on_node_progress: optional callback invoked as each graph node
+    completes, (node_name, state_snapshot). The backend uses it to stream
+    per-node progress over WebSocket instead of only coarse milestones.
     """
     graph = get_orchestrator_graph()
     state = create_initial_state(repo_url)
+    if thread_id:
+        # Keep the orchestrator job_id aligned with the caller's run id so artifacts (reports, SBOMs) are keyed by the id the API exposes.
+        state["job_id"] = thread_id
     config = {"configurable": {"thread_id": thread_id or state["job_id"]}}
 
     logger.info(f"Starting workflow for job {state['job_id']} | repo: {repo_url}")
 
     try:
-        final_state = graph.invoke(state, config)
+        final_state = None
+        for event in graph.stream(state, config):
+            for node_name, node_state in event.items():
+                if node_name == "__interrupt__":
+                    if final_state is None:
+                        final_state = dict(state)
+                    final_state["__interrupt__"] = list(node_state)
+                    if on_node_progress:
+                        on_node_progress("human_gate", dict(node_state=list(node_state)))
+                else:
+                    final_state = node_state
+                    if on_node_progress:
+                        on_node_progress(node_name, node_state)
+        if final_state is None:
+            final_state = dict(state)
         logger.info(f"Workflow completed for job {state['job_id']} | status: {final_state['status']}")
         return final_state
     except Exception as e:
@@ -266,7 +291,11 @@ def run_workflow(repo_url: str, thread_id: Optional[str] = None) -> Orchestrator
         return state
 
 
-def resume_workflow(thread_id: str, resume_data: dict) -> OrchestratorState:
+def resume_workflow(
+    thread_id: str,
+    resume_data: dict,
+    on_node_progress: Optional[Callable[[str, dict], None]] = None,
+) -> OrchestratorState:
     """
     Resume a workflow that is paused at a human gate (interrupt()).
 
@@ -291,7 +320,21 @@ def resume_workflow(thread_id: str, resume_data: dict) -> OrchestratorState:
     logger.info(f"Resuming workflow for thread {thread_id} with resume_data: {resume_data}")
 
     try:
-        final_state = graph.invoke(Command(resume=resume_data), config)
+        final_state = None
+        for event in graph.stream(Command(resume=resume_data), config):
+            for node_name, node_state in event.items():
+                if node_name == "__interrupt__":
+                    if final_state is None:
+                        final_state = dict(get_orchestrator_graph().get_state(config).values)
+                    final_state["__interrupt__"] = list(node_state)
+                    if on_node_progress:
+                        on_node_progress("human_gate", dict(node_state=list(node_state)))
+                else:
+                    final_state = node_state
+                    if on_node_progress:
+                        on_node_progress(node_name, node_state)
+        if final_state is None:
+            final_state = dict(get_orchestrator_graph().get_state(config).values)
         logger.info(f"Workflow resumed for thread {thread_id} | status: {final_state.get('status')}")
         return final_state
     except Exception as e:

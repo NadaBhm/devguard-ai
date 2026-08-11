@@ -301,7 +301,7 @@ def run_workflow(repo_url: str, thread_id: Optional[str] = None) -> Orchestrator
     resume_workflow() is called later for the same thread_id.
     """
     graph = get_orchestrator_graph()
-    state = create_initial_state(repo_url)
+    state = create_initial_state(repo_url, job_id=thread_id)
     config = {"configurable": {"thread_id": thread_id or state["job_id"]}}
 
     logger.info(f"Starting workflow for job {state['job_id']} | repo: {repo_url}")

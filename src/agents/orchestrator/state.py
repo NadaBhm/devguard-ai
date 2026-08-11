@@ -214,10 +214,10 @@ class OrchestratorState(TypedDict):
 # STATE FACTORY
 # =============================================================================
 
-def create_initial_state(repo_url: str) -> OrchestratorState:
+def create_initial_state(repo_url: str, job_id: str | None = None) -> OrchestratorState:
     """Create the initial state for a new workflow."""
     now = datetime.now(timezone.utc).isoformat()
-    job_id = str(uuid.uuid4())
+    job_id = job_id or str(uuid.uuid4())
 
     return {
         "job_id": job_id,

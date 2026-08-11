@@ -13,11 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Alembic needs its config + migration scripts (at repo root) alongside src/.
+# alembic/env.py appends '..' to sys.path and imports src.backend.models, so
+# both must live in /app.
+COPY alembic.ini ./
+COPY alembic/ ./alembic/
 COPY src/ ./src/
 
 EXPOSE 8000
 
-# NOTE: entrypoint path assumes Oussema's backend app object lives at
-# src/subgroup2/backend/main.py as "app" (per the CDC folder tree,
-# section 8). Adjust if the actual module path differs once T-1.2 lands.
-CMD ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Apply any pending schema migrations before starting the API.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn src.backend.main:app --host 0.0.0.0 --port 8000 --reload"]

@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from .state import OrchestratorState
+from .state import MAX_INFRACOST_ITERATIONS, OrchestratorState
 
 logger = logging.getLogger(__name__)
 
@@ -509,8 +509,18 @@ def route_after_infracost(state: OrchestratorState) -> str:
 def route_after_gate_2(state: OrchestratorState) -> str:
     if state.get("status") in ("failed", "rejected"):
         return "end"
-    if state["human_gates"]["gate_2_pre_deployops"]["approved"]:
+    gate = state["human_gates"]["gate_2_pre_deployops"]
+    if gate["approved"]:
         return "deployops_agent"
+    # User requested regeneration at Gate 2: loop back to InfraCost with the
+    # prompt in state.infracost_feedback, until the iteration cap is hit.
+    if gate.get("requested_changes") or state.get("infracost_feedback"):
+        if len(state.get("infracost_iterations", [])) < MAX_INFRACOST_ITERATIONS:
+            return "infracost_agent"
+        logger.warning(
+            "[%s] Gate 2 regeneration cap reached (%d); halting.",
+            state["job_id"], MAX_INFRACOST_ITERATIONS,
+        )
     return "end"
 
 
@@ -578,7 +588,28 @@ def infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
     state["orchestrator_metadata"]["nodes_executed"].append("infracost_agent")
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    state["infracost_result"] = run_sync(call_infracost(state["codesec_result"] or {}, job_id))
+    feedback = state.get("infracost_feedback")
+    previous_result = state.get("infracost_result")
+
+    state["infracost_result"] = run_sync(
+        call_infracost(
+            state["codesec_result"] or {},
+            job_id,
+            feedback=feedback,
+            previous_result=previous_result,
+        )
+    )
+
+    if feedback:
+        iterations = list(state.get("infracost_iterations") or [])
+        iterations.append({
+            "iteration": len(iterations) + 1,
+            "prompt": feedback,
+            "result": state["infracost_result"],
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        })
+        state["infracost_iterations"] = iterations
+        state["infracost_feedback"] = None  # consumed; gate 2 may set it again
 
     cost = state["infracost_result"].get("cost_estimate", {}).get("monthly_cost_usd", 0)
     logger.info(f"[{job_id}] InfraCost complete. Est. cost: ${cost}/mo")

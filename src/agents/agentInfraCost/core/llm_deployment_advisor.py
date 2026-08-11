@@ -69,13 +69,19 @@ class _LlmDeploymentChoice(BaseModel):
 
 
 def _build_prompt(analysis: RepoAnalysisInput) -> str:
-    return (
+    prompt = (
         "Signaux du dépôt :\n"
         f"- nom du dépôt : {analysis.repo_metadata.name}\n"
         f"- branche : {analysis.repo_metadata.branch}\n"
         f"- taille du projet (lignes de code) : {analysis.repo_metadata.loc}\n\n"
         "Quelle région AWS et quel environnement de déploiement recommandes-tu ?"
     )
+    if analysis.user_feedback:
+        prompt += (
+            "\n\nContrainte supplémentaire de l'utilisateur (prioritaire) :\n"
+            f"{analysis.user_feedback}"
+        )
+    return prompt
 
 
 def _parse_llm_choice(raw_text: str) -> _LlmDeploymentChoice | None:

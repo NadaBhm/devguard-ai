@@ -245,9 +245,21 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
         _sys.path[:] = original_path
 
 
-async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[str, Any]:
+async def call_infracost(
+    codesec_result: dict[str, Any],
+    job_id: str,
+    *,
+    feedback: str | None = None,
+    previous_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Run InfraCost on CodeSec's output and return the orchestrator-shaped result.
+
+    feedback: optional free-form user prompt from Gate 2 ("regenerate with
+        changes"). When present, the InfraCost pipeline regenerates its
+        artifacts (architecture + Terraform) honoring it.
+    previous_result: the last InfraCost result, so mock mode can produce a
+        visibly different output each regeneration round.
 
     Real contract (src/agents/agentInfraCost/core/):
         ctx = run_pipeline_with_context(codesec_result)   # SYNC
@@ -260,13 +272,72 @@ async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[st
     if not use_real_infracost():
         from .nodes import build_mock_infracost_result
         logger.info("[%s] InfraCost: MOCK mode (set DEVGUARD_REAL_INFRACOST=1 for real)", job_id)
-        return build_mock_infracost_result()
+        return _mock_infracost_with_feedback(job_id, feedback, previous_result)
 
-    logger.info("[%s] InfraCost: REAL agent", job_id)
+    logger.info("[%s] InfraCost: REAL agent%s", job_id, " (regenerating from feedback)" if feedback else "")
+    raw_input = dict(codesec_result)
+    if feedback:
+        # InfraCost's RepoAnalysisInput carries this optional field; threading
+        # it through the raw dict lets the pipeline's LLM advisors and the
+        # new Terraform refiner act on the user's request.
+        raw_input["user_feedback"] = feedback
+
     result = await asyncio.get_event_loop().run_in_executor(
-        None, _run_infracost_pipeline, codesec_result
+        None, _run_infracost_pipeline, raw_input
     )
     return normalize_infracost_result(result)
+
+
+def _mock_infracost_with_feedback(
+    job_id: str,
+    feedback: str | None,
+    previous_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Deterministic mock response to a Gate-2 regeneration prompt.
+
+    Without an OPENROUTER_API_KEY / real InfraCost, this lets the feedback
+    loop be exercised end-to-end: each round produces a visibly different
+    result derived from the previous one plus the prompt, so tests and demo
+    runs can confirm the loop actually loops without burning real LLM calls.
+    """
+    from .nodes import build_mock_infracost_result
+
+    result = dict(previous_result or build_mock_infracost_result())
+    if not feedback:
+        return result
+
+    cost = dict(result.get("cost_estimate") or {})
+    baseline = float(cost.get("monthly_cost_usd", 145.32))
+
+    lowered = any(k in feedback.lower() for k in ("cheap", "cheaper", "less", "lower", "reduce", "minimize"))
+    raised = any(k in feedback.lower() for k in ("more", "bigger", "scale", "increase", "high", "larger"))
+    if lowered:
+        baseline = round(baseline * 0.85, 2)
+    elif raised:
+        baseline = round(baseline * 1.15, 2)
+
+    cost = dict(cost)
+    cost["monthly_cost_usd"] = baseline
+    result["cost_estimate"] = cost
+    result["justification"] = (
+        f"Regenerated ({len(result.get('breakdown_rounds', [])) + 1}) after feedback: "
+        f"{feedback}. {result.get('justification', '')}"
+    ).strip()
+    rounds = list(result.get("breakdown_rounds") or [])
+    rounds.append({"prompt": feedback, "monthly_cost_usd": baseline})
+    result["breakdown_rounds"] = rounds
+
+    # Make the loop's effect unmistakable: flip the architecture on an
+    # explicit request, otherwise keep it stable.
+    if any(k in feedback.lower() for k in ("lambda", "serverless", "function")):
+        result["architecture_recommendation"] = "lambda"
+    elif any(k in feedback.lower() for k in ("ec2", "vm", "instance")):
+        result["architecture_recommendation"] = "ec2"
+    elif "ecs" in feedback.lower() or "fargate" in feedback.lower():
+        result["architecture_recommendation"] = "ecs_fargate"
+
+    return result
 
 
 def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:

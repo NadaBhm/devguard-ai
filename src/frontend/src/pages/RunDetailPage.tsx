@@ -264,6 +264,7 @@ export function RunDetailPage() {
           <InfraCostTab
             estimates={results?.infracost_estimates ?? []}
             infracost={state?.infracost_result as JobState["infracost_result"]}
+            iterations={state?.infracost_iterations}
           />
         </div>
       )}

@@ -41,6 +41,7 @@ export interface HumanGate {
   comment: string | null
   approved_at: string | null
   approved_by: string | null
+  requested_changes?: string | null
 }
 
 export interface HumanGates {
@@ -76,6 +77,15 @@ export interface GateContext {
   monthly_cost_usd?: number
   architecture?: string
   breakdown?: CostItem[]
+  iteration?: number
+  max_iterations?: number
+}
+
+export interface InfracostIteration {
+  iteration: number
+  prompt: string
+  result: InfraCostResult
+  requested_at: string
 }
 
 export interface Gate {
@@ -98,6 +108,8 @@ export interface JobState {
   error_log?: ErrorEntry[]
   orchestrator_metadata?: OrchestratorMetadata
   final_report?: FinalReport | null
+  infracost_feedback?: string | null
+  infracost_iterations?: InfracostIteration[]
   __interrupt__?: unknown[]
 }
 
@@ -119,6 +131,7 @@ export interface ApproveRequest {
   approved: boolean
   comment?: string
   approved_by?: string
+  request_regeneration?: boolean
 }
 
 export interface CodeSecResult {

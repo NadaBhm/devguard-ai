@@ -217,7 +217,11 @@ def build_orchestrator_graph() -> StateGraph:
     builder.add_conditional_edges(
         "human_gate_2",
         route_after_gate_2,
-        {"deployops_agent": "deployops_agent", "end": END}
+        {
+            "deployops_agent": "deployops_agent",
+            "infracost_agent": "infracost_agent",
+            "end": END,
+        }
     )
     builder.add_conditional_edges(
         "deployops_agent",

@@ -37,7 +37,12 @@ from sqlalchemy.orm import Session
 from .. import models
 from ..auth import get_current_user
 from ..database import get_db
-from ..persistence import persist_results, serialize_state, update_run_state
+from ..persistence import (
+    derive_results_from_state,
+    persist_results,
+    serialize_state,
+    update_run_state,
+)
 from ..redis_client import publish_gate, publish_progress, publish_results_ready
 
 logger = logging.getLogger(__name__)
@@ -59,6 +64,7 @@ class ApproveRequest(BaseModel):
     approved: bool
     comment: str = ""
     approved_by: str = ""
+    request_regeneration: bool = False
 
 
 def _get_or_create_project(
@@ -197,6 +203,7 @@ def approve_job(
             "approved": body.approved,
             "comment": body.comment,
             "approved_by": body.approved_by or current_user.email,
+            "request_regeneration": body.request_regeneration,
         }
         state = resume_workflow(
             thread_id=job_id,
@@ -450,6 +457,17 @@ def get_job_results(
     agent_tasks = _rows(
         db.query(models.AgentTask).filter(models.AgentTask.run_id == job_id)
     )
+
+    # The normalized tables are only materialized at a terminal status. For an
+    # in-flight or gate-paused run, derive the same rows from run_metadata so
+    # the UI can render CodeSec/Terraform/InfraCost tabs live.
+    live = derive_results_from_state(run.run_metadata or {})
+    if not findings and live["codesec_findings"]:
+        findings = live["codesec_findings"]
+    if not estimates and live["infracost_estimates"]:
+        estimates = live["infracost_estimates"]
+    if not artifacts and live["terraform_artifacts"]:
+        artifacts = live["terraform_artifacts"]
 
     return {
         "job_id": job_id,

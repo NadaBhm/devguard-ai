@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+
 from . import models, schemas
 
 # get_password_hash is imported lazily inside each function that needs it
@@ -6,6 +7,7 @@ from . import models, schemas
 # for crud.get_user_by_email, so crud importing from auth at module load
 # time creates a cycle -- same pattern already used in api/jobs.py's
 # _get_or_create_system_user for the same reason.
+
 
 def get_user(db: Session, user_id: str):  # FIX: was int, now str
     return db.query(models.User).filter(models.User.id == user_id).first()

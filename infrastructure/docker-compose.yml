@@ -13,7 +13,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devguard}
       POSTGRES_DB: ${POSTGRES_DB:-devguard}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Host port 5433 (not 5432) so a native/Homebrew Postgres on the
+      # developer machine can't shadow the container.
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:

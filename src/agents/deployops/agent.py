@@ -33,6 +33,39 @@ from src.agents.deployops.models import (
 
 logging.basicConfig(level=logging.INFO)
 
+# Standing-sandbox resources that generated Terraform modules may require
+# (agentInfraCost templates/ecs/variables.tf.j2 declares vpc_id/subnet_ids and
+# db_* as required variables with no defaults). Configure once in the
+# environment; DeployOps injects them into terraform.tfvars.json so
+# `terraform plan` never blocks waiting for interactive input.
+_ENV_TF_VARS = (
+    ("DEVGUARD_VPC_ID", "vpc_id"),
+    ("DEVGUARD_SUBNET_IDS", "subnet_ids"),
+    ("DEVGUARD_DB_HOST", "db_host"),
+    ("DEVGUARD_DB_PORT", "db_port"),
+    ("DEVGUARD_DB_NAME", "db_name"),
+    ("DEVGUARD_DB_USER", "db_user"),
+    ("DEVGUARD_DB_PASSWORD", "db_password"),
+)
+
+
+def _terraform_env_vars() -> Dict[str, Any]:
+    """Map DEVGUARD_* environment settings onto Terraform variable names."""
+    tf_vars: Dict[str, Any] = {}
+    for env_name, tf_name in _ENV_TF_VARS:
+        value = os.getenv(env_name)
+        if not value:
+            continue
+        if tf_name == "subnet_ids":
+            value = [s.strip() for s in value.split(",") if s.strip()]
+        elif tf_name == "db_port":
+            try:
+                value = int(value)
+            except ValueError:
+                continue
+        tf_vars[tf_name] = value
+    return tf_vars
+
 
 class DeployOpsAgent:
     def __init__(self):
@@ -520,10 +553,13 @@ class DeployOpsAgent:
             if variables_file.exists():
                 variables_file.unlink()
         
-        # Write terraform variables if provided
-        if artifacts.terraform.variables:
+        # Write terraform variables if provided, merged with standing-sandbox
+        # VPC/database values from the environment.
+        tf_vars = dict(artifacts.terraform.variables or {})
+        tf_vars.update(_terraform_env_vars())
+        if tf_vars:
             vars_path = tf_dir / "terraform.tfvars.json"
-            vars_path.write_text(json.dumps(artifacts.terraform.variables, indent=2))
+            vars_path.write_text(json.dumps(tf_vars, indent=2))
             self.logger.info(f"Wrote variables to {vars_path}")
         
         # Write Dockerfiles to their build contexts. Source files are already

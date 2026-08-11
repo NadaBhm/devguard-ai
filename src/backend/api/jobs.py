@@ -26,12 +26,15 @@ functions :
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..auth import get_current_user
 from ..database import get_db
 from ..persistence import persist_results, serialize_state, update_run_state
 from ..redis_client import publish_gate, publish_progress, publish_results_ready
@@ -41,7 +44,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 # The orchestrator's repo_url is the same as the project's github_url.
-SYSTEM_USER_EMAIL = "system@devguard.ai"
+# Jobs are created by the authenticated user, who owns the project and run.
 
 
 class JobCreate(BaseModel):
@@ -55,26 +58,6 @@ class ApproveRequest(BaseModel):
     approved: bool
     comment: str = ""
     approved_by: str = ""
-
-
-def _get_or_create_system_user(db: Session) -> models.User:
-    """Minimal ownership fallback: a single system user for jobs created
-    without an authenticated user. Swap for JWT auth when ready."""
-    user = db.query(models.User).filter(models.User.email == SYSTEM_USER_EMAIL).first()
-    if user:
-        return user
-    from ..auth import get_password_hash
-    user = models.User(
-        email=SYSTEM_USER_EMAIL,
-        hashed_password=get_password_hash("system-user-not-for-login"),
-        first_name="System",
-        last_name="User",
-        is_verified=True,
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
 
 
 def _get_or_create_project(
@@ -123,20 +106,57 @@ def _publish(state: dict, progress: int, message: str) -> None:
     publish_progress(job_id, phase=phase, progress=progress, message=message)
 
 
+# Coarse map of orchestrator nodes to a progress percentage, so clients get
+# per-node streaming instead of only the 5/30/60/100 milestones.
+_NODE_PROGRESS = {
+    "codesec_agent": 15,
+    "human_gate_1": 25,
+    "infracost_agent": 40,
+    "human_gate_2": 55,
+    "deployops_agent": 70,
+    "health_check": 85,
+    "generate_report": 95,
+}
+
+
+def _publish_node_progress(job_id: str):
+    """Return a callback that publishes a per-node progress event to Redis/WS."""
+
+    def handler(node_name: str, node_state: dict) -> None:
+        progress = _NODE_PROGRESS.get(node_name)
+        if progress is None:
+            return
+        publish_progress(
+            job_id,
+            phase=node_name,
+            progress=progress,
+            message=f"Node '{node_name}' completed",
+        )
+
+    return handler
+
+
 @router.post("/", status_code=201)
-def create_job(body: JobCreate, db: Session = Depends(get_db)):
+def create_job(
+    body: JobCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Start a job: create Project + AnalysisRun, run the orchestrator up to
     the first human gate, and persist the resulting state."""
-    user = _get_or_create_system_user(db)
-    project = _get_or_create_project(db, user.id, body.repo_url, body.default_branch)
-    run = _create_run(db, project, user.id, body.commit_sha, body.commit_message)
+    project = _get_or_create_project(db, current_user.id, body.repo_url, body.default_branch)
+    run = _create_run(db, project, current_user.id, body.commit_sha, body.commit_message)
 
     logger.info(f"Starting orchestrator for run {run.id} | repo {body.repo_url}")
     publish_progress(str(run.id), phase="start", progress=5, message="Job started")
 
     try:
         from src.agents.orchestrator.graph import run_workflow
-        state = run_workflow(repo_url=body.repo_url, thread_id=str(run.id))
+        state = run_workflow(
+            repo_url=body.repo_url,
+            thread_id=str(run.id),
+            on_node_progress=_publish_node_progress(str(run.id)),
+        )
         state["job_id"] = str(run.id)  # keep orchestrator job_id == DB run id
     except Exception as exc:
         logger.error(f"run_workflow failed for {run.id}: {exc}", exc_info=True)
@@ -159,7 +179,12 @@ def create_job(body: JobCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/{job_id}/approve")
-def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)):
+def approve_job(
+    job_id: str,
+    body: ApproveRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Resume a paused workflow at its human gate with an approval/rejection."""
     run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
     if not run:
@@ -170,12 +195,23 @@ def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)
         resume_data = {
             "approved": body.approved,
             "comment": body.comment,
-            "approved_by": body.approved_by or SYSTEM_USER_EMAIL,
+            "approved_by": body.approved_by or current_user.email,
         }
-        state = resume_workflow(thread_id=job_id, resume_data=resume_data)
+        state = resume_workflow(
+            thread_id=job_id,
+            resume_data=resume_data,
+            on_node_progress=_publish_node_progress(job_id),
+        )
+        # Keep the orchestrator job_id aligned with the DB run id (create_job
+        # does the same), so report/SBOM files are keyed by the run the API
+        # actually exposes.
+        state["job_id"] = job_id
+        final_report = state.get("final_report")
+        if isinstance(final_report, dict):
+            final_report["download_url"] = f"/api/jobs/{job_id}/report/download"
     except Exception as exc:
         logger.error(f"resume_workflow failed for {job_id}: {exc}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Resume failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Resume failed: {exc}") from exc
 
     run = update_run_state(db, job_id, state)
 
@@ -201,7 +237,11 @@ def approve_job(job_id: str, body: ApproveRequest, db: Session = Depends(get_db)
 
 
 @router.get("/{job_id}/results")
-def get_job_results(job_id: str, db: Session = Depends(get_db)):
+def get_job_results(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Return the normalized result tables for a run (findings, cost, IaC, deploy)."""
     run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
     if not run:
@@ -241,8 +281,72 @@ def get_job_results(job_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.get("/{job_id}/sbom/download")
+def download_sbom(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Serve the CycloneDX SBOM generated for a job as a JSON attachment."""
+    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    sbom = (run.run_metadata or {}).get("codesec_result", {}).get("sbom")
+    if not sbom:
+        raise HTTPException(status_code=404, detail="No SBOM generated for this job")
+
+    payload = {k: v for k, v in sbom.items() if k != "download_url"}
+    return JSONResponse(
+        payload,
+        headers={"Content-Disposition": f'attachment; filename="sbom-{job_id}.json"'},
+    )
+
+
+@router.get("/{job_id}/report/download")
+def download_report(
+    job_id: str,
+    file_format: str = "html",
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Serve the final HTML/PDF report for a job, regenerating it on demand."""
+    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    from src.agents.orchestrator.report import DEFAULT_REPORT_DIR, generate_report
+
+    report_dir = Path(DEFAULT_REPORT_DIR)
+    html_path = report_dir / f"report-{job_id}.html"
+    pdf_path = report_dir / f"report-{job_id}.pdf"
+
+    if file_format == "pdf":
+        if not pdf_path.is_file():
+            raise HTTPException(status_code=404, detail="PDF not available for this report")
+        return FileResponse(pdf_path, media_type="application/pdf", filename=f"report-{job_id}.pdf")
+
+    if not html_path.is_file():
+        # The report is keyed by job_id (normalized to the DB run id on resume),
+        # so regenerate it from the persisted state if the file is missing.
+        try:
+            generate_report(run.run_metadata or {}, output_dir=report_dir, want_pdf=False)
+        except Exception as exc:
+            logger.error(f"Report regeneration failed for {job_id}: {exc}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
+
+    if not html_path.is_file():
+        raise HTTPException(status_code=404, detail="Report file not found")
+
+    return FileResponse(html_path, media_type="text/html", filename=f"report-{job_id}.html")
+
+
 @router.get("/{job_id}")
-def get_job(job_id: str, db: Session = Depends(get_db)):
+def get_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """Return the persisted job state (analysis run + full orchestrator state)."""
     run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
     if not run:
@@ -262,7 +366,10 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/")
-def list_jobs(db: Session = Depends(get_db)):
+def list_jobs(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
     """List all analysis runs with their coarse status."""
     runs = (
         db.query(models.AnalysisRun)

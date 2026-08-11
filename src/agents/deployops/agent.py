@@ -47,7 +47,7 @@ class DeployOpsAgent:
         root = Path(os.getenv("DEPLOYOPS_WORKSPACE_ROOT", "/tmp/deployops"))
         return root / job_id
 
-    @xray_recorder.capture("deploy")
+    @xray_recorder.capture("deploy")  # type: ignore[reportCallIssue]
     async def deploy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy infrastructure using Terraform artifacts and Docker images."""
         # Parse, normalize and validate payload before deployment
@@ -165,7 +165,7 @@ class DeployOpsAgent:
             "resources": output,
         }
 
-    @xray_recorder.capture("_deploy_existing_ecs_revision")
+    @xray_recorder.capture("_deploy_existing_ecs_revision")  # type: ignore[reportCallIssue]
     async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
         """Create a new ECS task-definition revision for an existing service.
 
@@ -267,7 +267,7 @@ class DeployOpsAgent:
             self.logger.error(f"Promotion failed: {exc}")
             return {"status": "failed", "error": str(exc)}
 
-    @xray_recorder.capture("rollback")
+    @xray_recorder.capture("rollback")  # type: ignore[reportCallIssue]
     async def rollback(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Rollback ECS service to previous task definition"""
         
@@ -330,7 +330,7 @@ class DeployOpsAgent:
             self.logger.error(f"Rollback failed: {e}")
             return {"status": "failed", "error": str(e)}
 
-    @xray_recorder.capture("rollback_deployment")
+    @xray_recorder.capture("rollback_deployment")  # type: ignore[reportCallIssue]
     async def rollback_deployment(
         self,
         app_name: str,
@@ -377,7 +377,7 @@ class DeployOpsAgent:
 
 
         
-    @xray_recorder.capture("health_check")
+    @xray_recorder.capture("health_check")  # type: ignore[reportCallIssue]
     async def health_check(
         self,
         url: str,
@@ -558,7 +558,7 @@ class DeployOpsAgent:
                     self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
-    @xray_recorder.capture("_build_and_push_image")
+    @xray_recorder.capture("_build_and_push_image")  # type: ignore[reportCallIssue]
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
 

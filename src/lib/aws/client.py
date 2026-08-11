@@ -22,7 +22,7 @@ RETRY_CONFIG = Config(
 )
 
 class AWSClient:
-    def __init__(self, region: str = "us-east-1", assume_role_arn: str | None = None):
+    def __init__(self, region: str | None = None, assume_role_arn: str | None = None):
         self.region = region or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
         base_session = boto3.Session(
             aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),

@@ -283,6 +283,22 @@ class TestDeployOpsResultTranslation:
         assert result["rollback_triggered"] is True
         assert result["rollback_reason"] == "health check failed"
 
+    def test_preserves_actual_health_check_metrics(self):
+        raw = {
+            "status": "success",
+            "health_check": {
+                "passed": True,
+                "response_time_ms": 123,
+                "status_code": 200,
+                "checked_at": "2026-08-11T12:00:00Z",
+            },
+        }
+        result = translate_deployops_result(raw, "job-4")
+        assert result["health_check"]["passed"] is True
+        assert result["health_check"]["response_time_ms"] == 123
+        assert result["health_check"]["status_code"] == 200
+        assert result["health_check"]["checked_at"] == "2026-08-11T12:00:00Z"
+
 
 class TestRunSyncBridge:
     def test_runs_a_coroutine_from_sync_code(self):

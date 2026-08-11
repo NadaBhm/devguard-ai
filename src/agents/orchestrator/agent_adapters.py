@@ -49,6 +49,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -156,55 +157,6 @@ async def call_codesec(repo_url: str, job_id: str) -> dict[str, Any]:
     return payload
 
 
-def _infracost_package_dir() -> "Path":
-    """Absolute path to src/agents/agentInfraCost, regardless of cwd."""
-    from pathlib import Path
-    # this file: src/agents/orchestrator/agent_adapters.py
-    # -> parents[1] = src/agents ; the package sits right next to us
-    return Path(__file__).resolve().parents[1] / "agentInfraCost"
-
-
-def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> "Any":
-    """
-    Import and run Karim's pipeline using ITS OWN import convention.
-
-    Karim's core/*.py files import each other with flat names
-    (`from core.decision_engine import ...`, `from models.output_schema import ...`),
-    which only resolve if agentInfraCost/ itself - not src/ - is on sys.path.
-    That's a separate, incompatible requirement from every other agent, which
-    are all importable as `src.agents.<name>...` (package-qualified).
-
-    Rather than asking every caller to juggle a 3-entry PYTHONPATH (fragile,
-    and apparently platform-dependent - it silently failed on Windows while
-    working here), we add agentInfraCost/ to sys.path ONCE, right here, and
-    then import using Karim's OWN flat convention. This runs off the main
-    thread (via run_in_executor in call_infracost), so it's safe to mutate
-    sys.path without racing the rest of the app.
-
-    TODO: drop this entirely once Karim's core/*.py either use relative
-    imports or `agents.agentInfraCost.core...` absolute imports, matching
-    every other agent in this project.
-    """
-    import sys as _sys
-
-    package_dir = str(_infracost_package_dir())
-    added = package_dir not in _sys.path
-    if added:
-        _sys.path.insert(0, package_dir)
-    try:
-        from core.orchestrator_adapter import to_orchestrator_result  # noqa: PLC0415
-        from core.pipeline import run_pipeline_with_context  # noqa: PLC0415
-
-        ctx = run_pipeline_with_context(codesec_result)
-        # Stash for the caller, which only imported these lazily and needs
-        # them again to build the OrchestratorInfraCostResult below.
-        ctx._to_orchestrator_result = to_orchestrator_result
-        return ctx
-    finally:
-        if added:
-            _sys.path.remove(package_dir)
-
-
 # =============================================================================
 # 2. INFRACOST (Karim)
 # =============================================================================
@@ -226,9 +178,8 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> "Any":
 # empty/path-only, translate_infracost_to_deploy_payload's dockerfile check
 # below will fail loudly rather than silently, which is the point.
 
-def _infracost_package_dir() -> "Path":
+def _infracost_package_dir() -> Path:
     """Absolute path to src/agents/agentInfraCost, regardless of cwd."""
-    from pathlib import Path
     return Path(__file__).resolve().parents[1] / "agentInfraCost"
 
 
@@ -274,8 +225,8 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
     original_path = list(_sys.path)
     _sys.path[:] = [package_dir] + [p for p in original_path if p not in project_paths]
     try:
-        from core.orchestrator_adapter import to_orchestrator_result  # noqa: PLC0415
-        from core.pipeline import run_pipeline_with_context  # noqa: PLC0415
+        from core.orchestrator_adapter import to_orchestrator_result  # type: ignore[reportMissingImports]
+        from core.pipeline import run_pipeline_with_context  # type: ignore[reportMissingImports]
 
         ctx = run_pipeline_with_context(codesec_result)
         result = dict(to_orchestrator_result(ctx.output, ctx.decision, ctx.finops))
@@ -368,6 +319,7 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
 # TODO: delete this function if Karim and Oussema converge their schemas.
 
 _DEFAULT_PLATFORM = "linux/amd64"   # Fargate requires amd64 unless Graviton
+_DEFAULT_CONTEXT = "."
 
 
 def translate_infracost_to_deploy_payload(

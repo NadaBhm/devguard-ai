@@ -108,6 +108,20 @@ def test_sanitize_and_validate_invalid_region(agent, sample_payload):
         agent.sanitize_and_validate(payload)
 
 
+def test_sanitize_and_validate_invalid_docker_tag(agent, sample_payload):
+    payload = sample_payload.copy()
+    payload["artifacts"]["docker_images"][0]["tag"] = "latest version"
+    with pytest.raises(ValueError, match="docker_image.tag contains invalid characters"):
+        agent.sanitize_and_validate(payload)
+
+
+def test_sanitize_and_validate_invalid_docker_context(agent, sample_payload):
+    payload = sample_payload.copy()
+    payload["artifacts"]["docker_images"][0]["context"] = "../outside"
+    with pytest.raises(ValueError, match="docker_image.context must be a safe relative path"):
+        agent.sanitize_and_validate(payload)
+
+
 # ---------- Artifact Writing Tests ----------
 
 @pytest.mark.asyncio

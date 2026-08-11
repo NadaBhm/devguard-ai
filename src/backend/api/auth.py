@@ -1,7 +1,7 @@
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from .. import crud, schemas, auth
+from .. import auth, crud, models, schemas
 from ..database import get_db
 from ..config import settings
 
@@ -12,6 +12,10 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     db_user = crud.get_user_by_email(db, email=user.email)
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
+    if user.username:
+        db_user = crud.get_user_by_username(db, username=user.username.strip())
+        if db_user:
+            raise HTTPException(status_code=400, detail="Username already taken")
     return crud.create_user(db=db, user=user)
 
 @router.post("/login", response_model=schemas.Token)
@@ -49,6 +53,58 @@ def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
 @router.get("/me", response_model=schemas.User)
 def read_users_me(current_user: schemas.User = Depends(auth.get_current_active_user)):
     return current_user
+
+@router.get("/me/stats", response_model=schemas.UserStats)
+def read_users_me_stats(
+    db: Session = Depends(get_db),
+    current_user: schemas.User = Depends(auth.get_current_active_user),
+):
+    """Aggregate usage stats for the current user (projects, runs, findings,
+    deployments and estimated infra spend)."""
+    from sqlalchemy import func
+
+    total_projects = (
+        db.query(func.count(models.Project.id))
+        .filter(models.Project.user_id == current_user.id)
+        .scalar()
+        or 0
+    )
+
+    runs_q = db.query(models.AnalysisRun).filter(models.AnalysisRun.triggered_by == current_user.id)
+    total_runs = runs_q.count()
+
+    total_findings = (
+        db.query(func.count(models.CodeSecFinding.id))
+        .join(models.AnalysisRun, models.AnalysisRun.id == models.CodeSecFinding.run_id)
+        .filter(models.AnalysisRun.triggered_by == current_user.id)
+        .scalar()
+        or 0
+    )
+
+    total_deployments = (
+        db.query(func.count(models.Deployment.id))
+        .join(models.AnalysisRun, models.AnalysisRun.id == models.Deployment.run_id)
+        .filter(models.AnalysisRun.triggered_by == current_user.id)
+        .scalar()
+        or 0
+    )
+
+    est_monthly_cost = (
+        db.query(func.coalesce(func.sum(models.InfracostEstimate.monthly_cost_usd), 0))
+        .join(models.AnalysisRun, models.AnalysisRun.id == models.InfracostEstimate.run_id)
+        .filter(models.AnalysisRun.triggered_by == current_user.id)
+        .scalar()
+        or 0
+    )
+
+    return {
+        "total_projects": total_projects,
+        "total_runs": total_runs,
+        "total_findings": total_findings,
+        "total_deployments": total_deployments,
+        "est_monthly_cost": float(est_monthly_cost),
+        "member_since": current_user.created_at,
+    }
 
 @router.put("/me", response_model=schemas.User)
 def update_user_me(

@@ -13,6 +13,7 @@ import { ChatPage } from "./pages/ChatPage"
 import { NotificationsPage } from "./pages/NotificationsPage"
 import { AlertsPage } from "./pages/AlertsPage"
 import { SettingsPage } from "./pages/SettingsPage"
+import { ProfilePage } from "./pages/ProfilePage"
 import { AdminPage } from "./pages/AdminPage"
 
 function FullScreenLoader() {
@@ -61,6 +62,7 @@ export function AppRoutes() {
             { path: "/notifications", element: <NotificationsPage /> },
             { path: "/alerts", element: <AlertsPage /> },
             { path: "/settings", element: <SettingsPage /> },
+            { path: "/profile", element: <ProfilePage /> },
             { path: "/admin", element: <AdminPage /> },
           ],
         },

@@ -125,6 +125,7 @@ class User(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
     email = Column(String, unique=True, nullable=False, index=True)
+    username = Column(String(50), unique=True, nullable=True, index=True)
     hashed_password = Column(String, nullable=False)  # FIX: renamed from 'password'
     is_verified = Column(Boolean, nullable=False, default=True)
     first_name = Column(String, nullable=False)

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +19,7 @@ import httpx
 from aws_xray_sdk.core import xray_recorder
 from dotenv import load_dotenv
 
-from src.lib.aws.client import AWSClient
+from src.lib.aws.client import AWSClient, RETRY_CONFIG
 from src.lib.terraform.runner import TerraformRunner
 from src.agents.deployops.models import (
     DeployPayload,
@@ -568,8 +569,8 @@ class DeployOpsAgent:
         region = aws_config.region
 
         # Get AWS account ID
-        aws = AWSClient(region=region, assume_role_arn=aws_config.get("assume_role_arn"))
-        account_id = aws_config.get("target_account_id") or aws.get_account_id()
+        aws = AWSClient(region=region, assume_role_arn=aws_config.assume_role_arn)
+        account_id = aws_config.target_account_id or aws.get_account_id()
 
         # Create the ECR repository if it doesn't already exist
         ecr_client = aws.session.client("ecr", region_name=region, config=RETRY_CONFIG)

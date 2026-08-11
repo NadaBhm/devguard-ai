@@ -149,7 +149,8 @@ async def test_health_check_success(mock_get, agent):
     mock_get.return_value = mock_response
 
     result = await agent.health_check("http://localhost:8080", max_retries=2, timeout=1)
-    assert result is True
+    assert result["passed"] is True
+    assert result["status_code"] == 200
     mock_get.assert_called_with("http://localhost:8080/health")
 
 
@@ -161,7 +162,8 @@ async def test_health_check_fails_http_error(mock_get, agent):
     mock_get.return_value = mock_response
 
     result = await agent.health_check("http://localhost:8080", max_retries=1)
-    assert result is False
+    assert result["passed"] is False
+    assert result["status_code"] == 500
 
 
 @pytest.mark.asyncio
@@ -169,13 +171,15 @@ async def test_health_check_fails_http_error(mock_get, agent):
 async def test_health_check_timeout(mock_get, agent):
     mock_get.side_effect = httpx.TimeoutException("timeout")
     result = await agent.health_check("http://localhost:8080", max_retries=1)
-    assert result is False
+    assert result["passed"] is False
+    assert result["status_code"] == 0
 
 
 @pytest.mark.asyncio
 async def test_health_check_missing_url(agent):
     result = await agent.health_check(None)
-    assert result is False
+    assert result["passed"] is False
+    assert result["status_code"] == 0
 
 
 # ---------- Rollback Tests (using moto) ----------
@@ -301,7 +305,7 @@ async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_
     workspace_dir = Path("/tmp/deployops/test_job_123")
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    with patch.object(agent, "health_check", new_callable=AsyncMock, return_value=True):
+    with patch.object(agent, "health_check", new_callable=AsyncMock, return_value={"passed": True}):
         result = await agent.deploy(sample_payload)
 
     assert result["status"] == "success"
@@ -337,7 +341,7 @@ async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws
     workspace_dir = Path("/tmp/deployops/test_job_123")
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    with patch.object(agent, "health_check", new_callable=AsyncMock, return_value=False):
+    with patch.object(agent, "health_check", new_callable=AsyncMock, return_value={"passed": False}):
         with patch.object(agent, "rollback", new_callable=AsyncMock, return_value={"status": "success", "message": "rolled back"}) as mock_rollback:
             result = await agent.deploy(sample_payload)
 

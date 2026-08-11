@@ -4,6 +4,7 @@ import {
   IconBell,
   IconChart,
   IconCost,
+  IconDeploy,
   IconGauge,
   IconLogout,
   IconRepo,
@@ -28,6 +29,7 @@ interface NavItem {
 const primaryNav: NavItem[] = [
   { to: "/", label: "Dashboard", icon: IconGauge, end: true },
   { to: "/projects", label: "Projects", icon: IconRepo },
+  { to: "/deployments", label: "Deployments", icon: IconDeploy },
   { to: "/alerts", label: "Cost alerts", icon: IconBell },
   { to: "/notifications", label: "Activity", icon: IconChart },
 ]

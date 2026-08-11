@@ -406,6 +406,51 @@ class DeployOpsAgent:
             self.logger.error(f"Versioned rollback failed: {exc}")
             return {"status": "failed", "error": str(exc)}
 
+    @xray_recorder.capture("list_revisions")  # type: ignore[reportCallIssue]
+    async def list_revisions(
+        self,
+        app_name: str,
+        environment: str,
+        service_name: str,
+        region: str | None = None,
+    ) -> Dict[str, Any]:
+        """List every deployable ECS task-definition revision for a service.
+
+        Used to power the "roll back to a specific version" picker in the UI.
+        Returns revisions newest-first, tagging the currently-active one so the
+        frontend can flag it.
+        """
+        aws = AWSClient(region=region)
+        cluster = f"{app_name}-cluster"
+        service = f"{app_name}-{environment}-{service_name}"
+        try:
+            desc = aws.ecs().describe_services(cluster=cluster, services=[service])
+            if not desc.get("services"):
+                return {"status": "failed", "error": "Service not found"}
+            current_arn = desc["services"][0].get("taskDefinition")
+            current_task = (current_arn or "").rsplit("/", 1)[-1]
+            family = current_task.rsplit(":", 1)[0] if ":" in current_task else current_task
+
+            revisions = aws.ecs().list_task_definitions(
+                familyPrefix=family,
+                status="ACTIVE",
+                sort="DESC",
+            ).get("taskDefinitionArns", [])
+
+            versions = []
+            for arn in revisions:
+                short = arn.rsplit("/", 1)[-1]
+                versions.append({
+                    "task_definition_arn": arn,
+                    "family": short.rsplit(":", 1)[0],
+                    "revision": int(short.rsplit(":", 1)[-1]) if ":" in short else None,
+                    "is_current": arn == current_arn,
+                })
+            return {"status": "success", "service": service, "versions": versions}
+        except Exception as exc:
+            self.logger.error(f"List revisions failed: {exc}")
+            return {"status": "failed", "error": str(exc)}
+
 
 
 

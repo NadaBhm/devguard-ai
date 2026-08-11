@@ -24,6 +24,7 @@ functions :
 """
 
 
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -236,6 +237,186 @@ def approve_job(
     }
 
 
+class RollbackRequest(BaseModel):
+    reason: str = "Manual rollback requested by user"
+    target_revision: int | None = None
+
+
+@router.post("/{job_id}/rollback")
+def rollback_job(
+    job_id: str,
+    body: RollbackRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Roll back the most recent deployment of a run to a previous ECS task-definition revision.
+
+    Delegates to DeployOpsAgent.rollback_deployment using the AWS config and
+    service details captured in the run's persisted deployment record.
+    """
+    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    deployment = (
+        db.query(models.Deployment)
+        .filter(models.Deployment.run_id == job_id)
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if not deployment:
+        raise HTTPException(status_code=404, detail="No deployment found for this job")
+
+    infra = deployment.infrastructure_json or {}
+    aws_config = infra.get("aws_config") or {}
+    region = aws_config.get("region", deployment.aws_region or "us-east-1")
+    ecs_cluster = aws_config.get("ecs_cluster")
+    service_name = aws_config.get("service_name")
+
+    if not ecs_cluster or not service_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment has no ECS cluster/service info to roll back",
+        )
+
+    try:
+        from src.agents.orchestrator.agent_adapters import use_real_deployops
+
+        if not use_real_deployops():
+            logger.info(f"[{job_id}] Rollback: MOCK mode (DEVGUARD_REAL_DEPLOYOPS=1 for real)")
+            result = {
+                "status": "success",
+                "job_id": job_id,
+                "message": "Mock rollback: would have rolled back to previous ECS task definition",
+                "task_definition": f"{ecs_cluster}-{service_name}:previous",
+            }
+        else:
+            from src.agents.deployops.agent import DeployOpsAgent
+
+            agent = DeployOpsAgent()
+            result = asyncio.run(
+                agent.rollback_deployment(
+                    app_name=ecs_cluster,
+                    environment="dev",
+                    service_name=service_name,
+                    target_revision=body.target_revision,
+                    region=region,
+                    reason=body.reason,
+                )
+            )
+    except Exception as exc:
+        logger.error(f"Rollback failed for {job_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
+
+    if result.get("status") == "success":
+        deployment.status = "rolled_back"
+        deployment.rollback_reason = body.reason
+        db.commit()
+        if run.status not in ("completed", "failed", "rejected"):
+            run.status = "rolled_back"
+            run.completed_at = datetime.utcnow()
+            db.commit()
+        publish_results_ready(job_id)
+    else:
+        raise HTTPException(status_code=500, detail=result.get("error", "Rollback failed"))
+
+    return {
+        "job_id": job_id,
+        "status": "rolled_back",
+        "result": result,
+    }
+
+
+@router.get("/{job_id}/deployments/revisions")
+def list_deployment_revisions(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """List deployable ECS task-definition revisions for a run's deployment.
+
+    Powers the "roll back to a specific version" dropdown in the UI.
+    """
+    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    deployment = (
+        db.query(models.Deployment)
+        .filter(models.Deployment.run_id == job_id)
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if not deployment:
+        raise HTTPException(status_code=404, detail="No deployment found for this job")
+
+    infra = deployment.infrastructure_json or {}
+    aws_config = infra.get("aws_config") or {}
+    region = aws_config.get("region", deployment.aws_region or "us-east-1")
+    ecs_cluster = aws_config.get("ecs_cluster")
+    service_name = aws_config.get("service_name")
+
+    if not ecs_cluster or not service_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment has no ECS cluster/service info to list versions for",
+        )
+
+    try:
+        from src.agents.orchestrator.agent_adapters import use_real_deployops
+
+        if not use_real_deployops():
+            logger.info(f"[{job_id}] List revisions: MOCK mode (DEVGUARD_REAL_DEPLOYOPS=1 for real)")
+            result = {
+                "status": "success",
+                "service": f"{ecs_cluster}-dev-{service_name}",
+                "versions": [
+                    {
+                        "task_definition_arn": f"arn:aws:ecs:us-east-1:000000000000:task-definition/{ecs_cluster}-{service_name}:3",
+                        "family": f"{ecs_cluster}-{service_name}",
+                        "revision": 3,
+                        "is_current": True,
+                    },
+                    {
+                        "task_definition_arn": f"arn:aws:ecs:us-east-1:000000000000:task-definition/{ecs_cluster}-{service_name}:2",
+                        "family": f"{ecs_cluster}-{service_name}",
+                        "revision": 2,
+                        "is_current": False,
+                    },
+                    {
+                        "task_definition_arn": f"arn:aws:ecs:us-east-1:000000000000:task-definition/{ecs_cluster}-{service_name}:1",
+                        "family": f"{ecs_cluster}-{service_name}",
+                        "revision": 1,
+                        "is_current": False,
+                    },
+                ],
+            }
+        else:
+            from src.agents.deployops.agent import DeployOpsAgent
+
+            agent = DeployOpsAgent()
+            result = asyncio.run(
+                agent.list_revisions(
+                    app_name=ecs_cluster,
+                    environment="dev",
+                    service_name=service_name,
+                    region=region,
+                )
+            )
+    except Exception as exc:
+        logger.error(f"List revisions failed for {job_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to list revisions: {exc}") from exc
+
+    if result.get("status") != "success":
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to list revisions"))
+
+    return {
+        "job_id": job_id,
+        "service": result.get("service"),
+        "versions": result.get("versions", []),
+    }
+
+
 @router.get("/{job_id}/results")
 def get_job_results(
     job_id: str,
@@ -366,6 +547,7 @@ def get_job(
 
 
 @router.get("/")
+@router.get("")
 def list_jobs(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),

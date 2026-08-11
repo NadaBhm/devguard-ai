@@ -276,7 +276,7 @@ export function RunDetailPage() {
 
       {activeTab === "deploy" && (
         <div className="overflow-hidden rounded-lg border border-border bg-surface">
-          <DeployTab deployments={results?.deployments ?? []} />
+          <DeployTab deployments={results?.deployments ?? []} jobId={jobId} />
         </div>
       )}
     </div>

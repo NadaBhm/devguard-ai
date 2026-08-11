@@ -6,6 +6,7 @@ import { LoginPage } from "./pages/LoginPage"
 import { RegisterPage } from "./pages/RegisterPage"
 import { DashboardPage } from "./pages/DashboardPage"
 import { ProjectsPage } from "./pages/ProjectsPage"
+import { DeploymentsPage } from "./pages/DeploymentsPage"
 import { NewRunPage } from "./pages/NewRunPage"
 import { RunDetailPage } from "./pages/RunDetailPage"
 import { ChatPage } from "./pages/ChatPage"
@@ -53,6 +54,7 @@ export function AppRoutes() {
           children: [
             { path: "/", element: <DashboardPage /> },
             { path: "/projects", element: <ProjectsPage /> },
+            { path: "/deployments", element: <DeploymentsPage /> },
             { path: "/projects/new", element: <NewRunPage /> },
             { path: "/runs/:jobId", element: <RunDetailPage /> },
             { path: "/chat", element: <ChatPage /> },

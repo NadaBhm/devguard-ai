@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..artifact_validation import allowed_file_path, validate_artifact
 from ..auth import get_current_user
 from ..database import get_db
 from ..persistence import (
@@ -42,6 +43,7 @@ from ..persistence import (
     persist_results,
     serialize_state,
     update_run_state,
+    _artifact_specs,
 )
 from ..redis_client import publish_gate, publish_progress, publish_results_ready
 
@@ -65,6 +67,18 @@ class ApproveRequest(BaseModel):
     comment: str = ""
     approved_by: str = ""
     request_regeneration: bool = False
+
+
+class ArtifactEditRequest(BaseModel):
+    file_path: str
+    content: str
+
+
+class ArtifactsEditRequest(BaseModel):
+    """A batch of artifact edits, all applied atomically to the paused run's
+    state (and its materialized rows)."""
+
+    files: list[ArtifactEditRequest]
 
 
 def _get_or_create_project(
@@ -242,6 +256,130 @@ def approve_job(
         "gate": _current_gate(state),
         "state": serialize_state(state),
     }
+
+
+@router.put("/{job_id}/artifacts")
+def edit_artifacts(
+    job_id: str,
+    body: ArtifactsEditRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Apply manual artifact edits to a run paused at Gate 2.
+
+    Users can tweak the generated Terraform / Dockerfile directly in the
+    browser before approving the deployment. Edits are written into BOTH the
+    orchestrator's ``_deploy_inputs`` (what DeployOps consumes on resume) and
+    the ``generated_terraform`` shape (what the tabs read), then the
+    materialized artifact rows are rewritten with an edit-audit trail.
+
+    Only allowed while the run is paused at Gate 2 — before then there are no
+    artifacts, after approval the deployment is in flight.
+    """
+    if not body.files:
+        raise HTTPException(status_code=422, detail="No artifact edits supplied")
+
+    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    state = run.run_metadata or {}
+    gate = _current_gate(state)
+    if gate != "gate_2_pre_deployops":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Artifacts can only be edited while the run is paused at Gate 2 "
+                f"(current gate: {gate or 'not paused'})."
+            ),
+        )
+
+    # Validate every edit up front so a batch fails atomically — never a
+    # partial write of broken files.
+    for edit in body.files:
+        if not allowed_file_path(edit.file_path):
+            raise HTTPException(
+                status_code=422, detail=f"Unsupported artifact: {edit.file_path}"
+            )
+        error = validate_artifact(edit.file_path, edit.content)
+        if error:
+            raise HTTPException(status_code=422, detail=f"{edit.file_path}: {error}")
+
+    edited_by = current_user.email
+    edited_at = datetime.utcnow()
+
+    # Apply to both the deploy-consumed copy and the tab-consumed copy.
+    _apply_artifact_edits(state, body.files)
+    update_run_state(db, job_id, state)
+
+    # Rewrite the materialized artifact rows with the audit trail (bear in
+    # mind persist_results deletes/recreates rows at terminal status, so the
+    # audit is only visible while the run is paused).
+    db.query(models.TerraformArtifact).filter(models.TerraformArtifact.run_id == job_id).delete()
+    edited_paths = {edit.file_path for edit in body.files}
+    written = 0
+    for file_path, artifact_type, content in _artifact_specs(state):
+        db.add(models.TerraformArtifact(
+            run_id=job_id,
+            artifact_type=artifact_type,
+            file_path=file_path,
+            content=content,
+            edited_by=edited_by if file_path in edited_paths else None,
+            edited_at=edited_at if file_path in edited_paths else None,
+        ))
+        written += 1
+    db.commit()
+
+    from ..persistence import derive_results_from_state as _derive
+
+    return {
+        "edited": [
+            {"file_path": edit.file_path, "edited_by": edited_by, "edited_at": edited_at.isoformat()}
+            for edit in body.files
+        ],
+        "written": written,
+        "terraform_artifacts": _derive(state)["terraform_artifacts"],
+    }
+
+
+def _apply_artifact_edits(state: dict, edits: list[ArtifactEditRequest]) -> None:
+    """Apply file edits to the orchestrator state in place, into both the
+    ``_deploy_inputs`` block DeployOps reads and the ``generated_terraform``
+    block the tabs read (supporting the real nested ``files`` shape AND the
+    mock's flat keys)."""
+    infracost = state.setdefault("infracost_result", {})
+    deploy_inputs = infracost.setdefault("_deploy_inputs", {})
+    artifacts = deploy_inputs.setdefault("artifacts", {})
+    terraform = artifacts.setdefault("terraform", {})
+    tf_files = terraform.setdefault("files", {})
+
+    generated = infracost.setdefault("generated_terraform", {})
+    generated_files = generated["files"] if isinstance(generated.get("files"), dict) else generated
+
+    for edit in edits:
+        file_path = edit.file_path
+        content = edit.content
+        if file_path in ("main.tf", "variables.tf", "outputs.tf"):
+            tf_files[file_path] = content
+            generated_files[file_path] = content
+            generated_files[file_path.replace(".", "_")] = content
+        elif file_path == "Dockerfile":
+            artifacts["dockerfile"] = content
+        elif file_path == "docker-image.json":
+            import json as _json
+
+            artifacts["docker_image"] = _json.loads(content)
+
+    # Keep the mock/legacy deployops_result.artifacts copy in sync too.
+    deployops = state.get("deployops_result")
+    if isinstance(deployops, dict):
+        dop_artifacts = deployops.setdefault("artifacts", {})
+        dop_tf = dop_artifacts.setdefault("terraform", {}).setdefault("files", {})
+        for edit in edits:
+            if edit.file_path in ("main.tf", "variables.tf", "outputs.tf"):
+                dop_tf[edit.file_path] = edit.content
+            elif edit.file_path == "Dockerfile":
+                dop_artifacts["dockerfile"] = edit.content
 
 
 class RollbackRequest(BaseModel):
@@ -596,7 +734,8 @@ def _current_gate(state: dict) -> str | None:
     """Return the name of the gate the run is currently paused at, if any.
 
     LangGraph signals paused human gates via the __interrupt__ key (a list of
-    interrupt payloads). Fall back to the status string when that is absent.
+    interrupt payloads). Fall back to the status string, then to the
+    human_gates object (a gate marked required with approved=None is pending).
     """
     interrupts = state.get("__interrupt__")
     if isinstance(interrupts, list) and interrupts:
@@ -609,4 +748,12 @@ def _current_gate(state: dict) -> str | None:
     status = state.get("status")
     if status and status.startswith("awaiting_approval_gate"):
         return status
+    # The orchestrator also records pending gates in human_gates (required +
+    # approved=None). The frontend resolves the active gate the same way, so
+    # the backend must agree or artifact edits get rejected with a confusing
+    # "not paused" error.
+    for gate_name in ("gate_1_pre_infracost", "gate_2_pre_deployops"):
+        gate = (state.get("human_gates") or {}).get(gate_name)
+        if isinstance(gate, dict) and gate.get("required") and gate.get("approved") is None:
+            return gate_name
     return None

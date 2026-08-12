@@ -1,18 +1,22 @@
 import { Link, useSearchParams } from "react-router-dom"
 
-export type RunTab = "overview" | "codesec" | "infracost" | "terraform" | "deploy"
+export type RunTab = "overview" | "codesec" | "infracost" | "artifacts" | "deploy"
 
 const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "codesec", label: "CodeSec" },
   { id: "infracost", label: "InfraCost" },
-  { id: "terraform", label: "Terraform" },
+  { id: "artifacts", label: "Artifacts" },
   { id: "deploy", label: "Deploy" },
 ]
 
+// Legacy tab id kept working: pre-rename URLs used ?tab=terraform.
+const LEGACY_TAB_ALIASES: Record<string, RunTab> = { terraform: "artifacts" }
+
 export function RunTabs({ jobId, codesecCount }: { jobId: string; codesecCount?: number }) {
   const [params] = useSearchParams()
-  const active = (params.get("tab") as RunTab | null) ?? "overview"
+  const raw = (params.get("tab") as RunTab | null) ?? "overview"
+  const active = LEGACY_TAB_ALIASES[raw] ?? raw
 
   return (
     <div className="flex items-center gap-1 overflow-x-auto border-b border-border">

@@ -26,6 +26,79 @@ logger = logging.getLogger(__name__)
 TERMINAL_STATUSES = ("completed", "rolled_back", "failed", "rejected")
 
 
+def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
+    """Pull the Docker artifacts from an orchestrator ``state``/``run_metadata``.
+
+    The real InfraCost agent stashes them at
+    ``infracost_result._deploy_inputs.artifacts.{dockerfile, docker_image}``;
+    the orchestrator's mock/legacy shape carries them at
+    ``deployops_result.artifacts.{dockerfile, docker_image}``. Returns a list
+    of ``(file_path, artifact_type, content)`` tuples — content ``None`` when
+    the artifact is absent (e.g. a serverless Lambda run with no container).
+    """
+    artifacts = {}
+    infracost = state.get("infracost_result") or {}
+    deploy_inputs = (infracost.get("_deploy_inputs") or {}).get("artifacts") or {}
+    deployops = (state.get("deployops_result") or {}).get("artifacts") or {}
+    for source in (deploy_inputs, deployops):
+        for key in ("dockerfile", "docker_image"):
+            if key in source:
+                artifacts[key] = source[key]
+
+    dockerfile = artifacts.get("dockerfile")
+    docker_image = artifacts.get("docker_image") or {}
+    image = {}
+    for field, value in (("name", "name"), ("tag", "tag")):
+        if docker_image.get(field):
+            image[field] = docker_image[field]
+
+    return [
+        ("Dockerfile", "dockerfile", dockerfile if dockerfile else None),
+        (
+            "docker-image.json",
+            "docker-image",
+            json.dumps(image, indent=2) if image else None,
+        ),
+    ]
+
+
+def _artifact_specs(state: dict) -> list[tuple[str, str, str]]:
+    """The ``(file_path, artifact_type, content)`` rows for a state, combining
+    the generated Terraform files (nested ``files`` from the real agent, flat
+    keys from the mock) with the Docker artifacts from ``_docker_artifacts``.
+    """
+    infracost = state.get("infracost_result") or {}
+    terraform = infracost.get("generated_terraform") or {}
+    terraform = terraform.get("files") if isinstance(terraform.get("files"), dict) else terraform
+    specs: list[tuple[str, str, str]] = []
+    for file_path, content in (
+        ("main.tf", terraform.get("main.tf") or terraform.get("main_tf")),
+        ("variables.tf", terraform.get("variables.tf") or terraform.get("variables_tf")),
+        ("outputs.tf", terraform.get("outputs.tf") or terraform.get("outputs_tf")),
+    ):
+        if content:
+            specs.append((file_path, "terraform", content))
+    for file_path, artifact_type, content in _docker_artifacts(state):
+        if content is not None:
+            specs.append((file_path, artifact_type, content))
+    return specs
+
+
+def _write_artifact_rows(db: Session, run_id: str, state: dict) -> int:
+    """Materialize the artifact rows (Terraform + Docker) for a run from its
+    current state. Returns the number of rows written."""
+    written = 0
+    for file_path, artifact_type, content in _artifact_specs(state):
+        db.add(TerraformArtifact(
+            run_id=run_id,
+            artifact_type=artifact_type,
+            file_path=file_path,
+            content=content,
+        ))
+        written += 1
+    return written
+
+
 def coarse_status(orch_status: str) -> str:
     """Map the rich orchestrator status onto the simple AnalysisRun enum."""
     if orch_status == "completed":
@@ -136,26 +209,8 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         ))
         written += 1
 
-    # ---- terraform artifacts ------------------------------------------------
-    # The real InfraCost agent persists its files nested under `files`
-    # (generated_terraform.files.main.tf), while the orchestrator's mock emits
-    # them flat (generated_terraform.main_tf). Support both so a real run's
-    # artifacts actually reach the Terraform tab.
-    terraform = infracost.get("generated_terraform") or {}
-    terraform = terraform.get("files") if isinstance(terraform.get("files"), dict) else terraform
-    for file_path, content in (
-        ("main.tf", terraform.get("main.tf") or terraform.get("main_tf")),
-        ("variables.tf", terraform.get("variables.tf") or terraform.get("variables_tf")),
-        ("outputs.tf", terraform.get("outputs.tf") or terraform.get("outputs_tf")),
-    ):
-        if content:
-            db.add(TerraformArtifact(
-                run_id=run_id,
-                artifact_type="terraform",
-                file_path=file_path,
-                content=content,
-            ))
-            written += 1
+    # ---- terraform + docker artifacts ------------------------------------
+    written += _write_artifact_rows(db, run_id, state)
 
     # ---- deployments ---------------------------------------------------------
     deployops = state.get("deployops_result") or {}
@@ -255,6 +310,20 @@ def derive_results_from_state(metadata: dict) -> dict:
                 "file_path": file_path,
                 "content": content,
                 "checksum": None,
+                "created_at": datetime.utcnow().isoformat(),
+            })
+
+    for file_path, artifact_type, content in _docker_artifacts(metadata):
+        if content is not None:
+            artifacts.append({
+                "id": str(uuid4()),
+                "run_id": metadata.get("job_id"),
+                "artifact_type": artifact_type,
+                "file_path": file_path,
+                "content": content,
+                "checksum": None,
+                "edited_by": None,
+                "edited_at": None,
                 "created_at": datetime.utcnow().isoformat(),
             })
 

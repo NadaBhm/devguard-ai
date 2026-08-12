@@ -38,6 +38,8 @@ export interface TerraformArtifact {
   file_path: string
   content: string
   checksum: string | null
+  edited_by: string | null
+  edited_at: string | null
   created_at: string
 }
 

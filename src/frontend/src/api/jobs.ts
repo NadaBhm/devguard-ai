@@ -6,7 +6,7 @@ import type {
   JobListResponse,
   JobResponse,
 } from "../types/jobs"
-import type { JobResults } from "../types/results"
+import type { JobResults, TerraformArtifact } from "../types/results"
 
 export interface RollbackRequest {
   reason?: string
@@ -37,12 +37,25 @@ export interface RollbackResponse {
   }
 }
 
+export interface ArtifactEdit {
+  file_path: string
+  content: string
+}
+
+export interface ArtifactsEditResponse {
+  edited: Array<{ file_path: string; edited_by: string; edited_at: string }>
+  written: number
+  terraform_artifacts: TerraformArtifact[]
+}
+
 export const jobsApi = {
   create: (body: JobCreate) => client.post<JobResponse>("/jobs/", body),
   list: () => client.get<JobListResponse>("/jobs/"),
   get: (jobId: string) => client.get<JobDetail>(`/jobs/${jobId}`),
   approve: (jobId: string, body: ApproveRequest) => client.post<JobResponse>(`/jobs/${jobId}/approve`, body),
   results: (jobId: string) => client.get<JobResults>(`/jobs/${jobId}/results`),
+  editArtifacts: (jobId: string, files: ArtifactEdit[]) =>
+    client.put<ArtifactsEditResponse>(`/jobs/${jobId}/artifacts`, { files }),
   rollback: (jobId: string, body: RollbackRequest) =>
     client.post<RollbackResponse>(`/jobs/${jobId}/rollback`, body),
   deploymentRevisions: (jobId: string) =>

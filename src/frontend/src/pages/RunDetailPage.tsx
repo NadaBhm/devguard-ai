@@ -16,7 +16,10 @@ import { DeployTab } from "../components/deploy/DeployTabContent"
 import { formatCurrency, formatDate, formatDuration, shortId } from "../lib/format"
 import type { GateContext, JobDetail, JobState, RunState } from "../types/jobs"
 
-const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "terraform", "deploy"]
+const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "artifacts", "deploy"]
+
+// Legacy tab aliases: pre-rename URLs used ?tab=terraform.
+const LEGACY_TAB_ALIASES: Record<string, RunTab> = { terraform: "artifacts" }
 
 interface InterruptInfo {
   gate: string
@@ -66,7 +69,8 @@ export function RunDetailPage() {
   const { jobId } = useParams<{ jobId: string }>()
   const [params] = useSearchParams()
   const rawTab = params.get("tab") as RunTab | null
-  const activeTab = rawTab && VALID_TABS.includes(rawTab) ? rawTab : "overview"
+  const mappedTab = rawTab ? (LEGACY_TAB_ALIASES[rawTab] ?? rawTab) : null
+  const activeTab = mappedTab && VALID_TABS.includes(mappedTab) ? mappedTab : "overview"
 
   const jobQuery = useQuery({
     queryKey: ["job", jobId],
@@ -269,9 +273,12 @@ export function RunDetailPage() {
         </div>
       )}
 
-      {activeTab === "terraform" && (
+      {activeTab === "artifacts" && (
         <div className="overflow-hidden rounded-lg border border-border bg-surface">
-          <TerraformTab artifacts={results?.terraform_artifacts ?? []} />
+          <TerraformTab
+            artifacts={results?.terraform_artifacts ?? []}
+            editable={gateName === "gate_2_pre_deployops"}
+          />
         </div>
       )}
 

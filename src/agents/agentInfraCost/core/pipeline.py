@@ -28,18 +28,18 @@ bare, ambiguous traceback.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from core.cost_estimator import estimate_cost
 from core.decision_engine import DecisionResult
 from core.finops_optimizer import FinOpsRecommendation, optimize_finops
-from core.input_validator import InputValidationError, validate_input
+from core.input_validator import validate_input
 from core.llm_architecture_advisor import decide_architecture_via_llm
 from core.llm_deployment_advisor import decide_deployment_context
 from core.llm_enrichment import build_enrichment
+from core.llm_terraform_refiner import refine_terraform
 from core.output_builder import build_output, resolve_docker_artifacts
 from core.terraform_generator import generate_terraform
 from models.output_schema import InfraCostOutput
+from pydantic import BaseModel
 
 
 class PipelineContext(BaseModel):
@@ -95,6 +95,10 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             docker_image=f"{docker_image.name}:{docker_image.tag}" if docker_image else None,
         )
         terraform_files = generate_terraform(decision, terraform_context)
+        # Gate-2 feedback: let the LLM edit the rendered files to honor the
+        # user's request. Fail-soft — unchanged files if the refiner can't run.
+        if analysis.user_feedback:
+            terraform_files = refine_terraform(terraform_files, analysis.user_feedback)
     except Exception as exc:
         raise PipelineStageError("terraform_generator", exc) from exc
 
@@ -115,7 +119,15 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
 
     try:
         output = build_output(
-            analysis, decision, terraform_files, cost, enrichment, dockerfile, docker_image
+            analysis,
+            decision,
+            terraform_files,
+            cost,
+            enrichment,
+            dockerfile,
+            docker_image,
+            region=terraform_context.region,
+            environment=terraform_context.environment,
         )
     except Exception as exc:
         raise PipelineStageError("output_builder", exc) from exc

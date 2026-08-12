@@ -1,11 +1,19 @@
 from datetime import datetime
 from enum import Enum as PyEnum
-from typing import Optional
 from uuid import uuid4
 
 from sqlalchemy import (
-    Column, String, Boolean, DateTime, Text, Integer, ForeignKey, Enum, CheckConstraint, Index, Numeric,
     JSON,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -117,8 +125,9 @@ class User(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
     email = Column(String, unique=True, nullable=False, index=True)
+    username = Column(String(50), unique=True, nullable=True, index=True)
     hashed_password = Column(String, nullable=False)  # FIX: renamed from 'password'
-    is_verified = Column(Boolean, nullable=False, default=False)
+    is_verified = Column(Boolean, nullable=False, default=True)
     first_name = Column(String, nullable=False)
     last_name = Column(String, nullable=False)
     role = Column(String(50), nullable=False, default=UserRole.MEMBER.value)

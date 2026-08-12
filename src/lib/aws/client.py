@@ -22,13 +22,30 @@ RETRY_CONFIG = Config(
 )
 
 class AWSClient:
-    def __init__(self, region: str = "us-east-1"):
+    def __init__(self, region: str | None = None, assume_role_arn: str | None = None):
         self.region = region or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-        self.session = boto3.Session(
+        base_session = boto3.Session(
             aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
             aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-            region_name=self.region
+            aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+            region_name=self.region,
         )
+
+        if assume_role_arn:
+            sts = base_session.client("sts", config=RETRY_CONFIG)
+            assumed = sts.assume_role(
+                RoleArn=assume_role_arn,
+                RoleSessionName="devguard-assume-role",
+            )
+            credentials = assumed["Credentials"]
+            self.session = boto3.Session(
+                aws_access_key_id=credentials["AccessKeyId"],
+                aws_secret_access_key=credentials["SecretAccessKey"],
+                aws_session_token=credentials["SessionToken"],
+                region_name=self.region,
+            )
+        else:
+            self.session = base_session
 
     def ecs(self):
         return self.session.client("ecs", config=RETRY_CONFIG)

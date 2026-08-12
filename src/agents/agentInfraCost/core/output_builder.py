@@ -13,8 +13,20 @@ available, else ``"latest"`` plus a warning, never silently).
 from __future__ import annotations
 
 import logging
-from typing import Final
 
+from core.constants import (
+    DOCKER_IMAGE_NAME,
+    EC2_AMI_ID,
+    EC2_KEY_PAIR_NAME,
+    ECS_CLUSTER_NAME,
+    ECS_HEALTH_CHECK_PATH,
+    ECS_HEALTH_CHECK_PORT,
+    ECS_SERVICE_NAME,
+    LAMBDA_FUNCTION_NAME,
+    LAMBDA_HANDLER,
+    LAMBDA_RUNTIME,
+    LAMBDA_TIMEOUT_SECONDS,
+)
 from core.decision_engine import DecisionResult
 from models.input_schema import RepoAnalysisInput
 from models.output_schema import (
@@ -45,21 +57,6 @@ from models.output_schema import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Naming/operational conventions this agent applies consistently — not
-# decisions module 2 makes, just fixed defaults for whichever compute type
-# was chosen. Mirrors the constants terraform_generator.py already uses.
-_DOCKER_IMAGE_NAME: Final[str] = "devguard-app"
-_ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
-_ECS_SERVICE_NAME: Final[str] = "app-service"
-_ECS_HEALTH_CHECK_PATH: Final[str] = "/health"
-_ECS_HEALTH_CHECK_PORT: Final[int] = 8080
-_LAMBDA_FUNCTION_NAME: Final[str] = "app-handler"
-_LAMBDA_HANDLER: Final[str] = "handler.main"
-_LAMBDA_RUNTIME: Final[str] = "python3.12"
-_LAMBDA_TIMEOUT_SECONDS: Final[int] = 30
-_EC2_AMI_ID: Final[str] = "ami-0000000000000000"
-_EC2_KEY_PAIR_NAME: Final[str] = "devguard-key"
 
 
 def resolve_docker_artifacts(
@@ -94,7 +91,7 @@ def resolve_docker_artifacts(
         )
     base_image = analysis.stack_detection.container.base_image or "python:3.12-slim"
     dockerfile = f"FROM {base_image}\nCOPY . /app\n"
-    return dockerfile, DockerImage(name=_DOCKER_IMAGE_NAME, tag=tag)
+    return dockerfile, DockerImage(name=DOCKER_IMAGE_NAME, tag=tag)
 
 
 def _build_artifacts(
@@ -103,10 +100,12 @@ def _build_artifacts(
     dockerfile: str | None,
     docker_image: DockerImage | None,
     source_code: str = ".",
+    region: str = "us-east-1",
+    environment: str = "dev",
 ) -> Artifacts:
     terraform = TerraformArtifacts(
         files=terraform_files,
-        variables={"region": "us-east-1", "environment": "dev"},
+        variables={"region": region, "environment": environment},
     )
     return Artifacts(
         terraform=terraform,
@@ -123,17 +122,18 @@ def _build_ecs_output(
     cost: Money,
     enrichment: Enrichment,
     approval_status: ApprovalStatus,
+    region: str = "us-east-1",
 ) -> EcsInfraCostOutput:
     sizing = decision.sizing
     return EcsInfraCostOutput(
         job_id=analysis.job_id,
         artifacts=artifacts,
         aws_config=AwsConfigEcs(
-            region="us-east-1",
+            region=region,
             estimated_monthly_cost=cost,
             ecs=EcsAwsConfig(
-                cluster=_ECS_CLUSTER_NAME,
-                service_name=_ECS_SERVICE_NAME,
+                cluster=ECS_CLUSTER_NAME,
+                service_name=ECS_SERVICE_NAME,
                 task_cpu=str(sizing["task_cpu"]),
                 task_memory=str(sizing["task_memory"]),
             ),
@@ -141,8 +141,8 @@ def _build_ecs_output(
         deployment_config=DeploymentConfigEcs(
             ecs=EcsDeploymentConfig(
                 strategy="rolling",
-                health_check_path=_ECS_HEALTH_CHECK_PATH,
-                health_check_port=_ECS_HEALTH_CHECK_PORT,
+                health_check_path=ECS_HEALTH_CHECK_PATH,
+                health_check_port=ECS_HEALTH_CHECK_PORT,
                 timeout_minutes=5,
                 min_healthy_percent=50,
                 max_percent=200,
@@ -160,20 +160,21 @@ def _build_lambda_output(
     cost: Money,
     enrichment: Enrichment,
     approval_status: ApprovalStatus,
+    region: str = "us-east-1",
 ) -> LambdaInfraCostOutput:
     sizing = decision.sizing
     return LambdaInfraCostOutput(
         job_id=analysis.job_id,
         artifacts=artifacts,
         aws_config=AwsConfigLambda(
-            region="us-east-1",
+            region=region,
             estimated_monthly_cost=cost,
             lambda_=LambdaAwsConfig(
-                function_name=_LAMBDA_FUNCTION_NAME,
-                runtime=_LAMBDA_RUNTIME,
+                function_name=LAMBDA_FUNCTION_NAME,
+                runtime=LAMBDA_RUNTIME,
                 memory_mb=int(sizing["memory_mb"]),
-                timeout_seconds=_LAMBDA_TIMEOUT_SECONDS,
-                handler=_LAMBDA_HANDLER,
+                timeout_seconds=LAMBDA_TIMEOUT_SECONDS,
+                handler=LAMBDA_HANDLER,
             ),
         ),
         deployment_config=DeploymentConfigLambda(
@@ -191,26 +192,27 @@ def _build_ec2_output(
     cost: Money,
     enrichment: Enrichment,
     approval_status: ApprovalStatus,
+    region: str = "us-east-1",
 ) -> Ec2InfraCostOutput:
     sizing = decision.sizing
     return Ec2InfraCostOutput(
         job_id=analysis.job_id,
         artifacts=artifacts,
         aws_config=AwsConfigEc2(
-            region="us-east-1",
+            region=region,
             estimated_monthly_cost=cost,
             ec2=Ec2AwsConfig(
                 instance_type=str(sizing["instance_type"]),
-                ami_id=_EC2_AMI_ID,
+                ami_id=EC2_AMI_ID,
                 instance_count=1,
-                key_pair_name=_EC2_KEY_PAIR_NAME,
+                key_pair_name=EC2_KEY_PAIR_NAME,
             ),
         ),
         deployment_config=DeploymentConfigEc2(
             ec2=Ec2DeploymentConfig(
                 strategy="rolling",
-                health_check_path=_ECS_HEALTH_CHECK_PATH,
-                health_check_port=_ECS_HEALTH_CHECK_PORT,
+                health_check_path=ECS_HEALTH_CHECK_PATH,
+                health_check_port=ECS_HEALTH_CHECK_PORT,
                 timeout_minutes=5,
             )
         ),
@@ -236,6 +238,8 @@ def build_output(
     docker_image: DockerImage | None = None,
     approval_status: ApprovalStatus = "pending",
     source_code: str = ".",
+    region: str = "us-east-1",
+    environment: str = "dev",
 ) -> InfraCostOutput:
     """Assemble the final contract from already-computed module outputs.
 
@@ -257,6 +261,11 @@ def build_output(
             consumes these artifacts (e.g. the DeployOps agent). Defaults
             to ``"."`` — a relative build context, never a fabricated
             ``/tmp`` checkout path that nobody created.
+        region: Deployment region, threaded through from the decided
+            deployment context so the metadata contract never diverges from
+            the rendered Terraform's ``variable "region"`` default.
+        environment: Same provenance as ``region`` — stamped into
+            ``Artifacts.variables.environment``.
 
     Returns:
         One of the three ``InfraCostOutput`` variants, with the other two
@@ -264,6 +273,8 @@ def build_output(
     """
     if dockerfile is None and docker_image is None:
         dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
-    artifacts = _build_artifacts(analysis, terraform_files, dockerfile, docker_image, source_code)
+    artifacts = _build_artifacts(
+        analysis, terraform_files, dockerfile, docker_image, source_code, region, environment
+    )
     builder = _BUILDERS[decision.compute_type]
-    return builder(analysis, decision, artifacts, cost, enrichment, approval_status)
+    return builder(analysis, decision, artifacts, cost, enrichment, approval_status, region)

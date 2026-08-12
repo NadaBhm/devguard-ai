@@ -1,5 +1,9 @@
+import { useEffect, useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { jobsApi } from "../../api/jobs"
 import type { Deployment, DeploymentStatus } from "../../types/results"
 import { formatCurrency, formatDate } from "../../lib/format"
+import { Button } from "../ui/Button"
 import { Badge } from "../ui/Badge"
 import { IconCheck, IconX } from "../icons"
 
@@ -17,7 +21,54 @@ const envMeta = {
   prod: { label: "Production", dot: "bg-accent" },
 }
 
-export function DeployTab({ deployments }: { deployments: Deployment[] }) {
+export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; jobId?: string }) {
+  const [selectedRevision, setSelectedRevision] = useState<number | null>(null)
+  const [rollbackError, setRollbackError] = useState<string | null>(null)
+  const [rollbackResult, setRollbackResult] = useState<{ message?: string; task_definition?: string } | null>(null)
+  const queryClient = useQueryClient()
+
+  const canRollback = !!jobId && deployments.some((d) => d.status === "succeeded")
+
+  const revisionsQuery = useQuery({
+    queryKey: ["deployment-revisions", jobId],
+    queryFn: () => jobsApi.deploymentRevisions(jobId!),
+    enabled: canRollback,
+  })
+
+  useEffect(() => {
+    if (revisionsQuery.data?.versions?.length) {
+      const current = revisionsQuery.data.versions.find((v) => v.is_current)
+      if (current?.revision != null && selectedRevision == null) {
+        setSelectedRevision(current.revision)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revisionsQuery.data])
+
+  const versions = revisionsQuery.data?.versions ?? []
+  const currentRevision = versions.find((v) => v.is_current)?.revision ?? null
+
+  const rollback = useMutation({
+    mutationFn: () =>
+      jobsApi.rollback(jobId!, {
+        reason: "Manual rollback requested from UI",
+        target_revision: selectedRevision,
+      }),
+    onSuccess: (res) => {
+      setRollbackResult({
+        message: res.result?.message,
+        task_definition: res.result?.task_definition,
+      })
+      setRollbackError(null)
+      void queryClient.invalidateQueries({ queryKey: ["job-results", jobId] })
+      void queryClient.invalidateQueries({ queryKey: ["job", jobId] })
+      void queryClient.invalidateQueries({ queryKey: ["deployment-revisions", jobId] })
+    },
+    onError: (err) => {
+      setRollbackError(err instanceof Error ? err.message : "Rollback failed.")
+    },
+  })
+
   if (deployments.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -28,6 +79,64 @@ export function DeployTab({ deployments }: { deployments: Deployment[] }) {
 
   return (
     <div className="space-y-3 p-4">
+      {canRollback && (
+        <div className="space-y-3 rounded-lg border border-border bg-surface px-4 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium text-foreground">Deployment actions</p>
+              <p className="text-[12px] text-muted">
+                Choose a task-definition revision to roll back to, or use the latest previous one.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex min-w-[220px] flex-1 items-center gap-2">
+              <select
+                aria-label="Target revision"
+                value={selectedRevision ?? ""}
+                onChange={(e) => setSelectedRevision(e.target.value ? Number(e.target.value) : null)}
+                disabled={revisionsQuery.isLoading}
+                className="h-8 flex-1 rounded-md border border-border bg-surface-2 px-2.5 text-[13px] text-foreground outline-none focus:border-accent disabled:opacity-45"
+              >
+                {revisionsQuery.isLoading && <option>Loading versions…</option>}
+                {!revisionsQuery.isLoading && versions.length === 0 && (
+                  <option value="">No versions available</option>
+                )}
+                {versions.map((v) => (
+                  <option key={v.task_definition_arn} value={v.revision ?? ""}>
+                    Revision {v.revision ?? "?"}{v.is_current ? " (current)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => rollback.mutate()}
+              loading={rollback.isPending}
+              disabled={rollback.isPending || selectedRevision == null || selectedRevision === currentRevision}
+            >
+              Rollback to selected
+            </Button>
+          </div>
+
+          {rollbackResult && (
+            <p className="text-[12px] text-accent">
+              Rollback succeeded{rollbackResult.message ? ` · ${rollbackResult.message}` : ""}
+              {rollbackResult.task_definition ? ` (${rollbackResult.task_definition})` : ""}
+            </p>
+          )}
+          {rollbackError && <p className="text-[12px] text-critical">{rollbackError}</p>}
+          {revisionsQuery.isError && (
+            <p className="text-[12px] text-critical">
+              {revisionsQuery.error instanceof Error ? revisionsQuery.error.message : "Failed to load versions."}
+            </p>
+          )}
+        </div>
+      )}
+
       {deployments.map((d) => {
         const meta = statusMeta[d.status]
         const envMetaFor = envMeta[d.environment] ?? envMeta.dev

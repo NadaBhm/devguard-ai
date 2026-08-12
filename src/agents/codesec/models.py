@@ -328,12 +328,6 @@ class SecurityScore(BaseModel):
 # Repository Metadata
 # ---------------------------------------------------------------------------
 
-class LanguageBreakdown(BaseModel):
-    """Lines of code per language."""
-
-    model_config = {"extra": "allow"}  # Allow dynamic language keys
-
-
 class RepoMetadata(BaseModel):
     """High-level repository statistics."""
 

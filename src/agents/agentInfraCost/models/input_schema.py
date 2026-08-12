@@ -75,3 +75,8 @@ class RepoAnalysisInput(BaseModel):
     repo_metadata: RepoMetadata
     stack_detection: StackDetection
     security_score: Optional[SecurityScore] = None
+    user_feedback: Optional[str] = None
+    """Free-form user request from the orchestrator's Gate 2 ("regenerate with
+    changes"). When present, the pipeline's LLM advisors and the Terraform
+    refiner regenerate the artifacts honoring it. Never validated against a
+    fixed vocabulary — it is passed through to the LLM as-is."""

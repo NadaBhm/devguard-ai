@@ -10,11 +10,11 @@ in my code so that I can fix them before deployment.
 Technology Decision (ADR):
 - Primary: Semgrep — fast, multi-language, 710+ Pro rules for Python, excellent
   Python library maturity (semgrep package on PyPI), OSS license (LGPL-2.1).
-  Benchmark F1: 69.4% on OWASP Benchmark. citeweb_search:5#7
+  Benchmark F1: 69.4% on OWASP Benchmark.
 - Fallback: Bandit — Python-specific, lightweight, Apache-2.0, good for
   Python-only repos when Semgrep is unavailable.
 - Not chosen: CodeQL — higher accuracy (F1 74.4%) but requires complex setup,
-  GitHub dependency, and is slower. Overkill for our 5-minute pipeline target. citeweb_search:5#7
+  GitHub dependency, and is slower. Overkill for our 5-minute pipeline target.
 
 """
 
@@ -61,103 +61,52 @@ def _normalize_severity(sev: str | None) -> Severity:
     return mapping.get(str(sev or "").strip().lower(), Severity.LOW)
 
 
-def _parse_semgrep_output(output: Any) -> list[SASTFinding]:
-    """Parse Semgrep JSON output into a list of SASTFinding objects."""
-    if isinstance(output, str):
-        try:
-            data = json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise exc
-    elif isinstance(output, dict):
-        data = output
-    else:
-        raise ValueError("Semgrep output must be a JSON string or dictionary")
-
-    findings: list[SASTFinding] = []
-    for hit in data.get("results", []):
-        extra = hit.get("extra", {})
-        metadata = extra.get("metadata", {})
-        cwe_value = None
-        cwe_list = metadata.get("cwe", [])
-        if cwe_list:
-            cwe_match = re.search(r"CWE-\d+", str(cwe_list[0]))
-            if cwe_match:
-                cwe_value = cwe_match.group(0)
-
-        severity = _normalize_severity(extra.get("severity", "low"))
-        owasp = _map_cwe_to_owasp(cwe_value)
-        finding = SASTFinding(
-            rule_id=hit.get("check_id", "unknown"),
-            tool="semgrep",
-            severity=severity,
-            category="owasp-top10" if owasp != "Unknown" else "security",
-            owasp_category=owasp,
-            cwe_id=cwe_value,
-            check_id=hit.get("check_id", "unknown"),
-            cwe=cwe_value,
-            file=hit.get("path", ""),
-            line=hit.get("start", {}).get("line", 1),
-            column=hit.get("start", {}).get("col", 1),
-            message=extra.get("message", ""),
-            snippet=extra.get("lines", ""),
-            remediation=metadata.get("fix") or metadata.get("remediation"),
-        )
-        findings.append(finding)
-
-    return findings
-
-
 def _run_semgrep(repo_path: Path) -> list[SASTFinding]:
     """
     Execute Semgrep and parse JSON output into SASTFinding models.
-
-    Args:
-        repo_path: Path to the cloned repository.
-
-    Returns:
-        List of SASTFinding objects.
     """
     tool = TOOLS["semgrep"]
     if not tool.enabled:
         logger.info("Semgrep is disabled in configuration.")
         return []
 
-    # Find source files to scan
+    # Guard: skip if no source files present (keeps tests happy + saves time)
     source_files = find_files(
         repo_path,
         patterns=("*.py", "*.js", "*.ts", "*.go", "*.java", "*.rb", "*.php"),
         exclude=("test_", "tests/", "*_test.py", "conftest.py", "venv/", ".venv/", "node_modules/"),
     )
-
     if not source_files:
         logger.info("No source files found for Semgrep scan.")
         return []
 
-    # Build file list (limit to avoid command-line length issues)
-    file_list_path = repo_path / ".codesec_semgrep_files.txt"
-    with open(file_list_path, "w") as f:
-        for sf in source_files[:5000]:
-            f.write(str(sf) + "\n")
-
+    # FIX #4: --include takes glob patterns, not a file list path
     cmd = [
         tool.executable,
         "--config=auto",
         "--json",
         "--quiet",
-        f"--include={str(file_list_path)}",
+        "--include=*.py",
+        "--include=*.js",
+        "--include=*.ts",
+        "--include=*.go",
+        "--include=*.java",
+        "--include=*.rb",
+        "--include=*.php",
+        "--exclude=tests",
+        "--exclude=test",
+        "--exclude=venv",
+        "--exclude=.venv",
+        "--exclude=node_modules",
         str(repo_path),
     ]
 
     try:
         result = run_subprocess(cmd, cwd=repo_path, timeout=tool.timeout_seconds)
     except ScannerError:
-        # Clean up temp file
-        file_list_path.unlink(missing_ok=True)
         return []
-    finally:
-        file_list_path.unlink(missing_ok=True)
 
-    if result.returncode not in (0, 1):  # Semgrep returns 1 when findings exist
+    if result.returncode not in (0, 1):  # 1 = findings exist
         logger.warning("Semgrep exited with code %d: %s", result.returncode, result.stderr)
         return []
 
@@ -173,7 +122,6 @@ def _run_semgrep(repo_path: Path) -> list[SASTFinding]:
         extra = hit.get("extra", {})
         metadata = extra.get("metadata", {})
 
-        # Extract CWE from metadata
         cwe_list = metadata.get("cwe", [])
         if cwe_list:
             cwe_match = re.search(r"CWE-\d+", str(cwe_list[0]))
@@ -206,12 +154,6 @@ def _run_semgrep(repo_path: Path) -> list[SASTFinding]:
 def _run_bandit(repo_path: Path) -> list[SASTFinding]:
     """
     Execute Bandit as fallback SAST for Python repositories.
-
-    Args:
-        repo_path: Path to the cloned repository.
-
-    Returns:
-        List of SASTFinding objects.
     """
     tool = TOOLS["bandit"]
     if not tool.enabled:
@@ -273,12 +215,6 @@ def run_sast(repo_path: Path | str) -> list[SASTFinding]:
 
     Tries Semgrep first (multi-language, comprehensive), falls back to Bandit
     for Python-only repos if Semgrep fails or is disabled.
-
-    Args:
-        repo_path: Path to the cloned repository.
-
-    Returns:
-        SASTResult containing the combined findings and counts.
     """
     repo_path = Path(repo_path)
     all_findings: list[SASTFinding] = []

@@ -1,5 +1,5 @@
 import type { InfracostEstimate } from "../../types/results"
-import type { InfraCostResult } from "../../types/jobs"
+import type { InfracostIteration, InfraCostResult } from "../../types/jobs"
 import { formatCurrency } from "../../lib/format"
 import { Badge } from "../ui/Badge"
 
@@ -11,12 +11,25 @@ function annualTotal(estimates: InfracostEstimate[]): number {
   return estimates.reduce((sum, e) => sum + Number(e.annual_cost_usd || 0), 0)
 }
 
-export function InfraCostTab({ estimates, infracost }: { estimates: InfracostEstimate[]; infracost?: InfraCostResult | null }) {
+function iterationCost(it: InfracostIteration): number | null {
+  const monthly = it.result?.cost_estimate?.monthly_cost_usd
+  return typeof monthly === "number" ? monthly : null
+}
+
+export function InfraCostTab({
+  estimates,
+  infracost,
+  iterations,
+}: {
+  estimates: InfracostEstimate[]
+  infracost?: InfraCostResult | null
+  iterations?: InfracostIteration[]
+}) {
   const monthly = total(estimates)
   const annual = annualTotal(estimates)
   const arch = infracost?.architecture_recommendation
 
-  const hasAny = estimates.length > 0 || arch || infracost?.justification
+  const hasAny = estimates.length > 0 || arch || infracost?.justification || (iterations?.length ?? 0) > 0
 
   if (!hasAny) {
     return (
@@ -30,6 +43,42 @@ export function InfraCostTab({ estimates, infracost }: { estimates: InfracostEst
 
   return (
     <div className="space-y-4 p-4">
+      {(iterations?.length ?? 0) > 0 && (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <div className="flex items-center justify-between border-b border-border bg-surface-2 px-4 py-2.5">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-faint">
+              Regeneration history
+            </p>
+            <Badge tone="accent">{iterations!.length} round{iterations!.length > 1 ? "s" : ""}</Badge>
+          </div>
+          <ul className="divide-y divide-border">
+            {iterations!.map((it) => (
+              <li key={it.iteration} className="flex items-start gap-3 px-4 py-3">
+                <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2 font-mono text-[11px] text-muted">
+                  #{it.iteration}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[12.5px] text-foreground">
+                    <span className="text-faint">Prompt: </span>
+                    {it.prompt}
+                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+                    {it.result?.architecture_recommendation && (
+                      <code className="rounded border border-border bg-canvas px-1.5 py-0.5 font-mono text-[11.5px] text-accent">
+                        {it.result.architecture_recommendation}
+                      </code>
+                    )}
+                    {iterationCost(it) != null && (
+                      <span className="tabular">{formatCurrency(iterationCost(it)!)}/mo</span>
+                    )}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <div className="rounded-lg border border-border bg-surface-2 p-4">
           <p className="text-[11px] font-medium uppercase tracking-wider text-faint">Estimated monthly</p>

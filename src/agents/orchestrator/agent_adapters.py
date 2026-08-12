@@ -49,6 +49,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -156,55 +157,6 @@ async def call_codesec(repo_url: str, job_id: str) -> dict[str, Any]:
     return payload
 
 
-def _infracost_package_dir() -> "Path":
-    """Absolute path to src/agents/agentInfraCost, regardless of cwd."""
-    from pathlib import Path
-    # this file: src/agents/orchestrator/agent_adapters.py
-    # -> parents[1] = src/agents ; the package sits right next to us
-    return Path(__file__).resolve().parents[1] / "agentInfraCost"
-
-
-def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> "Any":
-    """
-    Import and run Karim's pipeline using ITS OWN import convention.
-
-    Karim's core/*.py files import each other with flat names
-    (`from core.decision_engine import ...`, `from models.output_schema import ...`),
-    which only resolve if agentInfraCost/ itself - not src/ - is on sys.path.
-    That's a separate, incompatible requirement from every other agent, which
-    are all importable as `src.agents.<name>...` (package-qualified).
-
-    Rather than asking every caller to juggle a 3-entry PYTHONPATH (fragile,
-    and apparently platform-dependent - it silently failed on Windows while
-    working here), we add agentInfraCost/ to sys.path ONCE, right here, and
-    then import using Karim's OWN flat convention. This runs off the main
-    thread (via run_in_executor in call_infracost), so it's safe to mutate
-    sys.path without racing the rest of the app.
-
-    TODO: drop this entirely once Karim's core/*.py either use relative
-    imports or `agents.agentInfraCost.core...` absolute imports, matching
-    every other agent in this project.
-    """
-    import sys as _sys
-
-    package_dir = str(_infracost_package_dir())
-    added = package_dir not in _sys.path
-    if added:
-        _sys.path.insert(0, package_dir)
-    try:
-        from core.orchestrator_adapter import to_orchestrator_result  # noqa: PLC0415
-        from core.pipeline import run_pipeline_with_context  # noqa: PLC0415
-
-        ctx = run_pipeline_with_context(codesec_result)
-        # Stash for the caller, which only imported these lazily and needs
-        # them again to build the OrchestratorInfraCostResult below.
-        ctx._to_orchestrator_result = to_orchestrator_result
-        return ctx
-    finally:
-        if added:
-            _sys.path.remove(package_dir)
-
-
 # =============================================================================
 # 2. INFRACOST (Karim)
 # =============================================================================
@@ -226,9 +178,8 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> "Any":
 # empty/path-only, translate_infracost_to_deploy_payload's dockerfile check
 # below will fail loudly rather than silently, which is the point.
 
-def _infracost_package_dir() -> "Path":
+def _infracost_package_dir() -> Path:
     """Absolute path to src/agents/agentInfraCost, regardless of cwd."""
-    from pathlib import Path
     return Path(__file__).resolve().parents[1] / "agentInfraCost"
 
 
@@ -274,8 +225,8 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
     original_path = list(_sys.path)
     _sys.path[:] = [package_dir] + [p for p in original_path if p not in project_paths]
     try:
-        from core.orchestrator_adapter import to_orchestrator_result  # noqa: PLC0415
-        from core.pipeline import run_pipeline_with_context  # noqa: PLC0415
+        from core.orchestrator_adapter import to_orchestrator_result  # type: ignore[reportMissingImports]
+        from core.pipeline import run_pipeline_with_context  # type: ignore[reportMissingImports]
 
         ctx = run_pipeline_with_context(codesec_result)
         result = dict(to_orchestrator_result(ctx.output, ctx.decision, ctx.finops))
@@ -294,9 +245,21 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
         _sys.path[:] = original_path
 
 
-async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[str, Any]:
+async def call_infracost(
+    codesec_result: dict[str, Any],
+    job_id: str,
+    *,
+    feedback: str | None = None,
+    previous_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Run InfraCost on CodeSec's output and return the orchestrator-shaped result.
+
+    feedback: optional free-form user prompt from Gate 2 ("regenerate with
+        changes"). When present, the InfraCost pipeline regenerates its
+        artifacts (architecture + Terraform) honoring it.
+    previous_result: the last InfraCost result, so mock mode can produce a
+        visibly different output each regeneration round.
 
     Real contract (src/agents/agentInfraCost/core/):
         ctx = run_pipeline_with_context(codesec_result)   # SYNC
@@ -309,13 +272,72 @@ async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[st
     if not use_real_infracost():
         from .nodes import build_mock_infracost_result
         logger.info("[%s] InfraCost: MOCK mode (set DEVGUARD_REAL_INFRACOST=1 for real)", job_id)
-        return build_mock_infracost_result()
+        return _mock_infracost_with_feedback(job_id, feedback, previous_result)
 
-    logger.info("[%s] InfraCost: REAL agent", job_id)
+    logger.info("[%s] InfraCost: REAL agent%s", job_id, " (regenerating from feedback)" if feedback else "")
+    raw_input = dict(codesec_result)
+    if feedback:
+        # InfraCost's RepoAnalysisInput carries this optional field; threading
+        # it through the raw dict lets the pipeline's LLM advisors and the
+        # new Terraform refiner act on the user's request.
+        raw_input["user_feedback"] = feedback
+
     result = await asyncio.get_event_loop().run_in_executor(
-        None, _run_infracost_pipeline, codesec_result
+        None, _run_infracost_pipeline, raw_input
     )
     return normalize_infracost_result(result)
+
+
+def _mock_infracost_with_feedback(
+    job_id: str,
+    feedback: str | None,
+    previous_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Deterministic mock response to a Gate-2 regeneration prompt.
+
+    Without an OPENROUTER_API_KEY / real InfraCost, this lets the feedback
+    loop be exercised end-to-end: each round produces a visibly different
+    result derived from the previous one plus the prompt, so tests and demo
+    runs can confirm the loop actually loops without burning real LLM calls.
+    """
+    from .nodes import build_mock_infracost_result
+
+    result = dict(previous_result or build_mock_infracost_result())
+    if not feedback:
+        return result
+
+    cost = dict(result.get("cost_estimate") or {})
+    baseline = float(cost.get("monthly_cost_usd", 145.32))
+
+    lowered = any(k in feedback.lower() for k in ("cheap", "cheaper", "less", "lower", "reduce", "minimize"))
+    raised = any(k in feedback.lower() for k in ("more", "bigger", "scale", "increase", "high", "larger"))
+    if lowered:
+        baseline = round(baseline * 0.85, 2)
+    elif raised:
+        baseline = round(baseline * 1.15, 2)
+
+    cost = dict(cost)
+    cost["monthly_cost_usd"] = baseline
+    result["cost_estimate"] = cost
+    result["justification"] = (
+        f"Regenerated ({len(result.get('breakdown_rounds', [])) + 1}) after feedback: "
+        f"{feedback}. {result.get('justification', '')}"
+    ).strip()
+    rounds = list(result.get("breakdown_rounds") or [])
+    rounds.append({"prompt": feedback, "monthly_cost_usd": baseline})
+    result["breakdown_rounds"] = rounds
+
+    # Make the loop's effect unmistakable: flip the architecture on an
+    # explicit request, otherwise keep it stable.
+    if any(k in feedback.lower() for k in ("lambda", "serverless", "function")):
+        result["architecture_recommendation"] = "lambda"
+    elif any(k in feedback.lower() for k in ("ec2", "vm", "instance")):
+        result["architecture_recommendation"] = "ec2"
+    elif "ecs" in feedback.lower() or "fargate" in feedback.lower():
+        result["architecture_recommendation"] = "ecs_fargate"
+
+    return result
 
 
 def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -368,6 +390,7 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
 # TODO: delete this function if Karim and Oussema converge their schemas.
 
 _DEFAULT_PLATFORM = "linux/amd64"   # Fargate requires amd64 unless Graviton
+_DEFAULT_CONTEXT = "."
 
 
 def translate_infracost_to_deploy_payload(

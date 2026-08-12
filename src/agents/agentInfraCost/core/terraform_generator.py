@@ -17,6 +17,21 @@ from typing import Any, Final
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from pydantic import BaseModel
 
+from core.constants import (
+    EC2_AMI_ID,
+    EC2_INSTANCE_COUNT,
+    EC2_INSTANCE_NAME,
+    EC2_KEY_PAIR_NAME,
+    ECS_CLUSTER_NAME,
+    ECS_HEALTH_CHECK_PATH,
+    ECS_HEALTH_CHECK_PORT,
+    ECS_SERVICE_NAME,
+    ECS_TASK_EXECUTION_ROLE_NAME,
+    LAMBDA_FUNCTION_NAME,
+    LAMBDA_HANDLER,
+    LAMBDA_RUNTIME,
+    LAMBDA_TIMEOUT_SECONDS,
+)
 from core.decision_engine import DecisionResult
 from models.output_schema import TerraformFiles
 
@@ -34,25 +49,10 @@ _TEMPLATE_FILENAMES: Final[tuple[str, ...]] = ("main.tf", "variables.tf", "outpu
 
 # --------------------------------------------------------------------------
 # Conventions used to fill in template variables that module 2 does not
-# decide (naming, ports, IAM role shape, ...). These mirror the same
-# defaults used by main.py's mock response builder; module 7
-# (output_builder) will be the single source of truth for them once built.
+# decide (naming, ports, IAM role shape, ...). Single source of truth:
+# ``core/constants.py`` — module 7 (output_builder) imports the same values
+# so the JSON contract and the rendered Terraform can never drift.
 # --------------------------------------------------------------------------
-
-_ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
-_ECS_SERVICE_NAME: Final[str] = "app-service"
-_ECS_HEALTH_CHECK_PORT: Final[int] = 8080
-_ECS_HEALTH_CHECK_PATH: Final[str] = "/health"
-
-_LAMBDA_FUNCTION_NAME: Final[str] = "app-handler"
-_LAMBDA_HANDLER: Final[str] = "handler.main"
-_LAMBDA_RUNTIME: Final[str] = "python3.12"
-_LAMBDA_TIMEOUT_SECONDS: Final[int] = 30
-
-_EC2_AMI_ID: Final[str] = "ami-0000000000000000"
-_EC2_KEY_PAIR_NAME: Final[str] = "devguard-key"
-_EC2_INSTANCE_COUNT: Final[int] = 1
-_EC2_INSTANCE_NAME: Final[str] = "devguard-app"
 
 
 class TerraformContext(BaseModel):
@@ -80,14 +80,16 @@ def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> 
     return {
         "region": context.region,
         "environment": context.environment,
-        "cluster_name": _ECS_CLUSTER_NAME,
-        "service_name": _ECS_SERVICE_NAME,
+        "cluster_name": ECS_CLUSTER_NAME,
+        "service_name": ECS_SERVICE_NAME,
         "task_cpu": decision.sizing["task_cpu"],
         "task_memory": decision.sizing["task_memory"],
         "docker_image": context.docker_image or "devguard-app:latest",
-        "health_check_port": _ECS_HEALTH_CHECK_PORT,
-        "health_check_path": _ECS_HEALTH_CHECK_PATH,
+        "health_check_port": ECS_HEALTH_CHECK_PORT,
+        "health_check_path": ECS_HEALTH_CHECK_PATH,
         "database": context.database,
+        "execution_role_name": ECS_TASK_EXECUTION_ROLE_NAME,
+        "log_group_name": f"/ecs/{ECS_SERVICE_NAME}",
     }
 
 
@@ -95,11 +97,11 @@ def _lambda_render_context(decision: DecisionResult, context: TerraformContext) 
     return {
         "region": context.region,
         "environment": context.environment,
-        "function_name": _LAMBDA_FUNCTION_NAME,
-        "runtime": _LAMBDA_RUNTIME,
-        "handler": _LAMBDA_HANDLER,
+        "function_name": LAMBDA_FUNCTION_NAME,
+        "runtime": LAMBDA_RUNTIME,
+        "handler": LAMBDA_HANDLER,
         "memory_mb": decision.sizing["memory_mb"],
-        "timeout_seconds": _LAMBDA_TIMEOUT_SECONDS,
+        "timeout_seconds": LAMBDA_TIMEOUT_SECONDS,
         "source_code_path": context.source_code_path or f"/tmp/repo_{context.job_id}.zip",
     }
 
@@ -108,11 +110,11 @@ def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> 
     return {
         "region": context.region,
         "environment": context.environment,
-        "ami_id": _EC2_AMI_ID,
+        "ami_id": EC2_AMI_ID,
         "instance_type": decision.sizing["instance_type"],
-        "instance_count": _EC2_INSTANCE_COUNT,
-        "key_pair_name": _EC2_KEY_PAIR_NAME,
-        "instance_name": _EC2_INSTANCE_NAME,
+        "instance_count": EC2_INSTANCE_COUNT,
+        "key_pair_name": EC2_KEY_PAIR_NAME,
+        "instance_name": EC2_INSTANCE_NAME,
     }
 
 

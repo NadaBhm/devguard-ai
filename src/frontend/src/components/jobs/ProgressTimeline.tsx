@@ -39,11 +39,36 @@ function activeIndex(status: RunState | undefined): number {
   return PHASE_ORDER.length - 1 - i
 }
 
+const NODE_TO_STEP: Record<string, string> = {
+  clone: "clone",
+  codesec_agent: "codesec",
+  human_gate_1: "gate_1",
+  infracost_agent: "infracost",
+  human_gate_2: "gate_2",
+  deployops_agent: "deploy",
+  health_check: "health",
+  generate_report: "report",
+}
+
+const STEP_NODES: Record<string, string[]> = {
+  clone: ["clone"],
+  codesec: ["codesec_agent"],
+  gate_1: ["human_gate_1"],
+  infracost: ["infracost_agent"],
+  gate_2: ["human_gate_2"],
+  deploy: ["deployops_agent"],
+  health: ["health_check"],
+  report: ["generate_report"],
+}
+
 export function ProgressTimeline({
   status,
+  nodesExecuted = [],
+  activePhase,
 }: {
   status: RunState | undefined
-  nodesExecuted: string[]
+  nodesExecuted?: string[]
+  activePhase?: string
 }) {
   const activeIdx = activeIndex(status)
   const failed = status === "failed" || status === "rolled_back" || status === "rejected"
@@ -52,12 +77,14 @@ export function ProgressTimeline({
     <ol className="space-y-0">
       {PIPELINE.map((step, i) => {
         const isLast = i === PIPELINE.length - 1
+        const stepDone = (STEP_NODES[step.key] ?? []).some((n) => nodesExecuted.includes(n))
+        const stepActive = activePhase != null && NODE_TO_STEP[activePhase] === step.key
         let phase: Phase
         if (failed && i >= activeIdx) {
           phase = "skipped"
-        } else if (i < activeIdx) {
+        } else if (stepDone || i < activeIdx) {
           phase = "done"
-        } else if (i === activeIdx && status !== "completed") {
+        } else if (stepActive || (i === activeIdx && status !== "completed")) {
           phase = "active"
         } else if (status === "completed") {
           phase = "done"

@@ -4,12 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
-from jinja2 import UndefinedError
-from pydantic import ValidationError
-
 from core.decision_engine import DecisionResult, decide_architecture
 from core.terraform_generator import _ENV, TerraformContext, generate_terraform
+from jinja2 import UndefinedError
 from models.input_schema import RepoAnalysisInput
+from pydantic import ValidationError
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -92,6 +91,34 @@ def test_ecs_service_has_working_health_check_and_networking() -> None:
     assert 'variable "vpc_id"' in files.variables_tf
     assert 'variable "subnet_ids"' in files.variables_tf
     assert "load_balancer_dns_name" in files.outputs_tf
+
+
+def test_ecs_template_is_applyable_with_execution_role_and_logging() -> None:
+    """Regression test: the ECS template used to omit the task execution IAM
+    role, execution_role_arn and container log configuration — productions
+    applied against it failed with "Missing required position
+    'executionRoleArn'" and shipped no CloudWatch logging. Fixed 2026-08-11
+    (Tier 1, fix B)."""
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-a1b2c3d")
+
+    files = generate_terraform(decision, context)
+
+    # IAM execution role with the ECS-tasks assume-role policy
+    assert "aws_iam_role" in files.main_tf
+    assert 'name = "devguard-task-execution-role"' in files.main_tf
+    assert 'Principal' in files.main_tf
+    assert 'Service = "ecs-tasks.amazonaws.com"' in files.main_tf
+    assert "AmazonECSTaskExecutionRolePolicy" in files.main_tf
+    # wired onto the task definition, so ECS can pull from ECR and stream logs
+    assert "execution_role_arn        = aws_iam_role.ecs_task_execution.arn" in files.main_tf
+    # CloudWatch log group + awslogs container configuration pinned to `var.region`
+    assert "aws_cloudwatch_log_group" in files.main_tf
+    assert 'name              = "/ecs/app-service"' in files.main_tf
+    assert 'logDriver = "awslogs"' in files.main_tf
+    assert '"awslogs-group"         = "/ecs/app-service"' in files.main_tf
+    assert '"awslogs-region"        = var.region' in files.main_tf
 
 
 def test_generate_terraform_for_lambda_fixture() -> None:

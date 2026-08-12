@@ -1,6 +1,6 @@
-import { useMemo } from "react"
+import { useEffect, useMemo } from "react"
 import { useParams, useSearchParams } from "react-router-dom"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { jobsApi } from "../api/jobs"
 import { useWebSocket } from "../hooks/useWebSocket"
 import { Spinner } from "../components/ui/Button"
@@ -72,14 +72,27 @@ export function RunDetailPage() {
     queryKey: ["job", jobId],
     queryFn: () => jobsApi.get(jobId!),
     enabled: !!jobId,
+    refetchInterval: 2500,
   })
   const resultsQuery = useQuery({
     queryKey: ["job-results", jobId],
     queryFn: () => jobsApi.results(jobId!),
     enabled: !!jobId,
+    refetchInterval: 2500,
   })
 
   const ws = useWebSocket(jobId)
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    for (const e of ws.events) {
+      if (e.type === "results_ready") {
+        void queryClient.invalidateQueries({ queryKey: ["job-results", jobId] })
+      } else if (e.type === "gate") {
+        void queryClient.invalidateQueries({ queryKey: ["job", jobId] })
+      }
+    }
+  }, [ws.events, jobId, queryClient])
 
   const job: JobDetail | undefined = jobQuery.data
   const results = resultsQuery.data
@@ -94,6 +107,9 @@ export function RunDetailPage() {
     () => ws.events.findLast((e) => e.type === "progress"),
     [ws.events],
   )
+
+  const activePhase =
+    lastProgress?.type === "progress" && ws.status === "open" ? lastProgress.phase : undefined
 
   const pending = useMemo(() => pendingGate(state), [state])
   const interrupt = useMemo(() => interruptInfo(state), [state])
@@ -166,6 +182,7 @@ export function RunDetailPage() {
             <ProgressTimeline
               status={orchestratorStatus as RunState}
               nodesExecuted={state?.orchestrator_metadata?.nodes_executed ?? []}
+              activePhase={activePhase}
             />
           </Card>
 
@@ -247,6 +264,7 @@ export function RunDetailPage() {
           <InfraCostTab
             estimates={results?.infracost_estimates ?? []}
             infracost={state?.infracost_result as JobState["infracost_result"]}
+            iterations={state?.infracost_iterations}
           />
         </div>
       )}
@@ -259,7 +277,7 @@ export function RunDetailPage() {
 
       {activeTab === "deploy" && (
         <div className="overflow-hidden rounded-lg border border-border bg-surface">
-          <DeployTab deployments={results?.deployments ?? []} />
+          <DeployTab deployments={results?.deployments ?? []} jobId={jobId} />
         </div>
       )}
     </div>

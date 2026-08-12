@@ -6,12 +6,14 @@ import { LoginPage } from "./pages/LoginPage"
 import { RegisterPage } from "./pages/RegisterPage"
 import { DashboardPage } from "./pages/DashboardPage"
 import { ProjectsPage } from "./pages/ProjectsPage"
+import { DeploymentsPage } from "./pages/DeploymentsPage"
 import { NewRunPage } from "./pages/NewRunPage"
 import { RunDetailPage } from "./pages/RunDetailPage"
 import { ChatPage } from "./pages/ChatPage"
 import { NotificationsPage } from "./pages/NotificationsPage"
 import { AlertsPage } from "./pages/AlertsPage"
 import { SettingsPage } from "./pages/SettingsPage"
+import { ProfilePage } from "./pages/ProfilePage"
 import { AdminPage } from "./pages/AdminPage"
 
 function FullScreenLoader() {
@@ -53,12 +55,14 @@ export function AppRoutes() {
           children: [
             { path: "/", element: <DashboardPage /> },
             { path: "/projects", element: <ProjectsPage /> },
+            { path: "/deployments", element: <DeploymentsPage /> },
             { path: "/projects/new", element: <NewRunPage /> },
             { path: "/runs/:jobId", element: <RunDetailPage /> },
             { path: "/chat", element: <ChatPage /> },
             { path: "/notifications", element: <NotificationsPage /> },
             { path: "/alerts", element: <AlertsPage /> },
             { path: "/settings", element: <SettingsPage /> },
+            { path: "/profile", element: <ProfilePage /> },
             { path: "/admin", element: <AdminPage /> },
           ],
         },

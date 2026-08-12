@@ -106,6 +106,7 @@ class UserBase(BaseModel):
     first_name: str
     last_name: str
     role: UserRole = UserRole.MEMBER
+    username: Optional[str] = None
 
 
 class UserCreate(UserBase):
@@ -117,6 +118,7 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    username: Optional[str] = None
     is_verified: Optional[bool] = None
     role: Optional[UserRole] = None
 
@@ -145,6 +147,15 @@ class User(UserBase):
 
     class Config:
         from_attributes = True
+
+
+class UserStats(BaseModel):
+    total_projects: int
+    total_runs: int
+    total_findings: int
+    total_deployments: int
+    est_monthly_cost: float
+    member_since: datetime
 
 
 # Project schemas

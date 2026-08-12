@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import admin, alerts, auth, chat, jobs, notifications
+from .api import admin, alerts, auth, chat, deployments, jobs, notifications
 from .database import init_db
 from .websocket import redis_progress_relay, websocket_endpoint
 
@@ -73,6 +73,7 @@ app.include_router(jobs.router, prefix="/api")
 
 app.include_router(notifications.router, prefix="/api")
 app.include_router(alerts.router, prefix="/api")
+app.include_router(deployments.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 # WebSocket endpoint for real-time progress + RAG chat

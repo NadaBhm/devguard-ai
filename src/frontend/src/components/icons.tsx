@@ -167,6 +167,18 @@ export const IconChevronDown = (p: IconProps) => (
   </Base>
 )
 
+export const IconChevronLeft = (p: IconProps) => (
+  <Base {...p}>
+    <path d="m10.5 3 5 5-5 5" />
+  </Base>
+)
+
+export const IconChevronRight = (p: IconProps) => (
+  <Base {...p}>
+    <path d="m5.5 3 5 5-5 5" />
+  </Base>
+)
+
 export const IconSearch = (p: IconProps) => (
   <Base {...p}>
     <circle cx="6.8" cy="6.8" r="4.3" />

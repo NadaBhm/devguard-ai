@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -18,7 +19,7 @@ import httpx
 from aws_xray_sdk.core import xray_recorder
 from dotenv import load_dotenv
 
-from src.lib.aws.client import AWSClient
+from src.lib.aws.client import AWSClient, RETRY_CONFIG
 from src.lib.terraform.runner import TerraformRunner
 from src.agents.deployops.models import (
     DeployPayload,
@@ -31,6 +32,39 @@ from src.agents.deployops.models import (
 )
 
 logging.basicConfig(level=logging.INFO)
+
+# Standing-sandbox resources that generated Terraform modules may require
+# (agentInfraCost templates/ecs/variables.tf.j2 declares vpc_id/subnet_ids and
+# db_* as required variables with no defaults). Configure once in the
+# environment; DeployOps injects them into terraform.tfvars.json so
+# `terraform plan` never blocks waiting for interactive input.
+_ENV_TF_VARS = (
+    ("DEVGUARD_VPC_ID", "vpc_id"),
+    ("DEVGUARD_SUBNET_IDS", "subnet_ids"),
+    ("DEVGUARD_DB_HOST", "db_host"),
+    ("DEVGUARD_DB_PORT", "db_port"),
+    ("DEVGUARD_DB_NAME", "db_name"),
+    ("DEVGUARD_DB_USER", "db_user"),
+    ("DEVGUARD_DB_PASSWORD", "db_password"),
+)
+
+
+def _terraform_env_vars() -> Dict[str, Any]:
+    """Map DEVGUARD_* environment settings onto Terraform variable names."""
+    tf_vars: Dict[str, Any] = {}
+    for env_name, tf_name in _ENV_TF_VARS:
+        value = os.getenv(env_name)
+        if not value:
+            continue
+        if tf_name == "subnet_ids":
+            value = [s.strip() for s in value.split(",") if s.strip()]
+        elif tf_name == "db_port":
+            try:
+                value = int(value)
+            except ValueError:
+                continue
+        tf_vars[tf_name] = value
+    return tf_vars
 
 
 class DeployOpsAgent:
@@ -46,11 +80,12 @@ class DeployOpsAgent:
         root = Path(os.getenv("DEPLOYOPS_WORKSPACE_ROOT", "/tmp/deployops"))
         return root / job_id
 
-    @xray_recorder.capture("deploy")
+    @xray_recorder.capture("deploy")  # type: ignore[reportCallIssue]
     async def deploy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy infrastructure using Terraform artifacts and Docker images."""
-        # Parse and validate payload using Pydantic models
+        # Parse, normalize and validate payload before deployment
         try:
+            payload = self.sanitize_and_validate(payload)
             deploy_payload = DeployPayload(**payload)
         except Exception as e:
             self.logger.error(f"Payload validation failed: {e}")
@@ -112,22 +147,58 @@ class DeployOpsAgent:
 
         # Health checks
         health_check_path = deploy_payload.deployment_config.health_check_path
-        deployed_url = output.get("frontend_url", {}).get("value") or output.get("alb_dns_name", {}).get("value")
-        
-        if deployed_url and not await self.health_check(deployed_url, health_check_path=health_check_path):
+        deployed_url = (
+            output.get("frontend_url", {}).get("value")
+            or output.get("alb_dns_name", {}).get("value")
+            or output.get("alb_dns", {}).get("value")
+            or output.get("load_balancer_dns_name", {}).get("value")
+            or output.get("url", {}).get("value")
+            or output.get("frontend_url")
+            or output.get("alb_dns_name")
+            or output.get("alb_dns")
+            or output.get("load_balancer_dns_name")
+            or output.get("url")
+        )
+
+        if not deployed_url:
+            self.logger.error("No deployed URL found in Terraform outputs; health check cannot run")
+            return {
+                "status": "failed",
+                "job_id": job_id,
+                "deployed_url": None,
+                "error": "missing deployed_url in Terraform outputs",
+                "resources": output,
+            }
+
+        health_result = await self.health_check(
+            deployed_url,
+            health_check_path=health_check_path,
+            max_retries=max(8, deploy_payload.deployment_config.timeout_minutes * 2),
+            timeout=10,
+            retry_delay=30,
+        )
+        if not health_result["passed"]:
             self.logger.error("Health check failed after deployment")
             if deploy_payload.deployment_config.auto_rollback:
                 await self.rollback(job_id, payload)
-            return {"status": "failed", "error": "health check failed"}
+            return {
+                "status": "failed",
+                "job_id": job_id,
+                "deployed_url": deployed_url,
+                "health_check": health_result,
+                "error": "health check failed",
+                "resources": output,
+            }
 
         return {
             "status": "success",
             "job_id": job_id,
             "deployed_url": deployed_url,
-            "resources": output
+            "health_check": health_result,
+            "resources": output,
         }
 
-    @xray_recorder.capture("_deploy_existing_ecs_revision")
+    @xray_recorder.capture("_deploy_existing_ecs_revision")  # type: ignore[reportCallIssue]
     async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
         """Create a new ECS task-definition revision for an existing service.
 
@@ -166,8 +237,9 @@ class DeployOpsAgent:
         """Check current agent status for enhanced user experience"""
         return {"status": "ready", "agent": "deployops"}
 
-    def app_status(self, app_name: str, environment: str, region: str = "us-east-1") -> Dict[str, Any]:
+    def app_status(self, app_name: str, environment: str, region: str | None = None) -> Dict[str, Any]:
         """Return ECS services and task-definition history for one app environment."""
+        region = region or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
         aws = AWSClient(region=region)
         cluster = f"{app_name}-cluster"
         try:
@@ -228,11 +300,14 @@ class DeployOpsAgent:
             self.logger.error(f"Promotion failed: {exc}")
             return {"status": "failed", "error": str(exc)}
 
-    @xray_recorder.capture("rollback")
+    @xray_recorder.capture("rollback")  # type: ignore[reportCallIssue]
     async def rollback(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Rollback ECS service to previous task definition"""
         
-        aws = AWSClient()
+        aws = AWSClient(
+            region=payload["aws_config"].get("region", "us-east-1"),
+            assume_role_arn=payload["aws_config"].get("assume_role_arn"),
+        )
         cluster = payload["aws_config"]["ecs_cluster"]
         service_name = payload["aws_config"]["service_name"]
         
@@ -288,14 +363,14 @@ class DeployOpsAgent:
             self.logger.error(f"Rollback failed: {e}")
             return {"status": "failed", "error": str(e)}
 
-    @xray_recorder.capture("rollback_deployment")
+    @xray_recorder.capture("rollback_deployment")  # type: ignore[reportCallIssue]
     async def rollback_deployment(
         self,
         app_name: str,
         environment: str,
         service_name: str,
         target_revision: Optional[int] = None,
-        region: str = "us-east-1",
+        region: str | None = None,
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Rollback one app/environment service to an ECS task-definition revision."""
@@ -331,50 +406,123 @@ class DeployOpsAgent:
             self.logger.error(f"Versioned rollback failed: {exc}")
             return {"status": "failed", "error": str(exc)}
 
+    @xray_recorder.capture("list_revisions")  # type: ignore[reportCallIssue]
+    async def list_revisions(
+        self,
+        app_name: str,
+        environment: str,
+        service_name: str,
+        region: str | None = None,
+    ) -> Dict[str, Any]:
+        """List every deployable ECS task-definition revision for a service.
+
+        Used to power the "roll back to a specific version" picker in the UI.
+        Returns revisions newest-first, tagging the currently-active one so the
+        frontend can flag it.
+        """
+        aws = AWSClient(region=region)
+        cluster = f"{app_name}-cluster"
+        service = f"{app_name}-{environment}-{service_name}"
+        try:
+            desc = aws.ecs().describe_services(cluster=cluster, services=[service])
+            if not desc.get("services"):
+                return {"status": "failed", "error": "Service not found"}
+            current_arn = desc["services"][0].get("taskDefinition")
+            current_task = (current_arn or "").rsplit("/", 1)[-1]
+            family = current_task.rsplit(":", 1)[0] if ":" in current_task else current_task
+
+            revisions = aws.ecs().list_task_definitions(
+                familyPrefix=family,
+                status="ACTIVE",
+                sort="DESC",
+            ).get("taskDefinitionArns", [])
+
+            versions = []
+            for arn in revisions:
+                short = arn.rsplit("/", 1)[-1]
+                versions.append({
+                    "task_definition_arn": arn,
+                    "family": short.rsplit(":", 1)[0],
+                    "revision": int(short.rsplit(":", 1)[-1]) if ":" in short else None,
+                    "is_current": arn == current_arn,
+                })
+            return {"status": "success", "service": service, "versions": versions}
+        except Exception as exc:
+            self.logger.error(f"List revisions failed: {exc}")
+            return {"status": "failed", "error": str(exc)}
+
 
 
 
         
-    @xray_recorder.capture("health_check")
-    async def health_check(self, url: str, max_retries: int = 3, timeout: int = 20, health_check_path: str = "/health") -> bool:
+    @xray_recorder.capture("health_check")  # type: ignore[reportCallIssue]
+    async def health_check(
+        self,
+        url: str,
+        max_retries: int = 3,
+        timeout: int = 20,
+        health_check_path: str = "/health",
+        retry_delay: int = 30,
+    ) -> dict[str, Any]:
         """
         Check if deployed service is healthy.
-        Returns True if health_check_path returns 200 OK within max_retries.
+        Returns a health result dictionary with status, timing, and code.
         """
         if not url:
             self.logger.error("No URL provided for health check")
-            return False
-        
+            return {
+                "passed": False,
+                "response_time_ms": 0,
+                "status_code": 0,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+
         if not url.startswith("http"):
             url = f"http://{url}"
-        
-        # Remove trailing slash if present
+
         url = url.rstrip("/")
         health_url = f"{url}{health_check_path}"
-        
+
         self.logger.info(f"Starting health check for {health_url}")
-        
+        last_status = 0
+        total_start = time.monotonic()
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             for attempt in range(1, max_retries + 1):
+                attempt_start = time.monotonic()
                 try:
                     response = await client.get(health_url)
+                    elapsed_ms = int((time.monotonic() - attempt_start) * 1000)
+                    last_status = response.status_code
                     if response.status_code == 200:
                         self.logger.info(f"Health check passed on attempt {attempt}")
-                        return True
-                    else:
-                        self.logger.warning(f"Health check attempt {attempt}: status {response.status_code}")
+                        return {
+                            "passed": True,
+                            "response_time_ms": elapsed_ms,
+                            "status_code": 200,
+                            "checked_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    self.logger.warning(
+                        f"Health check attempt {attempt}: status {response.status_code}"
+                    )
                 except httpx.TimeoutException:
                     self.logger.warning(f"Health check attempt {attempt}: timeout")
                 except httpx.ConnectError:
                     self.logger.warning(f"Health check attempt {attempt}: connection refused")
                 except Exception as e:
                     self.logger.warning(f"Health check attempt {attempt}: {e}")
-                
-                # Wait before retry
-                await asyncio.sleep(3)
-        
+
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay)
+
+        total_elapsed_ms = int((time.monotonic() - total_start) * 1000)
         self.logger.error(f"Health check failed after {max_retries} attempts")
-        return False
+        return {
+            "passed": False,
+            "response_time_ms": total_elapsed_ms,
+            "status_code": last_status,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
         
             
     @staticmethod
@@ -450,36 +598,48 @@ class DeployOpsAgent:
             if variables_file.exists():
                 variables_file.unlink()
         
-        # Write terraform variables if provided
-        if artifacts.terraform.variables:
+        # Write terraform variables if provided, merged with standing-sandbox
+        # VPC/database values from the environment.
+        tf_vars = dict(artifacts.terraform.variables or {})
+        tf_vars.update(_terraform_env_vars())
+        if tf_vars:
             vars_path = tf_dir / "terraform.tfvars.json"
-            vars_path.write_text(json.dumps(artifacts.terraform.variables, indent=2))
+            vars_path.write_text(json.dumps(tf_vars, indent=2))
             self.logger.info(f"Wrote variables to {vars_path}")
         
         # Write Dockerfiles to their build contexts. Source files are already
         # present when the context points into the repository; otherwise the
         # payload still provides a valid Dockerfile-only context.
         for docker_image in artifacts.docker_images:
-            context_dir = workspace / docker_image.context
+            context_path = Path(docker_image.context)
+            if context_path.is_absolute() or any(part == ".." for part in context_path.parts):
+                raise ValueError("docker_image.context must be a safe relative path inside the workspace")
+
+            context_dir = (workspace / context_path).resolve()
+            workspace_root = workspace.resolve()
+            if workspace_root not in context_dir.parents and context_dir != workspace_root:
+                raise ValueError("docker_image.context resolves outside the workspace")
+
             context_dir.mkdir(parents=True, exist_ok=True)
             dockerfile_path = context_dir / "Dockerfile"
             dockerfile_path.write_text(docker_image.dockerfile)
             self.logger.info(f"Wrote Dockerfile to {dockerfile_path}")
 
-            src_context = Path(docker_image.context)
-            if src_context.exists() and src_context.resolve() != context_dir.resolve():
-                for item in src_context.iterdir():
-                    destination = context_dir / item.name
-                    if item.is_file():
-                        shutil.copy2(item, destination)
-                    elif item.is_dir() and item.name != ".git":
-                        if destination.exists():
-                            shutil.rmtree(destination)
-                        shutil.copytree(item, destination)
-                self.logger.info(f"Copied source files from {src_context} to {context_dir}")
+            if docker_image.context != ".":
+                src_context = Path(docker_image.context)
+                if src_context.exists() and src_context.resolve() != context_dir.resolve():
+                    for item in src_context.iterdir():
+                        destination = context_dir / item.name
+                        if item.is_file():
+                            shutil.copy2(item, destination)
+                        elif item.is_dir() and item.name != ".git":
+                            if destination.exists():
+                                shutil.rmtree(destination)
+                            shutil.copytree(item, destination)
+                    self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
-    @xray_recorder.capture("_build_and_push_image")
+    @xray_recorder.capture("_build_and_push_image")  # type: ignore[reportCallIssue]
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
 
@@ -490,42 +650,38 @@ class DeployOpsAgent:
         region = aws_config.region
 
         # Get AWS account ID
-        aws = AWSClient(region=region)
-        account_id = aws.get_account_id()
+        aws = AWSClient(region=region, assume_role_arn=aws_config.assume_role_arn)
+        account_id = aws_config.target_account_id or aws.get_account_id()
 
         # Create the ECR repository if it doesn't already exist
-        import boto3
-        ecr_client = boto3.client("ecr", region_name=region)
+        ecr_client = aws.session.client("ecr", region_name=region, config=RETRY_CONFIG)
         try:
             ecr_client.create_repository(repositoryName=image_name)
             self.logger.info(f"Created ECR repository: {image_name}")
         except ecr_client.exceptions.RepositoryAlreadyExistsException:
             pass
 
+        # Use ECR authorization token instead of relying on AWS CLI env
+        auth_response = ecr_client.get_authorization_token()
+        auth_data = auth_response["authorizationData"][0]
+        token = auth_data["authorizationToken"]
+        proxy_endpoint = auth_data["proxyEndpoint"]
+
+        login_cmd = ["docker", "login", "--username", "AWS", "--password-stdin", proxy_endpoint]
+        process = await asyncio.create_subprocess_exec(
+            *login_cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate(input=token.encode())
+        if process.returncode != 0:
+            self.logger.error(f"ECR login failed: {stderr.decode('utf-8', errors='replace')}")
+            return None
+
         # ECR repository URI
         ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
         image_uri = f"{ecr_repo}:{image_tag}"
-
-        # Login to ECR. The AWS CLI may only be installed in the active
-        # virtualenv, so do not assume it is globally available to /bin/sh.
-        aws_executable = shutil.which("aws") or str(Path(sys.executable).with_name("aws"))
-        if not Path(aws_executable).exists():
-            self.logger.error("AWS CLI executable was not found")
-            return None
-        login_cmd = (
-            f'"{aws_executable}" ecr get-login-password --region {region} | '
-            f"docker login --username AWS --password-stdin "
-            f"{account_id}.dkr.ecr.{region}.amazonaws.com"
-        )
-        result = await asyncio.create_subprocess_shell(
-            login_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.logger.error(f"ECR login failed: {stderr.decode('utf-8', errors='replace')}")
-            return None
 
         # Build Docker image with platform for Fargate compatibility
         # Build context is relative to workspace
@@ -579,7 +735,10 @@ class DeployOpsAgent:
         )
         stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Backend Docker build failed: {stderr.decode("utf-8", errors="replace")}")
+            self.logger.error(
+                "Backend Docker build failed: %s",
+                stderr.decode("utf-8", errors="replace"),
+            )
             return False
         
         # Push backend image
@@ -591,7 +750,10 @@ class DeployOpsAgent:
         )
         stdout, stderr = await result.communicate()
         if result.returncode != 0:
-            self.logger.error(f"Backend Docker push failed: {stderr.decode("utf-8", errors="replace")}")
+            self.logger.error(
+                "Backend Docker push failed: %s",
+                stderr.decode("utf-8", errors="replace"),
+            )
             return False
         
         self.logger.info(f"Backend image pushed: {backend_image_uri}")
@@ -702,7 +864,11 @@ class DeployOpsAgent:
                 "terraform": artifacts.get("terraform", {"files": {}, "variables": {}}),
                 "docker_images": docker_images,
             },
-            "aws_config": flat_aws,
+            "aws_config": {
+                **flat_aws,
+                "assume_role_arn": aws_config.get("assume_role_arn"),
+                "target_account_id": aws_config.get("target_account_id"),
+            },
             "deployment_config": flat_dep,
             "approval": {
                 "deploy_approved": status == "approved",

@@ -5,10 +5,9 @@ import logging
 from pathlib import Path
 
 import pytest
-
 from core.cost_estimator import estimate_cost
 from core.decision_engine import DecisionResult, decide_architecture
-from core.output_builder import resolve_docker_artifacts, build_output
+from core.output_builder import build_output, resolve_docker_artifacts
 from core.terraform_generator import TerraformContext, generate_terraform
 from models.input_schema import RepoAnalysisInput
 from models.output_schema import (
@@ -143,6 +142,30 @@ def test_output_is_json_serializable_with_correct_alias_keys() -> None:
 
     assert set(dumped["aws_config"].keys()) == {"region", "estimated_monthly_cost", "ecs", "lambda", "ec2"}
     assert set(dumped["deployment_config"].keys()) == {"ecs", "lambda", "ec2"}
+
+
+def test_region_and_environment_are_threaded_instead_of_hardcoded() -> None:
+    """Regression test (Tier 1, fix A): region/environment used to be
+    hardcoded ("us-east-1"/"dev") here while the LLM deployment advisor and
+    terraform_generator treated them as decided values. The JSON contract
+    must agree with the rendered Terraform, for whatever region/environment
+    were decided."""
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+
+    default_output = _build(analysis, decision)
+    custom_output = _build(analysis, decision, region="eu-west-1", environment="staging")
+
+    assert default_output.aws_config.region == "us-east-1"
+    assert default_output.artifacts.terraform.variables == {
+        "region": "us-east-1",
+        "environment": "dev",
+    }
+    assert custom_output.aws_config.region == "eu-west-1"
+    assert custom_output.artifacts.terraform.variables == {
+        "region": "eu-west-1",
+        "environment": "staging",
+    }
 
 
 # --------------------------------------------------------------------------

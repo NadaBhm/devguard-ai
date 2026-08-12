@@ -284,6 +284,8 @@ class TerraformArtifact(Base):
     file_path = Column(Text, nullable=False)
     content = Column(Text, nullable=False)
     checksum = Column(String, nullable=True)
+    edited_by = Column(String, nullable=True)
+    edited_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
@@ -291,7 +293,7 @@ class TerraformArtifact(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "artifact_type IN ('terraform', 'dockerfile', 'docker-compose', 'cloudformation', 'helm', 'kubernetes', 'ansible', 'pulumi', 'bicep')",
+            "artifact_type IN ('terraform', 'dockerfile', 'docker-compose', 'docker-image', 'cloudformation', 'helm', 'kubernetes', 'ansible', 'pulumi', 'bicep')",
             name="ck_terraform_artifacts_artifact_type"
         ),
         Index("idx_terraform_artifacts_run_id", "run_id"),

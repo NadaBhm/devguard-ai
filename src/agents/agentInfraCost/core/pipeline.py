@@ -105,10 +105,14 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             ecr_registry = f"{analysis.account_id}.dkr.ecr.{terraform_context.region}.amazonaws.com"
             terraform_context.docker_image = f"{ecr_registry}/{terraform_context.docker_image}"
         terraform_files = generate_terraform(decision, terraform_context)
-        # Gate-2 feedback: let the LLM edit the rendered files to honor the
-        # user's request. Fail-soft — unchanged files if the refiner can't run.
+        # Gate-2 feedback: let the LLM edit the rendered files (and the
+        # effective Dockerfile, when the user asked for Docker changes) to
+        # honor the request. Fail-soft — unchanged files if the refiner
+        # can't run.
         if analysis.user_feedback:
-            terraform_files = refine_terraform(terraform_files, analysis.user_feedback)
+            terraform_files, dockerfile = refine_terraform(
+                terraform_files, analysis.user_feedback, dockerfile=dockerfile
+            )
     except Exception as exc:
         raise PipelineStageError("terraform_generator", exc) from exc
 

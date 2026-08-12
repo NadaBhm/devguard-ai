@@ -32,6 +32,97 @@ def _make_state(terraform_shape: dict) -> dict:
     }
 
 
+def test_persist_dockerfile_from_real_deploy_inputs(db: Session) -> None:
+    """The real InfraCost agent stashes Dockerfile + image identity under
+    _deploy_inputs.artifacts; those must reach the artifacts tab too."""
+    state = _make_state(
+        {
+            "files": {
+                "main.tf": "resource \"aws_ecs_cluster\" \"this\" {}",
+                "variables.tf": "variable \"region\" {}",
+                "outputs.tf": "output \"url\" {}",
+            },
+            "variables": {"region": "us-east-1"},
+        }
+    )
+    state["infracost_result"]["_deploy_inputs"] = {
+        "compute_type": "ecs",
+        "artifacts": {
+            "terraform": {
+                "files": {"main.tf": "x"},
+                "variables": {"region": "us-east-1"},
+            },
+            "dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+            "docker_image": {"name": "devguard-app", "tag": "sha-a1b2c3d"},
+            "source_code": ".",
+        },
+    }
+    persist_results(db, "test-run-docker", state)
+
+    artifacts = db.query(models.TerraformArtifact).filter_by(run_id="test-run-docker").all()
+    by_path = {a.file_path: a for a in artifacts}
+    assert by_path["Dockerfile"].artifact_type == "dockerfile"
+    assert by_path["Dockerfile"].content == "FROM python:3.12-slim\nCOPY . /app\n"
+    assert by_path["docker-image.json"].artifact_type == "docker-image"
+    assert "devguard-app" in by_path["docker-image.json"].content
+    assert "sha-a1b2c3d" in by_path["docker-image.json"].content
+
+
+def test_persist_dockerfile_from_mock_deployops_artifacts(db: Session) -> None:
+    """Mock/legacy runs carry Docker artifacts on deployops_result.artifacts;
+    those must be persisted too."""
+    state = _make_state(
+        {
+            "main_tf": "resource \"aws_ecs_cluster\" \"mock\" {}",
+            "variables_tf": "variable \"region\" {}",
+            "outputs_tf": "output \"url\" {}",
+        }
+    )
+    state["deployops_result"] = {
+        "deployment_status": "success",
+        "artifacts": {
+            "dockerfile": "FROM python:3.12\nCOPY . /app\nCMD [\"python\", \"app.py\"]",
+            "docker_image": {"name": "devguard-app", "tag": "latest"},
+        },
+    }
+    persist_results(db, "test-run-mock-docker", state)
+
+    artifacts = db.query(models.TerraformArtifact).filter_by(run_id="test-run-mock-docker").all()
+    by_path = {a.file_path: a for a in artifacts}
+    assert by_path["Dockerfile"].content.startswith("FROM python:3.12")
+    assert by_path["docker-image.json"].content == '{\n  "name": "devguard-app",\n  "tag": "latest"\n}'
+
+
+def test_persist_lambda_run_has_no_docker_artifacts(db: Session) -> None:
+    """A serverless Lambda run has no container artifacts; persistence must be
+    a silent no-op, not an error."""
+    state = _make_state(
+        {
+            "files": {
+                "main.tf": "resource \"aws_lambda_function\" \"this\" {}",
+                "variables.tf": "variable \"region\" {}",
+                "outputs.tf": "output \"arn\" {}",
+            },
+            "variables": {"region": "us-east-1"},
+        }
+    )
+    state["infracost_result"]["_deploy_inputs"] = {
+        "compute_type": "lambda",
+        "artifacts": {
+            "terraform": {"files": {"main.tf": "x"}, "variables": {}},
+            "dockerfile": None,
+            "docker_image": {},
+            "source_code": ".",
+        },
+    }
+    persist_results(db, "test-run-lambda", state)
+
+    artifacts = db.query(models.TerraformArtifact).filter_by(run_id="test-run-lambda").all()
+    assert "Dockerfile" not in {a.file_path for a in artifacts}
+    assert "docker-image.json" not in {a.file_path for a in artifacts}
+    assert {a.file_path for a in artifacts} == {"main.tf", "variables.tf", "outputs.tf"}
+
+
 def test_persist_results_handles_nested_real_agent_shape(db: Session) -> None:
     """The real InfraCost agent stores files nested under `files`
     (generated_terraform.files.main.tf); persist_results must unwrap that
@@ -140,3 +231,39 @@ def test_derive_results_from_state_falls_back_to_total_when_breakdown_empty() ->
     assert len(derived["infracost_estimates"]) == 1
     assert derived["infracost_estimates"][0]["monthly_cost_usd"] == 14.42
     assert derived["infracost_estimates"][0]["resource_name"] == "Estimated total"
+
+
+def test_derive_results_from_state_includes_docker_artifacts() -> None:
+    """The live path (gate-paused runs) must surface Docker artifacts from
+    _deploy_inputs just like the terminal persistence path does."""
+    state = {
+        "job_id": "test-live-docker",
+        "status": "awaiting_approval_gate_2",
+        "infracost_result": {
+            "generated_terraform": {
+                "files": {
+                    "main.tf": "resource \"aws_ecs_cluster\" \"live\" {}",
+                    "variables.tf": "variable \"region\" {}",
+                    "outputs.tf": "output \"url\" {}",
+                },
+                "variables": {"region": "us-east-1"},
+            },
+            "cost_estimate": {"monthly_cost_usd": 14.42, "breakdown": []},
+            "_deploy_inputs": {
+                "compute_type": "ecs",
+                "artifacts": {
+                    "terraform": {"files": {"main.tf": "x"}, "variables": {}},
+                    "dockerfile": "FROM python:3.11-slim\nCOPY . /app\n",
+                    "docker_image": {"name": "devguard-app", "tag": "sha-live"},
+                },
+            },
+        },
+    }
+
+    derived = derive_results_from_state(state)
+
+    by_path = {a["file_path"]: a for a in derived["terraform_artifacts"]}
+    assert by_path["Dockerfile"]["artifact_type"] == "dockerfile"
+    assert by_path["Dockerfile"]["content"] == "FROM python:3.11-slim\nCOPY . /app\n"
+    assert by_path["docker-image.json"]["artifact_type"] == "docker-image"
+    assert "sha-live" in by_path["docker-image.json"]["content"]

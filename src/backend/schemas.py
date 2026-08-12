@@ -309,6 +309,8 @@ class TerraformArtifactBase(BaseModel):
     file_path: str
     content: str
     checksum: Optional[str] = None
+    edited_by: Optional[str] = None
+    edited_at: Optional[datetime] = None
 
 
 class TerraformArtifactCreate(TerraformArtifactBase):

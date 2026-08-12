@@ -83,6 +83,7 @@ services:
       retries: 5
     volumes:
       - ../src:/app/src
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # -----------------------------------------------------------------------
   # React frontend - T-1.16 (Karim)

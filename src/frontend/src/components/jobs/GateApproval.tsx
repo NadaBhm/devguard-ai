@@ -49,9 +49,9 @@ export function GateApproval({
   const queryClient = useQueryClient()
 
   const mutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (approved: boolean) =>
       jobsApi.approve(jobId, {
-        approved: decision === "approve",
+        approved,
         comment,
         approved_by: "frontend-user@example.com",
       }),
@@ -100,7 +100,7 @@ export function GateApproval({
         <div className="flex justify-end gap-2">
           <Button
             variant="ghost"
-            onClick={() => setDecision("reject")}
+            onClick={() => { setDecision("reject"); mutation.mutate(false) }}
             loading={mutation.isPending && decision === "reject"}
             disabled={decision !== null && decision !== "reject"}
             className="text-critical hover:bg-critical/10 hover:text-critical"
@@ -109,7 +109,7 @@ export function GateApproval({
           </Button>
           <Button
             variant="primary"
-            onClick={() => setDecision("approve")}
+            onClick={() => { setDecision("approve"); mutation.mutate(true) }}
             loading={mutation.isPending && decision === "approve"}
             disabled={decision !== null && decision !== "approve"}
           >

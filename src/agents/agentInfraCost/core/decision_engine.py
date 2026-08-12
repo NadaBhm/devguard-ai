@@ -117,7 +117,7 @@ def _choose_compute_type(scores: dict[str, float]) -> ComputeType:
     ``max`` keeps the first maximal item — a managed container service is
     the safer default when signals are genuinely inconclusive.
     """
-    return max(scores, key=lambda compute_type: scores[compute_type])  # type: ignore[return-value]
+    return "ecs"  # TEMPORARY: DeployOps only supports ecs (see agent.py _normalize_payload); forcing until lambda/ec2 land there. was: max(scores, key=lambda compute_type: scores[compute_type])
 
 
 def _size_ecs(analysis: RepoAnalysisInput) -> dict[str, int | str]:

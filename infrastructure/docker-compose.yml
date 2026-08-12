@@ -69,8 +69,16 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-devguard}:${POSTGRES_PASSWORD:-devguard}@postgres:5432/${POSTGRES_DB:-devguard}
       REDIS_URL: redis://redis:6379/2
       QDRANT_URL: http://qdrant:6333
+      # Persisted across container recreation (unlike bare /tmp), so a
+      # terraform.tfstate from a real apply survives a backend rebuild —
+      # lost one on 2026-08-12 mid-session, had to hand-delete AWS resources.
+      DEPLOYOPS_WORKSPACE_ROOT: /data/deployops
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - deployops_workspace:/data/deployops
+      - ../src:/app/src
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,9 +91,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    volumes:
-      - ../src:/app/src
-      - /var/run/docker.sock:/var/run/docker.sock
 
   # -----------------------------------------------------------------------
   # React frontend - T-1.16 (Karim)
@@ -111,3 +116,4 @@ services:
 volumes:
   postgres_data:
   qdrant_data:
+  deployops_workspace:

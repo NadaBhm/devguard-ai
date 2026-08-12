@@ -3,6 +3,7 @@ DeployOps Agent
 Receives artifacts and deploys to AWS.
 """
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -666,6 +667,8 @@ class DeployOpsAgent:
         auth_data = auth_response["authorizationData"][0]
         token = auth_data["authorizationToken"]
         proxy_endpoint = auth_data["proxyEndpoint"]
+        decoded_token = base64.b64decode(token).decode("utf-8")
+        password = decoded_token.split(":", 1)[1]
 
         login_cmd = ["docker", "login", "--username", "AWS", "--password-stdin", proxy_endpoint]
         process = await asyncio.create_subprocess_exec(
@@ -674,7 +677,7 @@ class DeployOpsAgent:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate(input=token.encode())
+        stdout, stderr = await process.communicate(input=password.encode())
         if process.returncode != 0:
             self.logger.error(f"ECR login failed: {stderr.decode('utf-8', errors='replace')}")
             return None

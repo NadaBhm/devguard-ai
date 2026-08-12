@@ -276,6 +276,18 @@ async def call_infracost(
 
     logger.info("[%s] InfraCost: REAL agent%s", job_id, " (regenerating from feedback)" if feedback else "")
     raw_input = dict(codesec_result)
+    # InfraCost's pipeline runs with sys.path swapped to its own package dir
+    # (see _run_infracost_pipeline), so it cannot import src.lib.aws itself.
+    # Resolve the AWS account ID here, where src/ is on the normal path, and
+    # thread it through raw_input so the generated Terraform can build a
+    # fully-qualified ECR image URI instead of a bare "name:tag" (which
+    # Docker/ECS would otherwise resolve against Docker Hub and fail to pull).
+    try:
+        from src.lib.aws.client import AWSClient  # lazy: mirrors other real-agent imports
+        raw_input["account_id"] = AWSClient().get_account_id()
+    except Exception:
+        logger.warning("[%s] Could not resolve AWS account ID for ECR image URI; "
+                        "Terraform will be generated with a bare image name.", job_id)
     if feedback:
         # InfraCost's RepoAnalysisInput carries this optional field; threading
         # it through the raw dict lets the pipeline's LLM advisors and the

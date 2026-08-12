@@ -94,6 +94,16 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             job_id=analysis.job_id,
             docker_image=f"{docker_image.name}:{docker_image.tag}" if docker_image else None,
         )
+        # A bare "name:tag" resolves against Docker Hub by default, not our
+        # ECR repo, so ECS fails with CannotPullContainerError. Qualify it
+        # with the ECR registry host once account_id and region (the latter
+        # decided above by decide_deployment_context) are both known.
+        # account_id may be absent (STS call failed upstream in the
+        # orchestrator adapter) — fail-soft and keep the bare name rather
+        # than raise, same policy as the rest of this pipeline.
+        if terraform_context.docker_image and analysis.account_id:
+            ecr_registry = f"{analysis.account_id}.dkr.ecr.{terraform_context.region}.amazonaws.com"
+            terraform_context.docker_image = f"{ecr_registry}/{terraform_context.docker_image}"
         terraform_files = generate_terraform(decision, terraform_context)
         # Gate-2 feedback: let the LLM edit the rendered files to honor the
         # user's request. Fail-soft — unchanged files if the refiner can't run.

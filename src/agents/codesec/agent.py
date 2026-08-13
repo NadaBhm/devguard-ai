@@ -410,22 +410,33 @@ class CodeSecAgent:
                     if cve and cve not in comp.cve_ids:
                         comp.cve_ids.append(cve)
 
+        # Pre-flight tool check: mark scanners whose tools are missing as
+        # SKIPPED so the failure is loud, not a silent empty result.
+        def _tool_installed(name: str) -> bool:
+            tool = TOOLS.get(name)
+            return bool(tool and tool.enabled and shutil.which(tool.executable))
+
+        coverage = {
+            "sast": _tool_installed("semgrep") or _tool_installed("bandit"),
+            "secrets": _tool_installed("gitleaks") or _tool_installed("trufflehog"),
+            "dependencies": _tool_installed("pip_audit") or _tool_installed("safety") or _tool_installed("trivy"),
+            "dockerfile": _tool_installed("hadolint") or _tool_installed("trivy") or _tool_installed("checkov"),
+            "sbom": _tool_installed("cyclonedx") or _tool_installed("syft"),
+        }
+        missing = [name for name, ok in coverage.items() if not ok]
+        if missing:
+            logger.warning(
+                "[%s] Scanners skipped (tools not installed): %s. "
+                "Run `make install-tools` and `pip install -r requirements.txt`.",
+                job_id, ", ".join(missing),
+            )
+            for name in missing:
+                _add_phase(name, PhaseStatus.SKIPPED, err="tool not installed")
+
         # Calculate security score
         score_start = datetime.now(timezone.utc)
         _add_phase("scoring", PhaseStatus.RUNNING, started=score_start)
         try:
-            def _tool_installed(name: str) -> bool:
-                tool = TOOLS.get(name)
-                return bool(tool and tool.enabled and shutil.which(tool.executable))
-
-            coverage = {
-                "sast": _tool_installed("semgrep") or _tool_installed("bandit"),
-                "secrets": _tool_installed("gitleaks") or _tool_installed("trufflehog"),
-                "dependencies": _tool_installed("pip_audit") or _tool_installed("safety") or _tool_installed("trivy"),
-                "dockerfile": _tool_installed("hadolint") or _tool_installed("trivy") or _tool_installed("checkov"),
-                "sbom": _tool_installed("cyclonedx") or _tool_installed("syft"),
-            }
-
             security_score = calculate_score(
                 sast_findings=results["sast"],
                 secrets=results["secrets"],

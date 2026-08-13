@@ -1,4 +1,4 @@
-.PHONY: up down logs restart build test lint clean ps
+.PHONY: up down logs restart build test lint clean ps install-tools
 
 COMPOSE_FILE = infrastructure/docker-compose.yml
 
@@ -24,6 +24,12 @@ build:
 ## Show running services
 ps:
 	docker compose -f $(COMPOSE_FILE) ps
+
+## Install CodeSec binary scanners (pip tools come from requirements.txt)
+install-tools:
+	@command -v brew >/dev/null 2>&1 && \
+		brew install gitleaks trivy hadolint || \
+		(echo "brew not found. Install gitleaks/trivy/hadolint manually." && exit 1)
 
 ## Run backend unit tests locally (outside Docker)
 # --continue-on-collection-errors: one broken test file (e.g. a missing

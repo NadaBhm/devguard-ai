@@ -23,7 +23,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
     && unzip awscliv2.zip \
     && ./aws/install \
-    && rm -rf awscliv2.zip aws
+    && rm -rf awscliv2.zip aws \
+    && curl -sSfL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_$(uname -s)_$(uname -m).tar.gz -o gitleaks.tar.gz \
+    && tar -xzf gitleaks.tar.gz gitleaks \
+    && install -m 0755 gitleaks /usr/local/bin/gitleaks \
+    && rm -f gitleaks.tar.gz gitleaks \
+    && curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_$(uname -s)-$(uname -m).tar.gz -o trivy.tar.gz \
+    && tar -xzf trivy.tar.gz trivy \
+    && install -m 0755 trivy /usr/local/bin/trivy \
+    && rm -f trivy.tar.gz trivy \
+    && curl -sSfL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-$(uname -s)-$(uname -m) -o /usr/local/bin/hadolint \
+    && chmod +x /usr/local/bin/hadolint
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 

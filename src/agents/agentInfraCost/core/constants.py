@@ -14,9 +14,32 @@ architecture choice (compute_type, sizing) always comes from the
 
 from __future__ import annotations
 
+import os
 from typing import Final
 
 DOCKER_IMAGE_NAME: Final[str] = "devguard-app"
+
+# Whole-repo digestion (Gate-2 regeneration): the OpenRouter LLM reads the
+# repository in chunks and extracts infra-relevant facts. These cap how much
+# of the repo is ever read and how long a single digest call may take.
+REPO_CHUNK_BYTES: Final[int] = int(os.getenv("REPO_CHUNK_BYTES", "30000"))
+REPO_MAX_BYTES: Final[int] = int(os.getenv("REPO_MAX_BYTES", "4000000"))
+REPO_MAX_CHUNKS: Final[int] = int(os.getenv("REPO_MAX_CHUNKS", "40"))
+REPO_MAX_FILE_BYTES: Final[int] = int(os.getenv("REPO_MAX_FILE_BYTES", "524288"))
+REPO_DIGEST_TIMEOUT_SECONDS: Final[float] = float(
+    os.getenv("REPO_DIGEST_TIMEOUT_SECONDS", "60")
+)
+
+# Feedback-driven artifact refinement (core.llm_terraform_refiner): the free
+# OpenRouter tiers intermittently return a 200 whose body lacks the expected
+# `choices` envelope (or wraps the JSON in a markdown fence), so the refiner
+# re-asks a few times before giving up and keeping the generated files
+# unchanged. Each attempt is a fresh request, so transient provider flakiness
+# does not silently drop the user's regeneration request.
+REFINER_MAX_ATTEMPTS: Final[int] = int(os.getenv("REFINER_MAX_ATTEMPTS", "3"))
+REFINER_RETRY_DELAY_SECONDS: Final[float] = float(
+    os.getenv("REFINER_RETRY_DELAY_SECONDS", "1.0")
+)
 
 # ECS
 ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"

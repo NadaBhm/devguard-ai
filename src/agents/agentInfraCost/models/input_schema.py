@@ -86,3 +86,9 @@ class RepoAnalysisInput(BaseModel):
     changes"). When present, the pipeline's LLM advisors and the Terraform
     refiner regenerate the artifacts honoring it. Never validated against a
     fixed vocabulary — it is passed through to the LLM as-is."""
+    repo_context: str | None = None
+    """Digest of infrastructure-relevant facts the OpenRouter LLM extracted
+    from the whole repository (computed by ``core.repo_ingestor`` when Gate 2
+    requests regeneration, see the ``repo_path`` the adapter threads through).
+    Fed to the LLM advisors and the Terraform refiner so the regeneration
+    LLM can see the actual code, not just stack-detection metadata."""

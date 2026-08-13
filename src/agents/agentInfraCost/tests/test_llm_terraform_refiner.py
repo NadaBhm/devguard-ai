@@ -7,6 +7,9 @@ OpenRouter for real. The focus is the fail-soft contract:
   - a valid dockerfile in the reply refines the Dockerfile alongside them
   - every failure mode (None, malformed JSON, missing/empty fields) ->
     the ORIGINAL files come back untouched, never an error.
+  - transient provider flakiness -> the refiner re-asks (a fresh request per
+    attempt) and only gives up after REFINER_MAX_ATTEMPTS, so a single
+    bad reply doesn't silently drop the user's regeneration request.
 
 refine_terraform now returns a ``(TerraformFiles, dockerfile)`` tuple; the
 dockerfile is ``None`` when no current Dockerfile was supplied.
@@ -35,6 +38,22 @@ def _patch_call_llm(monkeypatch: pytest.MonkeyPatch, return_value) -> None:
         "core.llm_terraform_refiner.call_llm",
         lambda *args, **kwargs: return_value,
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retries must not slow the unit tests: zero the backoff sleep."""
+    monkeypatch.setattr("core.llm_terraform_refiner.REFINER_RETRY_DELAY_SECONDS", 0)
+
+
+def _valid_reply(**overrides) -> str:
+    payload = {
+        "main_tf": CURRENT.main_tf,
+        "variables_tf": CURRENT.variables_tf,
+        "outputs_tf": CURRENT.outputs_tf,
+    }
+    payload.update(overrides)
+    return json.dumps(payload)
 
 
 class TestRefinerNominal:
@@ -76,6 +95,50 @@ class TestRefinerNominal:
         refine_terraform(CURRENT, "make it cheaper please")
 
         assert "make it cheaper please" in captured["prompt"]
+
+    def test_repo_context_is_included_in_the_prompt(self, monkeypatch) -> None:
+        """Gate-2 regeneration with a whole-repo digest: the LLM must see the
+        repo facts, not just the rendered artifacts."""
+        captured = {}
+
+        def fake_call_llm(*args, **kwargs):
+            captured["prompt"] = kwargs.get("prompt", args[0] if args else None)
+            return json.dumps(
+                {
+                    "main_tf": CURRENT.main_tf,
+                    "variables_tf": CURRENT.variables_tf,
+                    "outputs_tf": CURRENT.outputs_tf,
+                }
+            )
+
+        monkeypatch.setattr("core.llm_terraform_refiner.call_llm", fake_call_llm)
+
+        refine_terraform(
+            CURRENT, "use two AZs", repo_context="app listens on port 9000, /healthz"
+        )
+
+        assert "=== CONTEXTE DU DÉPÔT ===" in captured["prompt"]
+        assert "port 9000" in captured["prompt"]
+
+    def test_repo_context_is_omitted_when_absent(self, monkeypatch) -> None:
+        """Backward compatibility: no digest, no repo section in the prompt."""
+        captured = {}
+
+        def fake_call_llm(*args, **kwargs):
+            captured["prompt"] = kwargs.get("prompt", args[0] if args else None)
+            return json.dumps(
+                {
+                    "main_tf": CURRENT.main_tf,
+                    "variables_tf": CURRENT.variables_tf,
+                    "outputs_tf": CURRENT.outputs_tf,
+                }
+            )
+
+        monkeypatch.setattr("core.llm_terraform_refiner.call_llm", fake_call_llm)
+
+        refine_terraform(CURRENT, "cheaper")
+
+        assert "=== CONTEXTE DU DÉPÔT ===" not in captured["prompt"]
 
     def test_valid_dockerfile_in_reply_refines_it(self, monkeypatch) -> None:
         """A container run with a Dockerfile: the LLM may edit it too."""
@@ -174,3 +237,71 @@ class TestRefinerFailSoft:
         files, dockerfile = refine_terraform(CURRENT, "x", dockerfile=DOCKERFILE)
         assert files == CURRENT
         assert dockerfile == DOCKERFILE
+
+
+class TestRefinerRetries:
+    """The free OpenRouter tiers flake on the first reply; the refiner must
+    re-ask (a fresh request each attempt) before settling for fail-soft."""
+
+    def test_retries_after_unusable_output_then_applies(self, monkeypatch) -> None:
+        calls = {"count": 0}
+
+        def flaky_call_llm(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return None
+            return _valid_reply(
+                main_tf='resource "aws_ecs_cluster" "app" {\n  name = "retried"\n}'
+            )
+
+        monkeypatch.setattr("core.llm_terraform_refiner.call_llm", flaky_call_llm)
+
+        files, dockerfile = refine_terraform(CURRENT, "retry please")
+
+        assert calls["count"] == 2
+        assert "retried" in files.main_tf
+        assert dockerfile is None
+
+    def test_retries_past_malformed_reply(self, monkeypatch) -> None:
+        calls = {"count": 0}
+
+        def flaky_call_llm(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] < 3:
+                return "not json at all"
+            return _valid_reply(outputs_tf='output "alb" {\n  value = "x"\n}')
+
+        monkeypatch.setattr("core.llm_terraform_refiner.call_llm", flaky_call_llm)
+
+        files, _ = refine_terraform(CURRENT, "keep trying")
+
+        assert calls["count"] == 3
+        assert '"x"' in files.outputs_tf
+
+    def test_exhausts_attempts_then_keeps_originals(self, monkeypatch) -> None:
+        calls = {"count": 0}
+
+        def always_bad(*args, **kwargs):
+            calls["count"] += 1
+            return "not json"
+
+        monkeypatch.setattr("core.llm_terraform_refiner.call_llm", always_bad)
+        monkeypatch.setattr("core.llm_terraform_refiner.REFINER_MAX_ATTEMPTS", 3)
+
+        files, dockerfile = refine_terraform(CURRENT, "x", dockerfile=DOCKERFILE)
+
+        assert calls["count"] == 3
+        assert files == CURRENT
+        assert dockerfile == DOCKERFILE
+
+    def test_markdown_fenced_json_is_parsed(self, monkeypatch) -> None:
+        _patch_call_llm(
+            monkeypatch,
+            "```json\n"
+            + _valid_reply(main_tf='resource "aws_ecs_cluster" "app" {\n  name = "fenced"\n}')
+            + "\n```",
+        )
+
+        files, _ = refine_terraform(CURRENT, "fence me")
+
+        assert "fenced" in files.main_tf

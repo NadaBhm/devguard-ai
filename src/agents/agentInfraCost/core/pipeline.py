@@ -28,6 +28,9 @@ bare, ambiguous traceback.
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 from core.cost_estimator import estimate_cost
 from core.decision_engine import DecisionResult
 from core.finops_optimizer import FinOpsRecommendation, optimize_finops
@@ -37,9 +40,12 @@ from core.llm_deployment_advisor import decide_deployment_context
 from core.llm_enrichment import build_enrichment
 from core.llm_terraform_refiner import refine_terraform
 from core.output_builder import build_output, resolve_docker_artifacts
+from core.repo_ingestor import ingest_repo
 from core.terraform_generator import generate_terraform
 from models.output_schema import InfraCostOutput
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineContext(BaseModel):
@@ -78,6 +84,27 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
     """
     analysis = validate_input(raw)  # not wrapped: already typed + carries job_id
 
+    # Gate-2 regeneration: digest the whole repository so the OpenRouter LLM
+    # advisors and the Terraform refiner see the real code, not just the
+    # stack-detection metadata module 1 carries. Fail-soft by design: no
+    # repo_path, no digest, or any failure -> the pipeline proceeds exactly
+    # as before (repo_context stays None).
+    if raw.get("repo_path") and analysis.user_feedback:
+        try:
+            repo_context = ingest_repo(
+                Path(raw["repo_path"]),
+                analysis.job_id,
+                commit_sha=analysis.repo_metadata.commit_sha,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[%s] Repo digestion failed; regenerating without repo context: %s",
+                analysis.job_id, exc,
+            )
+            repo_context = None
+        if repo_context:
+            analysis = analysis.model_copy(update={"repo_context": repo_context})
+
     try:
         decision = decide_architecture_via_llm(analysis)
     except Exception as exc:
@@ -111,7 +138,10 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         # can't run.
         if analysis.user_feedback:
             terraform_files, dockerfile = refine_terraform(
-                terraform_files, analysis.user_feedback, dockerfile=dockerfile
+                terraform_files,
+                analysis.user_feedback,
+                dockerfile=dockerfile,
+                repo_context=analysis.repo_context,
             )
     except Exception as exc:
         raise PipelineStageError("terraform_generator", exc) from exc

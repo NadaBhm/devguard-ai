@@ -128,3 +128,57 @@ def test_ec2_synthetic_large_project_end_to_end() -> None:
     output = run_pipeline(raw)
 
     assert isinstance(output, Ec2InfraCostOutput)
+
+
+# --------------------------------------------------------------------------
+# Gate-2 regeneration: whole-repo context
+# --------------------------------------------------------------------------
+
+
+def test_gate2_repo_digest_is_computed_and_reaches_architecture_advisor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When Gate 2 requests regeneration, the pipeline digests the re-cloned
+    repo and feeds the result into the OpenRouter architecture prompt."""
+    raw = _load_raw("sample_input.json")
+    raw["user_feedback"] = "make it cheaper"
+    raw["repo_path"] = str(tmp_path)
+
+    captured: dict = {}
+
+    def _fake_ingest(repo_path, job_id, *, commit_sha=None):
+        captured["path"] = str(repo_path)
+        return "port 8000, health check /health, FastAPI + Postgres"
+
+    def _fake_arch_llm(*args, **kwargs):
+        captured["prompt"] = kwargs.get("prompt", args[0] if args else None)
+        return json.dumps({"compute_type": "ecs", "reasoning": "repo facts say so"})
+
+    monkeypatch.setattr("core.pipeline.ingest_repo", _fake_ingest)
+    monkeypatch.setattr("core.llm_architecture_advisor.call_llm", _fake_arch_llm)
+
+    run_pipeline(raw)
+
+    assert captured["path"] == str(tmp_path)
+    assert "=== CONTEXTE DU DÉPÔT" in captured["prompt"]
+    assert "port 8000" in captured["prompt"]
+
+
+def test_gate2_without_repo_path_never_digests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No re-cloned repo path, no digest call — regression runs untouched."""
+    raw = _load_raw("sample_input.json")
+    raw["user_feedback"] = "cheaper please"
+
+    called = {"n": 0}
+
+    def _fake_ingest(*args, **kwargs):
+        called["n"] += 1
+        return "never"
+
+    monkeypatch.setattr("core.pipeline.ingest_repo", _fake_ingest)
+
+    run_pipeline(raw)
+
+    assert called["n"] == 0

@@ -62,6 +62,27 @@ def test_database_is_passed_through_from_analysis(monkeypatch: pytest.MonkeyPatc
     assert context.database == "postgresql"
 
 
+def test_repo_context_is_included_in_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate-2 regeneration: the deployment-context LLM must see the whole-repo
+    digest before picking region/environment."""
+    analysis = _load_analysis("sample_input.json")
+    analysis = analysis.model_copy(update={"repo_context": "EU users, prod traffic"})
+    captured: dict = {}
+
+    def _fake_call_llm(*args, **kwargs):
+        captured["prompt"] = kwargs.get("prompt", args[0] if args else None)
+        return json.dumps(
+            {"region": "eu-west-1", "environment": "prod", "reasoning": "repo facts"}
+        )
+
+    monkeypatch.setattr("core.llm_deployment_advisor.call_llm", _fake_call_llm)
+
+    decide_deployment_context(analysis, job_id="job-1", docker_image=None)
+
+    assert "=== CONTEXTE DU DÉPÔT" in captured["prompt"]
+    assert "EU users" in captured["prompt"]
+
+
 def test_source_code_path_passes_through_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     analysis = _load_analysis("sample_input.json")
     _patch_call_llm(monkeypatch, None)

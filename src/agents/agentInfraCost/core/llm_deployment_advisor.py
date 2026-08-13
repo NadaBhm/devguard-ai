@@ -81,6 +81,11 @@ def _build_prompt(analysis: RepoAnalysisInput) -> str:
             "\n\nContrainte supplémentaire de l'utilisateur (prioritaire) :\n"
             f"{analysis.user_feedback}"
         )
+    if analysis.repo_context:
+        prompt += (
+            "\n\n=== CONTEXTE DU DÉPÔT (faits extraits par le LLM) ===\n"
+            f"{analysis.repo_context}"
+        )
     return prompt
 
 

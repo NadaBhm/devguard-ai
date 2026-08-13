@@ -79,6 +79,25 @@ def test_llm_choice_reuses_deterministic_sizing_tiers(monkeypatch: pytest.Monkey
     assert set(result.sizing.keys()) == {"memory_mb"}
 
 
+def test_repo_context_is_included_in_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate-2 regeneration: the architecture LLM must see the whole-repo
+    digest, not just stack-detection metadata."""
+    analysis = _load_analysis("sample_input.json")
+    analysis = analysis.model_copy(update={"repo_context": "exposes /health on port 8000"})
+    captured: dict = {}
+
+    def _fake_call_llm(*args, **kwargs):
+        captured["prompt"] = kwargs.get("prompt", args[0] if args else None)
+        return json.dumps({"compute_type": "ecs", "reasoning": "repo facts"})
+
+    monkeypatch.setattr("core.llm_architecture_advisor.call_llm", _fake_call_llm)
+
+    decide_architecture_via_llm(analysis)
+
+    assert "=== CONTEXTE DU DÉPÔT" in captured["prompt"]
+    assert "port 8000" in captured["prompt"]
+
+
 # --------------------------------------------------------------------------
 # Limit / edge cases -- every one of these must fall back deterministically
 # --------------------------------------------------------------------------

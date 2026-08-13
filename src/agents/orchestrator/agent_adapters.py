@@ -48,6 +48,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -288,15 +290,39 @@ async def call_infracost(
     except Exception:
         logger.warning("[%s] Could not resolve AWS account ID for ECR image URI; "
                         "Terraform will be generated with a bare image name.", job_id)
+
+    repo_path: str | None = None
     if feedback:
         # InfraCost's RepoAnalysisInput carries this optional field; threading
         # it through the raw dict lets the pipeline's LLM advisors and the
         # new Terraform refiner act on the user's request.
         raw_input["user_feedback"] = feedback
+        # CodeSec deletes its clone the moment analysis finishes, so at
+        # Gate 2 we re-clone the repo and let the pipeline digest the whole
+        # codebase for the OpenRouter LLM (see core.repo_ingestor). Fail-soft:
+        # if the clone fails, the regeneration proceeds exactly as before,
+        # without repo context.
+        try:
+            from src.lib.repo import clone_repo  # lazy: shared clone helper
+            repo_path = tempfile.mkdtemp(prefix=f"devguard-repo-{job_id[:8]}-")
+            clone_repo(codesec_result.get("repo_url", ""), repo_path)
+            raw_input["repo_path"] = repo_path
+        except Exception as exc:
+            logger.warning(
+                "[%s] Could not re-clone repo for Gate-2 regeneration; "
+                "regenerating without repo context: %s", job_id, exc,
+            )
+            if repo_path:
+                shutil.rmtree(repo_path, ignore_errors=True)
+                repo_path = None
 
-    result = await asyncio.get_event_loop().run_in_executor(
-        None, _run_infracost_pipeline, raw_input
-    )
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _run_infracost_pipeline, raw_input
+        )
+    finally:
+        if repo_path:
+            shutil.rmtree(repo_path, ignore_errors=True)
     return normalize_infracost_result(result)
 
 

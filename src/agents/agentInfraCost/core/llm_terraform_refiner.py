@@ -31,10 +31,12 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Final
 
 from pydantic import BaseModel, ValidationError
 
+from core.constants import REFINER_MAX_ATTEMPTS, REFINER_RETRY_DELAY_SECONDS
 from core.llm_provider import call_llm
 from models.output_schema import TerraformFiles
 
@@ -52,7 +54,10 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     "le contenu complet du fichier, échappé dans la chaîne JSON. Si le "
     "Dockerfile n'est pas fourni en entrée, renvoie null. Ne modifie ni la "
     "configuration de l'architecture ni les valeurs de dimensionnement déjà "
-    "décidées, sauf si la demande le dit explicitement."
+    "décidées, sauf si la demande le dit explicitement. Le "
+    "'=== CONTEXTE DU DÉPÔT ===' est un résumé de faits extraits du code du "
+    "dépôt, donné uniquement pour information : il n'autorise jamais à créer "
+    "des fichiers supplémentaires ni à sortir des trois fichiers fournis."
 )
 
 
@@ -70,9 +75,17 @@ class _RefinedTerraform(BaseModel):
     dockerfile: str | None = None
 
 
-def _build_prompt(current: TerraformFiles, dockerfile: str | None, feedback: str) -> str:
+def _build_prompt(
+    current: TerraformFiles,
+    dockerfile: str | None,
+    feedback: str,
+    repo_context: str | None = None,
+) -> str:
     docker_block = (
         "=== Dockerfile ===\n" f"{dockerfile}\n\n" if dockerfile else "=== Dockerfile ===\n(aucun Dockerfile fourni)\n\n"
+    )
+    repo_block = (
+        "=== CONTEXTE DU DÉPÔT ===\n" f"{repo_context}\n\n" if repo_context else ""
     )
     return (
         "=== main.tf ===\n"
@@ -82,6 +95,7 @@ def _build_prompt(current: TerraformFiles, dockerfile: str | None, feedback: str
         "=== outputs.tf ===\n"
         f"{current.outputs_tf}\n\n"
         f"{docker_block}"
+        f"{repo_block}"
         "=== DEMANDE DE L'UTILISATEUR ===\n"
         f"{feedback}\n\n"
         "Renvoie les trois fichiers (et le Dockerfile si fourni) modifiés en JSON."
@@ -91,8 +105,19 @@ def _build_prompt(current: TerraformFiles, dockerfile: str | None, feedback: str
 def _parse_llm_output(raw_text: str | None) -> _RefinedTerraform | None:
     if not raw_text:
         return None
+    text = raw_text.strip()
+    if text.startswith("```"):
+        # Free-tier providers sometimes wrap the JSON in a markdown code
+        # fence. Strip the opening ```lang marker and the closing ``` before
+        # parsing so a valid payload isn't rejected over formatting.
+        text = text[3:]
+        if text[:4].lower() == "json":
+            text = text[4:]
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+        text = text.strip()
     try:
-        payload = json.loads(raw_text)
+        payload = json.loads(text)
         return _RefinedTerraform.model_validate(payload)
     except (json.JSONDecodeError, ValidationError, TypeError) as exc:
         logger.warning("LLM Terraform refinement failed validation: %s", exc)
@@ -108,6 +133,7 @@ def refine_terraform(
     current: TerraformFiles,
     feedback: str,
     dockerfile: str | None = None,
+    repo_context: str | None = None,
 ) -> tuple[TerraformFiles, str | None]:
     """Refine the rendered artifacts from a user prompt.
 
@@ -117,41 +143,53 @@ def refine_terraform(
         dockerfile: the effective Dockerfile content (if this is a container
             deployment), refined alongside the Terraform when the LLM edits
             it.
+        repo_context: the whole-repo digest (``core.repo_ingestor``) so the
+            LLM can honor the request against the real code, not just the
+            rendered artifacts.
 
     Returns:
         A ``(TerraformFiles, dockerfile)`` pair honoring the request, or — on
         any LLM failure or invalid output — ``(current, dockerfile)``
         unchanged (fail-soft, same contract as every other LLM call here).
     """
-    raw_text = call_llm(
-        prompt=_build_prompt(current, dockerfile, feedback),
-        system_instruction=_SYSTEM_INSTRUCTION,
-    )
-    refined = _parse_llm_output(raw_text)
-    if refined is None:
-        logger.info("Artifact refiner unavailable or invalid; keeping original files")
-        return current, dockerfile
+    for attempt in range(1, REFINER_MAX_ATTEMPTS + 1):
+        raw_text = call_llm(
+            prompt=_build_prompt(current, dockerfile, feedback, repo_context=repo_context),
+            system_instruction=_SYSTEM_INSTRUCTION,
+        )
+        refined = _parse_llm_output(raw_text)
+        if (
+            refined is not None
+            and _valid_file(refined.main_tf)
+            and _valid_file(refined.variables_tf)
+            and _valid_file(refined.outputs_tf)
+        ):
+            # Dockerfile: refine only when one exists AND the LLM returned a
+            # valid replacement. Backward-compatible: Terraform-only responses
+            # keep the original Dockerfile untouched.
+            refined_dockerfile = dockerfile
+            if dockerfile is not None and refined.dockerfile is not None:
+                if not _valid_file(refined.dockerfile):
+                    logger.warning("Artifact refiner returned an empty Dockerfile; keeping original")
+                else:
+                    refined_dockerfile = refined.dockerfile
 
-    if not (_valid_file(refined.main_tf) and _valid_file(refined.variables_tf) and _valid_file(refined.outputs_tf)):
-        logger.warning("Artifact refiner returned empty files; keeping originals")
-        return current, dockerfile
+            logger.info("Artifact refiner applied user feedback")
+            return (
+                TerraformFiles(
+                    main_tf=refined.main_tf,
+                    variables_tf=refined.variables_tf,
+                    outputs_tf=refined.outputs_tf,
+                ),
+                refined_dockerfile,
+            )
 
-    # Dockerfile: refine only when one exists AND the LLM returned a valid
-    # replacement. Backward-compatible: Terraform-only responses keep the
-    # original Dockerfile untouched.
-    refined_dockerfile = dockerfile
-    if dockerfile is not None and refined.dockerfile is not None:
-        if not _valid_file(refined.dockerfile):
-            logger.warning("Artifact refiner returned an empty Dockerfile; keeping original")
-        else:
-            refined_dockerfile = refined.dockerfile
+        if attempt < REFINER_MAX_ATTEMPTS:
+            logger.warning(
+                "Artifact refiner attempt %d/%d produced unusable output; retrying",
+                attempt, REFINER_MAX_ATTEMPTS,
+            )
+            time.sleep(REFINER_RETRY_DELAY_SECONDS)
 
-    logger.info("Artifact refiner applied user feedback")
-    return (
-        TerraformFiles(
-            main_tf=refined.main_tf,
-            variables_tf=refined.variables_tf,
-            outputs_tf=refined.outputs_tf,
-        ),
-        refined_dockerfile,
-    )
+    logger.info("Artifact refiner unavailable or invalid; keeping original files")
+    return current, dockerfile

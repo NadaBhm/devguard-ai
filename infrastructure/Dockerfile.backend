@@ -3,14 +3,25 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# lib.rag.* (RAG ingestion/chat) lives under src/, so /app/src must be on the
+# path for `from lib.rag... import ...` inside the codesec agent and chat API.
+ENV PYTHONPATH=/app/src
+
 # System deps needed by some scanners/tools used by CodeSec/DeployOps later
-# (git for repo cloning, curl for healthchecks/debugging)
+# (git for repo cloning, curl for healthchecks/debugging). Binary assets
+# (awscli, gitleaks, trivy, hadolint) have arch-specific names, so pick the
+# right suffix from the image arch instead of assuming x86_64.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     unzip \
     ca-certificates \
     gnupg \
+    && case "$(dpkg --print-architecture)" in \
+         amd64) AWS=linux-x86_64; GITLEAKS=linux_x64; TRIVY=Linux-64bit; HADOLINT=Linux-x86_64 ;; \
+         arm64) AWS=linux-aarch64; GITLEAKS=linux_arm64; TRIVY=Linux-ARM64; HADOLINT=Linux-arm64 ;; \
+         *) echo "Unsupported architecture: $(dpkg --print-architecture)"; exit 1 ;; \
+       esac \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
     && chmod a+r /etc/apt/keyrings/docker.gpg \
@@ -20,22 +31,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update \
     && apt-get install -y --no-install-recommends docker-ce-cli terraform \
     && rm -rf /var/lib/apt/lists/* \
-    && curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" \
+    && curl "https://awscli.amazonaws.com/awscli-exe-$AWS.zip" -o "awscliv2.zip" \
     && unzip awscliv2.zip \
     && ./aws/install \
     && rm -rf awscliv2.zip aws \
-    && curl -sSfL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_$(uname -s)_$(uname -m).tar.gz -o gitleaks.tar.gz \
+    && curl -sSfL https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks_8.30.1_$GITLEAKS.tar.gz -o gitleaks.tar.gz \
     && tar -xzf gitleaks.tar.gz gitleaks \
     && install -m 0755 gitleaks /usr/local/bin/gitleaks \
     && rm -f gitleaks.tar.gz gitleaks \
-    && curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_$(uname -s)-$(uname -m).tar.gz -o trivy.tar.gz \
+    && curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.73.0_$TRIVY.tar.gz -o trivy.tar.gz \
     && tar -xzf trivy.tar.gz trivy \
     && install -m 0755 trivy /usr/local/bin/trivy \
     && rm -f trivy.tar.gz trivy \
-    && curl -sSfL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-$(uname -s)-$(uname -m) -o /usr/local/bin/hadolint \
+    && curl -sSfL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-$HADOLINT -o /usr/local/bin/hadolint \
     && chmod +x /usr/local/bin/hadolint
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Real CodeSec scanner deps (semgrep, bandit, pip-audit, safety, cyclonedx-bom).
+# CLI tools these provide are invoked via subprocess by src/agents/codesec.
+COPY src/agents/codesec/requirements.txt ./codesec-requirements.txt
+RUN pip install --no-cache-dir -r codesec-requirements.txt
 
 # Alembic needs its config + migration scripts (at repo root) alongside src/.
 # alembic/env.py appends '..' to sys.path and imports src.backend.models, so

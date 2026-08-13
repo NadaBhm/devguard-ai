@@ -4,7 +4,7 @@ import logging
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import auth, crud
+from . import auth, crud, models
 from .database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -143,7 +143,7 @@ def _authenticate(token: str | None):
     if not token:
         return None
     payload = auth.decode_token(token)
-    if not payload:
+    if not payload or payload.get("type") == "refresh":
         return None
     email = payload.get("sub")
     if not email:
@@ -151,6 +151,23 @@ def _authenticate(token: str | None):
     db = SessionLocal()
     try:
         return crud.get_user_by_email(db, email=email)
+    finally:
+        db.close()
+
+
+def _owns_job(user, job_id: str) -> bool:
+    """True if the authenticated user triggered the run for ``job_id``."""
+    db = SessionLocal()
+    try:
+        run = (
+            db.query(models.AnalysisRun)
+            .filter(
+                models.AnalysisRun.id == job_id,
+                models.AnalysisRun.triggered_by == user.id,
+            )
+            .first()
+        )
+        return run is not None
     finally:
         db.close()
 
@@ -163,6 +180,9 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
     user = _authenticate(websocket.query_params.get("token"))
     if user is None:
         await websocket.close(code=4401, reason="Unauthorized")
+        return
+    if not _owns_job(user, job_id):
+        await websocket.close(code=4403, reason="Forbidden")
         return
     await manager.connect(websocket, job_id)
     try:

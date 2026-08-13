@@ -182,8 +182,27 @@ def build_template_context(state: OrchestratorState) -> dict[str, Any]:
         region = entry.get("region", "")
         break
 
+    # Report mode: never let a demo mix fabricated (mock) and real agent
+    # results silently. "mock" / "mixed" / "real" is stamped into the report
+    # so readers know whether the costs/deployments shown are real.
+    from .agent_adapters import (
+        report_mode,
+        use_real_codesec,
+        use_real_deployops,
+        use_real_infracost,
+    )
+
+    mode = report_mode()
+    agent_modes = {
+        "codesec": use_real_codesec(),
+        "infracost": use_real_infracost(),
+        "deployops": use_real_deployops(),
+    }
+
     return {
         "job_id": state.get("job_id", ""),
+        "mode": mode,
+        "agent_modes": agent_modes,
         "repo_url": state.get("repo_url", ""),
         "repo_name": (codesec.get("repo_metadata") or {}).get("name")
                      or (state.get("repo_url", "").rstrip("/").split("/")[-1] or "repository"),

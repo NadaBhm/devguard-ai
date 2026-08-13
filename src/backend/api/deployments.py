@@ -13,11 +13,12 @@ def list_deployments(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user),
 ):
-    """List all deployments with their run/project context, most recent first."""
+    """List the current user's deployments with run/project context, most recent first."""
     query = (
         db.query(models.Deployment)
         .join(models.AnalysisRun, models.AnalysisRun.id == models.Deployment.run_id)
         .join(models.Project, models.Project.id == models.AnalysisRun.project_id)
+        .filter(models.AnalysisRun.triggered_by == current_user.id)
     )
     if environment:
         query = query.filter(models.Deployment.environment == environment)

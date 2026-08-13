@@ -36,6 +36,7 @@
   code { background: #f5f7fa; padding: 1px 4px; border-radius: 3px; font-size: 9pt; }
   ul { margin: 6px 0; padding-left: 18px; } li { margin-bottom: 3px; }
   .footer { margin-top: 30px; padding-top: 10px; border-top: 1px solid #e4e7eb; font-size: 8.5pt; color: #829ab1; }
+  .mode-warn { margin: 14px 0; padding: 10px 12px; border: 1px solid #d97706; background: #fffbeb; border-radius: 6px; font-size: 9.5pt; color: #92400e; }
 </style>
 </head>
 <body>
@@ -45,6 +46,15 @@
   <strong>{{ repo_url }}</strong><br>
   Job <code>{{ job_id }}</code> &middot; generated {{ generated_at }} &middot; pipeline completed in {{ duration_seconds }}s
 </p>
+
+{% if mode != "real" %}
+<div class="mode-warn">
+  <strong>{{ "Mixed mode" if mode == "mixed" else "Demo mode" }}:</strong>
+  {% if mode == "mixed" %}this run combined real and simulated agent output{% else %}this run used simulated agent output{% endif %}
+  ({% for agent, real in agent_modes.items() %}{{ "real " + agent if real else "simulated " + agent }}{% if not loop.last %}, {% endif %}{% endfor %}).
+  Costs, findings and deployment results from simulated agents are illustrative, not from a live scan/deploy.
+</div>
+{% endif %}
 
 <table class="kpi"><tr>
   <td><span class="value">{{ security_score }}/100</span><span class="label">Security score (grade {{ security_grade }})</span></td>

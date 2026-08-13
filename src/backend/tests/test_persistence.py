@@ -7,7 +7,11 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 from src.backend import models  # noqa: E402
-from src.backend.persistence import derive_results_from_state, persist_results  # noqa: E402
+from src.backend.persistence import (  # noqa: E402
+    derive_results_from_state,
+    persist_results,
+    serialize_state,
+)
 
 
 @pytest.fixture
@@ -267,3 +271,105 @@ def test_derive_results_from_state_includes_docker_artifacts() -> None:
     assert by_path["Dockerfile"]["content"] == "FROM python:3.11-slim\nCOPY . /app\n"
     assert by_path["docker-image.json"]["artifact_type"] == "docker-image"
     assert "sha-live" in by_path["docker-image.json"]["content"]
+
+
+def test_persist_results_normalizes_severities_for_db_constraint(db: Session) -> None:
+    """Real semgrep/gitleaks severities (error/warning/info) violate the
+    ck_codesec_findings_severity constraint; persistence must map them into
+    the allowed set instead of failing mid-commit."""
+    state = _make_state({"main_tf": "resource \"x\" {}"})
+    state["codesec_result"] = {
+        "sast_findings": [
+            {
+                "file": "a.py", "line": 1, "tool": "semgrep",
+                "severity": "error", "rule_id": "E1", "message": "x",
+            },
+            {
+                "file": "b.py", "line": 2, "tool": "semgrep",
+                "severity": "warning", "rule_id": "W1", "message": "y",
+            },
+            {
+                "file": "c.py", "line": 3, "tool": "semgrep",
+                "severity": "info", "rule_id": "I1", "message": "z",
+            },
+            {
+                "file": "d.py", "line": 4, "tool": "semgrep",
+                "rule_id": "M1", "message": "m",
+            },
+        ]
+    }
+    persist_results(db, "test-run-sev", state)
+
+    rows = db.query(models.CodeSecFinding).filter_by(run_id="test-run-sev").all()
+    by_rule = {r.rule_id: r for r in rows}
+    assert by_rule["E1"].severity == "high"
+    assert by_rule["W1"].severity == "medium"
+    assert by_rule["I1"].severity == "low"
+    assert by_rule["M1"].severity == "low"
+
+
+def test_persist_results_materializes_secrets(db: Session) -> None:
+    """Secret findings (gitleaks/builtin) previously vanished on completion;
+    they must be persisted as CodeSecFinding rows."""
+    state = _make_state({"main_tf": "resource \"x\" {}"})
+    state["codesec_result"] = {
+        "secrets": [
+            {
+                "type": "aws_access_key_id",
+                "tool": "gitleaks",
+                "file": "src/config.py",
+                "line": 12,
+                "severity": "high",
+                "value_preview": "AKIA***",
+                "remediation": "Rotate the key",
+            },
+            {
+                "type": "generic_api_key",
+                "tool": "gitleaks",
+                "file": "src/client.js",
+                "line": 8,
+                "severity": "info",
+                "value_preview": "sk-***",
+                "remediation": "Move to a secret manager",
+            },
+        ]
+    }
+    written = persist_results(db, "test-run-secrets", state)
+
+    rows = db.query(models.CodeSecFinding).filter_by(run_id="test-run-secrets").all()
+    assert written >= len(rows)
+    assert {r.scanner for r in rows} == {"gitleaks"}
+    by_file = {r.file_path: r for r in rows}
+    assert by_file["src/config.py"].rule_id == "aws_access_key_id"
+    assert by_file["src/config.py"].severity == "high"
+    assert by_file["src/client.js"].severity == "low"
+    assert by_file["src/client.js"].description == "sk-***"
+
+
+class _FakeInterrupt:
+    """Stand-in for langgraph.types.Interrupt (value dict, not a dict itself)."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+def test_serialize_state_preserves_gate_interrupt():
+    state = {
+        "status": "awaiting_approval_gate_2",
+        "job_id": "run-1",
+        "__interrupt__": [
+            _FakeInterrupt({
+                "gate": "gate_2_pre_deployops",
+                "message": "Review cost",
+                "context": {"iteration": 1, "max_iterations": 3, "monthly_cost_usd": 145.32},
+            })
+        ],
+        "__private_scratch": "must not leak",
+    }
+
+    out = serialize_state(state)
+
+    assert out["__interrupt__"][0]["value"]["gate"] == "gate_2_pre_deployops"
+    assert out["__interrupt__"][0]["value"]["context"]["iteration"] == 1
+    assert out["__interrupt__"][0]["value"]["context"]["monthly_cost_usd"] == 145.32
+    assert "__private_scratch" not in out

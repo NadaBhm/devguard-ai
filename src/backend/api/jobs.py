@@ -46,6 +46,7 @@ from ..persistence import (
     _artifact_specs,
 )
 from ..redis_client import publish_gate, publish_progress, publish_results_ready
+from src.agents.orchestrator.agent_adapters import report_mode
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,22 @@ def _create_run(
     db.add(run)
     db.commit()
     db.refresh(run)
+    return run
+
+
+def _get_owned_run(db: Session, job_id: str, user_id: str) -> models.AnalysisRun:
+    """Fetch a run that belongs to ``user_id`` or 404 (without revealing the
+    run's existence to other tenants)."""
+    run = (
+        db.query(models.AnalysisRun)
+        .filter(
+            models.AnalysisRun.id == job_id,
+            models.AnalysisRun.triggered_by == user_id,
+        )
+        .first()
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Job not found")
     return run
 
 
@@ -195,6 +212,7 @@ def create_job(
         "status": run.status,
         "orchestrator_status": state.get("status"),
         "gate": gate,
+        "mode": report_mode(),
         "state": serialize_state(state),
     }
 
@@ -207,9 +225,7 @@ def approve_job(
     current_user: models.User = Depends(get_current_user),
 ):
     """Resume a paused workflow at its human gate with an approval/rejection."""
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    run = _get_owned_run(db, job_id, current_user.id)
 
     try:
         from src.agents.orchestrator.graph import resume_workflow
@@ -254,6 +270,7 @@ def approve_job(
         "status": run.status,
         "orchestrator_status": state.get("status"),
         "gate": _current_gate(state),
+        "mode": report_mode(),
         "state": serialize_state(state),
     }
 
@@ -279,9 +296,7 @@ def edit_artifacts(
     if not body.files:
         raise HTTPException(status_code=422, detail="No artifact edits supplied")
 
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    run = _get_owned_run(db, job_id, current_user.id)
 
     state = run.run_metadata or {}
     gate = _current_gate(state)
@@ -399,9 +414,7 @@ def rollback_job(
     Delegates to DeployOpsAgent.rollback_deployment using the AWS config and
     service details captured in the run's persisted deployment record.
     """
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    run = _get_owned_run(db, job_id, current_user.id)
 
     deployment = (
         db.query(models.Deployment)
@@ -482,9 +495,7 @@ def list_deployment_revisions(
 
     Powers the "roll back to a specific version" dropdown in the UI.
     """
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    _get_owned_run(db, job_id, current_user.id)
 
     deployment = (
         db.query(models.Deployment)
@@ -569,9 +580,7 @@ def get_job_results(
     current_user: models.User = Depends(get_current_user),
 ):
     """Return the normalized result tables for a run (findings, cost, IaC, deploy)."""
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    run = _get_owned_run(db, job_id, current_user.id)
 
     def _rows(query):
         return [dict((c.name, getattr(r, c.name)) for c in r.__table__.columns) for r in query]
@@ -625,9 +634,7 @@ def download_sbom(
     current_user: models.User = Depends(get_current_user),
 ):
     """Serve the CycloneDX SBOM generated for a job as a JSON attachment."""
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    run = _get_owned_run(db, job_id, current_user.id)
 
     sbom = (run.run_metadata or {}).get("codesec_result", {}).get("sbom")
     if not sbom:
@@ -648,9 +655,7 @@ def download_report(
     current_user: models.User = Depends(get_current_user),
 ):
     """Serve the final HTML/PDF report for a job, regenerating it on demand."""
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    run = _get_owned_run(db, job_id, current_user.id)
 
     from src.agents.orchestrator.report import DEFAULT_REPORT_DIR, generate_report
 
@@ -685,9 +690,7 @@ def get_job(
     current_user: models.User = Depends(get_current_user),
 ):
     """Return the persisted job state (analysis run + full orchestrator state)."""
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Job not found")
+    run = _get_owned_run(db, job_id, current_user.id)
 
     state = run.run_metadata or {}
     return {
@@ -698,6 +701,7 @@ def get_job(
         "duration_seconds": run.duration_seconds,
         "orchestrator_status": state.get("status"),
         "gate": _current_gate(state),
+        "mode": report_mode(),
         "state": state,
     }
 
@@ -708,9 +712,10 @@ def list_jobs(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """List all analysis runs with their coarse status."""
+    """List the current user's analysis runs with their coarse status."""
     runs = (
         db.query(models.AnalysisRun)
+        .filter(models.AnalysisRun.triggered_by == current_user.id)
         .order_by(models.AnalysisRun.started_at.desc())
         .limit(100)
         .all()

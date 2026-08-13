@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from pathlib import Path
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import auth, models
 from ..database import get_db
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -46,26 +46,38 @@ class IngestRequest(BaseModel):
     job_id: str
 
 
-def _load_job_state(job_id: str, db: Session) -> dict | None:
+def _load_job_state(job_id: str, db: Session, user_id: str) -> dict | None:
     """
     Reconstruct the orchestrator state chat() needs (codesec_result,
     infracost_result, deployops_result, status) from the persisted
-    AnalysisRun row. Returns None if the job doesn't exist yet - chat()
-    handles that fine (falls back to RAG-only answers).
+    AnalysisRun row, scoped to the requesting user. Returns None if the
+    job doesn't exist (or isn't the user's) - chat() handles that fine
+    (falls back to RAG-only answers).
     """
-    run = db.query(models.AnalysisRun).filter(models.AnalysisRun.id == job_id).first()
+    run = (
+        db.query(models.AnalysisRun)
+        .filter(
+            models.AnalysisRun.id == job_id,
+            models.AnalysisRun.triggered_by == user_id,
+        )
+        .first()
+    )
     if not run or not run.run_metadata:
         return None
     return run.run_metadata
 
 
 @router.post("/ask", response_model=ChatResponse)
-async def ask_question(req: ChatRequest, db: Session = Depends(get_db)):
+async def ask_question(
+    req: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_active_user),
+):
     """Ask a question about an analyzed repository, using job context + RAG + memory."""
     try:
         from src.agents.orchestrator.chat import chat as orchestrator_chat
 
-        state = _load_job_state(req.job_id, db)
+        state = _load_job_state(req.job_id, db, current_user.id)
         result = orchestrator_chat(req.job_id, req.query, state)
 
         return ChatResponse(
@@ -82,7 +94,10 @@ async def ask_question(req: ChatRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/ingest")
-async def ingest_repository(req: IngestRequest):
+async def ingest_repository(
+    req: IngestRequest,
+    current_user: models.User = Depends(auth.get_current_active_user),
+):
     """Ingest a repository into the RAG vector store."""
     try:
         from ...lib.rag.ingestion import ingest_repo

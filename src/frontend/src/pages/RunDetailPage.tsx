@@ -6,6 +6,7 @@ import { useWebSocket } from "../hooks/useWebSocket"
 import { Spinner } from "../components/ui/Button"
 import { Card } from "../components/ui/Card"
 import { RunStatusBadge } from "../components/jobs/RunStatusBadge"
+import { ModeBadge } from "../components/jobs/ModeBadge"
 import { RunTabs, type RunTab } from "../components/jobs/RunTabs"
 import { ProgressTimeline } from "../components/jobs/ProgressTimeline"
 import { GateApproval } from "../components/jobs/GateApproval"
@@ -155,6 +156,7 @@ export function RunDetailPage() {
               {repo ?? "Analysis run"}
             </h1>
             <RunStatusBadge status={job.status} orchestratorStatus={orchestratorStatus} />
+            <ModeBadge mode={job.mode} />
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-faint">
             <span>Started {formatDate(job.started_at)}</span>

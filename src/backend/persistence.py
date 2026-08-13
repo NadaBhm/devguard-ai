@@ -25,6 +25,29 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = ("completed", "rolled_back", "failed", "rejected")
 
+# The codesec agent's Severity enum includes "info", but the
+# ck_codesec_findings_severity CHECK constraint only accepts the classic
+# four. Map everything into the constrained set so real-mode scans can't
+# 500 on commit.
+_ALLOWED_SEVERITIES = ("critical", "high", "medium", "low")
+
+
+def _normalize_severity(severity: str | None) -> str:
+    value = (severity or "").strip().lower()
+    mapping = {
+        "critical": "critical",
+        "high": "high",
+        "error": "high",
+        "medium": "medium",
+        "warning": "medium",
+        "low": "low",
+        "note": "low",
+        "info": "low",
+        "informational": "low",
+        "unknown": "low",
+    }
+    return mapping.get(value, "low")
+
 
 def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
     """Pull the Docker artifacts from an orchestrator ``state``/``run_metadata``.
@@ -108,9 +131,27 @@ def coarse_status(orch_status: str) -> str:
     return "running"
 
 
+def _jsonable_interrupt(entry):
+    """LangGraph ``Interrupt`` objects -> the dict shape the frontend expects
+    (``state.__interrupt__[i].value.{gate,message,context,...}``). Plain dicts
+    (already-serialized states) pass through unchanged."""
+    if isinstance(entry, dict):
+        return entry
+    value = getattr(entry, "value", None)
+    if value is not None:
+        return {"value": value}
+    return entry
+
+
 def serialize_state(state: dict) -> dict:
-    """Make an orchestrator state dict JSON-safe (drop __interrupt__, coerce values)."""
+    """Make an orchestrator state dict JSON-safe, preserving the human-gate
+    interrupt payload (``__interrupt__``) the frontend's GateApproval reads —
+    it carries the gate context (iteration, cost breakdown, recommendations)
+    that would otherwise be lost, leaving the approval card blank."""
     clean = {k: v for k, v in state.items() if not k.startswith("__")}
+    interrupt = state.get("__interrupt__")
+    if interrupt is not None:
+        clean["__interrupt__"] = [_jsonable_interrupt(entry) for entry in interrupt]
     return json.loads(json.dumps(clean, default=str))
 
 
@@ -176,12 +217,30 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         db.add(CodeSecFinding(
             run_id=run_id,
             scanner=finding.get("tool", "semgrep"),
-            severity=finding.get("severity", "info"),
+            severity=_normalize_severity(finding.get("severity", "low")),
             file_path=finding.get("file", ""),
             line_number=finding.get("line"),
             rule_id=finding.get("rule_id", "unknown"),
             rule_title=finding.get("message", "No title"),
             description=finding.get("message", ""),
+            remediation_hint=finding.get("remediation"),
+            raw_json=finding,
+        ))
+        written += 1
+
+    # Secrets (gitleaks/builtin) were never materialized, so they vanished
+    # once a run completed even though the UI surfaces them while paused.
+    for finding in codesec.get("secrets", []):
+        secret_type = finding.get("type", "secret")
+        db.add(CodeSecFinding(
+            run_id=run_id,
+            scanner=finding.get("tool", "gitleaks"),
+            severity=_normalize_severity(finding.get("severity", "high")),
+            file_path=finding.get("file", ""),
+            line_number=finding.get("line"),
+            rule_id=finding.get("rule_id", secret_type),
+            rule_title=f"Hardcoded {secret_type} secret",
+            description=finding.get("value_preview", ""),
             remediation_hint=finding.get("remediation"),
             raw_json=finding,
         ))

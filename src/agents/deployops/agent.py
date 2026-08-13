@@ -957,6 +957,13 @@ class DeployOpsAgent:
                 raise ValueError("docker_image.tag is required and must be a string")
             if not docker_image.get("platform") or not isinstance(docker_image.get("platform"), str):
                 raise ValueError("docker_image.platform is required and must be a string")
+            if not re.match(r'^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$', docker_image["tag"]):
+                raise ValueError("docker_image.tag contains invalid characters")
+            context_path = Path(docker_image["context"])
+            if context_path.is_absolute() or ".." in context_path.parts:
+                raise ValueError(
+                    "docker_image.context must be a safe relative path inside the workspace"
+                )
         
         # 3. AWS Config
         aws_config = payload["aws_config"]

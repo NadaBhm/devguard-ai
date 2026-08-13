@@ -80,6 +80,16 @@ def use_real_deployops() -> bool:
     return _flag("DEVGUARD_REAL_DEPLOYOPS")
 
 
+def report_mode() -> str:
+    """``real`` / ``mixed`` / ``mock`` — whether live agents actually ran.
+
+    Used for the honesty badge on the report and the UI: a run that mixes
+    fabricated and real agent output must say so rather than look real.
+    """
+    flags = (use_real_codesec(), use_real_infracost(), use_real_deployops())
+    return "real" if all(flags) else ("mixed" if any(flags) else "mock")
+
+
 # =============================================================================
 # ASYNC -> SYNC BRIDGE
 # =============================================================================
@@ -378,6 +388,13 @@ def _mock_infracost_with_feedback(
     return result
 
 
+def _money_amount(value: Any) -> Any:
+    """The scalar inside a Money dump ({amount,...}) — or the scalar itself."""
+    if isinstance(value, dict):
+        return value.get("amount")
+    return value
+
+
 def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
     """
     Defensive normalization on top of Karim's to_orchestrator_result().
@@ -387,10 +404,16 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
     (output.aws_config.estimated_monthly_cost.model_dump() ->
     {amount, currency, range_min, range_max}) rather than the schema's
     documented {monthly_cost_usd, currency, breakdown, range_min, range_max}.
-    Caught by test_schema_conformance.py, which is exactly what that test
-    suite is for. Idempotent: already-normalized input (monthly_cost_usd
-    present) passes through unchanged, so this is safe to call even if
-    Karim fixes this upstream later.
+    The nested arrays have the same problem: load_scenarios/region_comparison
+    carry Money objects under ``estimated_monthly_cost`` (not the documented
+    ``estimated_monthly_cost_usd`` / ``monthly_cost_usd``) and optimizations
+    use the FinOps ``name``/``reason``/``projected_monthly_savings`` (not the
+    documented ``strategy``/``description``/``projected_savings_usd``), so the
+    report's cost tables render blank for real runs. Caught by
+    test_schema_conformance.py, which is exactly what that suite is for.
+    Idempotent: already-normalized input (the documented field names present)
+    passes through unchanged, so this is safe to call even if Karim fixes
+    this upstream later.
     """
     result = dict(result)
     cost = dict(result.get("cost_estimate") or {})
@@ -403,6 +426,53 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
             "range_max": cost.get("range_max"),
         }
         result["cost_estimate"] = cost
+
+    # load_scenarios: Money dict -> estimated_monthly_cost_usd, and derive the
+    # documented scaling_assumptions prose from the agent's sizing dict.
+    scenarios = []
+    for item in result.get("load_scenarios") or []:
+        item = dict(item)
+        if "estimated_monthly_cost_usd" not in item:
+            amount = _money_amount(item.get("estimated_monthly_cost"))
+            if amount is not None:
+                item["estimated_monthly_cost_usd"] = amount
+        if not item.get("scaling_assumptions") and isinstance(item.get("sizing"), dict):
+            item["scaling_assumptions"] = ", ".join(
+                f"{key}={value}" for key, value in item["sizing"].items()
+            )
+        scenarios.append(item)
+    if scenarios:
+        result["load_scenarios"] = scenarios
+
+    # optimizations: FinOps naming -> documented naming.
+    opts = []
+    for item in result.get("optimizations") or []:
+        item = dict(item)
+        if (
+            "projected_savings_usd" not in item
+            and item.get("projected_monthly_savings") is not None
+        ):
+            item["projected_savings_usd"] = item["projected_monthly_savings"]
+        if not item.get("description") and item.get("reason"):
+            item["description"] = item["reason"]
+        if not item.get("strategy") and item.get("name"):
+            item["strategy"] = item["name"]
+        opts.append(item)
+    if opts:
+        result["optimizations"] = opts
+
+    # region_comparison: Money dict -> documented monthly_cost_usd.
+    regions = []
+    for item in result.get("region_comparison") or []:
+        item = dict(item)
+        if "monthly_cost_usd" not in item:
+            amount = _money_amount(item.get("estimated_monthly_cost"))
+            if amount is not None:
+                item["monthly_cost_usd"] = amount
+        regions.append(item)
+    if regions:
+        result["region_comparison"] = regions
+
     return result
 
 

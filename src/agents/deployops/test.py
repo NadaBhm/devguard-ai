@@ -359,6 +359,18 @@ async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_
     aws_instance.get_account_id.return_value = "123456789012"
     mock_aws_client.return_value = aws_instance
 
+    # Mock ECR authorization token (agent base64-decodes it for docker login)
+    ecr_client = MagicMock()
+    ecr_client.get_authorization_token.return_value = {
+        "authorizationData": [
+            {
+                "authorizationToken": "QVdTOmZha2V0b2tlbg==",
+                "proxyEndpoint": "https://123456789012.dkr.ecr.us-east-1.amazonaws.com",
+            }
+        ]
+    }
+    aws_instance.session.client.return_value = ecr_client
+
     # Mock subprocess calls
     mock_proc = AsyncMock()
     mock_proc.returncode = 0
@@ -396,6 +408,18 @@ async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws
     aws_instance = MagicMock()
     aws_instance.get_account_id.return_value = "123456789012"
     mock_aws_client.return_value = aws_instance
+
+    # Mock ECR authorization token (agent base64-decodes it for docker login)
+    ecr_client = MagicMock()
+    ecr_client.get_authorization_token.return_value = {
+        "authorizationData": [
+            {
+                "authorizationToken": "QVdTOmZha2V0b2tlbg==",
+                "proxyEndpoint": "https://123456789012.dkr.ecr.us-east-1.amazonaws.com",
+            }
+        ]
+    }
+    aws_instance.session.client.return_value = ecr_client
 
     mock_proc = AsyncMock()
     mock_proc.returncode = 0

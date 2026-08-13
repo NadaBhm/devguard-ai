@@ -35,8 +35,8 @@ def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
     return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
 
 @router.post("/refresh", response_model=schemas.Token)
-def refresh_token(refresh_token: str, db: Session = Depends(get_db)):
-    payload = auth.decode_token(refresh_token)
+def refresh_token(refresh: schemas.RefreshRequest, db: Session = Depends(get_db)):
+    payload = auth.decode_token(refresh.refresh_token)
     if not payload or payload.get("type") != "refresh":
         raise HTTPException(status_code=401, detail="Invalid refresh token")
     email = payload.get("sub")

@@ -90,17 +90,64 @@ def test_jobs_require_auth(_clean_db):
     assert r.status_code == 401
 
 
+def test_tenant_isolation_blocks_cross_user_access(_clean_db, auth_headers):
+    client = _clean_db
+    r = client.post(
+        "/api/auth/register",
+        json={
+            "email": "intruder@devguard.ai",
+            "password": "x",
+            "first_name": "I",
+            "last_name": "N",
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = client.post("/api/auth/login", json={"email": "intruder@devguard.ai", "password": "x"})
+    assert r.status_code == 200, r.text
+    intruder = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+    # User A (auth_headers) owns this job.
+    r = client.post(
+        "/api/jobs/",
+        headers=auth_headers,
+        json={"repo_url": "https://github.com/NadaBhm/tenant-check", "commit_sha": "x"},
+    )
+    assert r.status_code in (200, 201)
+    job_id = r.json()["job_id"]
+
+    # User B cannot read, approve, or fetch results for A's job.
+    assert client.get(f"/api/jobs/{job_id}", headers=intruder).status_code == 404
+    assert (
+        client.post(
+            f"/api/jobs/{job_id}/approve",
+            headers=intruder,
+            json={"approved": True, "approved_by": "intruder@devguard.ai"},
+        ).status_code
+        == 404
+    )
+    assert client.get(f"/api/jobs/{job_id}/results", headers=intruder).status_code == 404
+
+    # User B's listings never surface A's job or its deployment.
+    listed = client.get("/api/jobs/", headers=intruder).json()["jobs"]
+    assert all(j["job_id"] != job_id for j in listed)
+    deploys = client.get("/api/deployments/", headers=intruder).json()["deployments"]
+    assert all(d["run_id"] != job_id for d in deploys)
+
+    # The owner still sees it.
+    assert client.get(f"/api/jobs/{job_id}", headers=auth_headers).status_code == 200
+
+
 def test_run_persisted_to_schema_tables(_clean_db, auth_headers):
     con = sqlite3.connect(TEST_DB)
     con.row_factory = sqlite3.Row
     runs = con.execute("select id, status, run_metadata from analysis_runs").fetchall()
     assert len(runs) >= 1
-    run = runs[-1]
+    run = next(r for r in runs if r["status"] == "completed")
     assert run["status"] == "completed"
     md = json.loads(run["run_metadata"])
     assert md.get("deployops_result", {}).get("deployment_status") == "success"
     assert con.execute("select count(*) from projects").fetchone()[0] >= 1
-    assert con.execute("select count(*) from deployments").fetchone()[0] == 1
+    assert con.execute("select count(*) from deployments").fetchone()[0] >= 1
     con.close()
 
 
@@ -151,6 +198,43 @@ def test_register_creates_verified_user(_clean_db):
     token = login.json()["access_token"]
     me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
+
+
+def test_refresh_endpoint_accepts_json_body(_clean_db, auth_headers):
+    client = _clean_db
+    r = client.post("/api/auth/login", json=TEST_USER)
+    assert r.status_code == 200, r.text
+    refresh = r.json()["refresh_token"]
+
+    r = client.post("/api/auth/refresh", json={"refresh_token": refresh})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "access_token" in body
+    assert "refresh_token" in body
+
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {body['access_token']}"})
+    assert me.status_code == 200
+
+
+def test_refresh_requires_json_body(_clean_db):
+    client = _clean_db
+    assert client.post("/api/auth/refresh").status_code == 422
+
+
+def test_refresh_rejects_access_token(_clean_db):
+    client = _clean_db
+    r = client.post("/api/auth/login", json=TEST_USER)
+    access = r.json()["access_token"]
+    r = client.post("/api/auth/refresh", json={"refresh_token": access})
+    assert r.status_code == 401
+
+
+def test_refresh_token_cannot_be_used_as_access_token(_clean_db):
+    client = _clean_db
+    r = client.post("/api/auth/login", json=TEST_USER)
+    refresh = r.json()["refresh_token"]
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {refresh}"})
+    assert me.status_code == 401
 
 
 def _run_job_to_completion(client, headers):

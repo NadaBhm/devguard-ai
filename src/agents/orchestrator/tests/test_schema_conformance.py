@@ -121,7 +121,7 @@ class TestRealInfraCostShape:
                 "range_min": 120.0, "range_max": 170.0,
             },
             "load_scenarios": [{"users": 1000, "estimated_monthly_cost": {"amount": 145.32}}],
-            "optimizations": [{"name": "graviton", "reason": "cheaper", "selected": True}],
+            "optimizations": [{"name": "graviton", "reason": "cheaper", "projected_monthly_savings": 25.4, "selected": True}],
             "region_comparison": [{"region": "us-east-1", "estimated_monthly_cost": {"amount": 145.32}}],
             "_deploy_inputs": {
                 "compute_type": "ecs",
@@ -160,3 +160,20 @@ class TestRealInfraCostShape:
     def test_mock_passes_through_unchanged(self):
         mock = build_mock_infracost_result()
         assert normalize_infracost_result(mock) == mock
+
+    def test_nested_money_shapes_are_normalized_for_report(self, infracost_result):
+        """The report template reads estimated_monthly_cost_usd /
+        monthly_cost_usd / projected_savings_usd; the real agent's Money
+        dumps must be flattened so cost tables don't render blank."""
+        normalized = normalize_infracost_result(infracost_result)
+
+        assert normalized["load_scenarios"][0]["estimated_monthly_cost_usd"] == 145.32
+        assert normalized["region_comparison"][0]["monthly_cost_usd"] == 145.32
+        assert normalized["optimizations"][0]["projected_savings_usd"] == 25.4
+        assert normalized["optimizations"][0]["strategy"] == "graviton"
+        assert normalized["optimizations"][0]["description"] == "cheaper"
+
+    def test_nested_normalization_is_idempotent(self, infracost_result):
+        once = normalize_infracost_result(infracost_result)
+        twice = normalize_infracost_result(once)
+        assert once == twice

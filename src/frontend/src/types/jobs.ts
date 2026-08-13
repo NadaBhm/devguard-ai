@@ -118,12 +118,14 @@ export interface JobResponse {
   status: RunStatus
   orchestrator_status?: string
   gate: string | null
+  mode?: "real" | "mixed" | "mock"
   state?: JobState
 }
 
 export interface JobDetail extends JobSummary {
   orchestrator_status: string | null
   gate: string | null
+  mode?: "real" | "mixed" | "mock"
   state?: JobState
 }
 

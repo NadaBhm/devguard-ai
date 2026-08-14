@@ -662,18 +662,19 @@ def translate_deployops_result(raw: dict[str, Any], job_id: str) -> dict[str, An
             return entry.get("value") or ""
         return entry or ""
 
+    hc = raw.get("health_check") or {}
     return {
         "job_id": raw.get("job_id") or job_id,
         "deployment_status": "success" if succeeded else "failed",
         "deployed_url": raw.get("deployed_url"),
         "health_check": {
-            # DeployOps runs its own health check internally and only tells us
-            # pass/fail via the overall status; it doesn't report latency or
-            # status code. Values are inferred, not measured.
-            "passed": succeeded,
-            "response_time_ms": 0,
-            "status_code": 200 if succeeded else 0,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            # Preserve the real measured metrics when DeployOps reports them
+            # (deploy() runs the health check internally); fall back to
+            # inferred values only when the raw payload carries none.
+            "passed": hc.get("passed", succeeded),
+            "response_time_ms": hc.get("response_time_ms", 0),
+            "status_code": hc.get("status_code", 200 if succeeded else 0),
+            "checked_at": hc.get("checked_at", datetime.now(timezone.utc).isoformat()),
         },
         "rollback_triggered": raw.get("error") == "health check failed",
         "rollback_reason": raw.get("error") if not succeeded else None,

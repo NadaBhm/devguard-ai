@@ -63,6 +63,7 @@ from .models import (
     StackDetection,
     Summary,
 )
+from .scanners import find_files
 from .scanners.dependencies import run_dependency_scan
 from .scanners.dockerfile_scanner import run_dockerfile_scan
 from .scanners.sast import run_sast
@@ -72,6 +73,46 @@ from .scanners.secrets import run_secrets_scan
 from .scanners.stack_detection import detect_stack, get_language_breakdown
 
 logger = logging.getLogger(__name__)
+
+_MAX_DOCKERFILE_BYTES = 256 * 1024
+
+
+def _capture_dockerfile_content(repo_path: Path, stack_result: Any) -> str | None:
+    """Read the repository's Dockerfile content for downstream agents.
+
+    Prefers the exact Dockerfile the stack detector identified
+    (``stack_detection.container.dockerfile_path``), falling back to scanning
+    for ``Dockerfile*`` / ``*.dockerfile`` across the clone so variants like
+    ``Dockerfile.backend`` are still captured. Returns ``None`` (never raises)
+    when no readable, size-safe Dockerfile exists.
+    """
+    try:
+        candidates: list[Path] = []
+
+        detected = getattr(getattr(stack_result, "container", None), "dockerfile_path", None)
+        if detected:
+            detected_path = repo_path / detected
+            if detected_path.is_file():
+                candidates.append(detected_path)
+
+        if not candidates:
+            candidates = find_files(repo_path, ("Dockerfile*", "*.dockerfile"))
+
+        for candidate in candidates:
+            try:
+                if candidate.is_file() and candidate.stat().st_size <= _MAX_DOCKERFILE_BYTES:
+                    content = candidate.read_text(encoding="utf-8", errors="replace")
+                    if content:
+                        logger.info(
+                            "Captured Dockerfile for downstream agents: %s",
+                            candidate.relative_to(repo_path).as_posix(),
+                        )
+                        return content
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return None
 
 
 class CodeSecAgent:
@@ -473,13 +514,7 @@ class CodeSecAgent:
 
         # Capture Dockerfile content for downstream agents (InfraCost /
         # DeployOps need it to build the image; the clone is removed below).
-        dockerfile_content: str | None = None
-        try:
-            dockerfile_path = next(repo_path.rglob("Dockerfile"), None)
-            if dockerfile_path and dockerfile_path.is_file() and dockerfile_path.stat().st_size <= 256 * 1024:
-                dockerfile_content = dockerfile_path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            dockerfile_content = None
+        dockerfile_content = _capture_dockerfile_content(repo_path, stack_result)
 
         # Cleanup clone directory
         try:

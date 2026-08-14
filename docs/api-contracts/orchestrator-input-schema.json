@@ -904,6 +904,41 @@
         }
       }
     },
+    "infracost_feedback": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Feedback humain de la Gate 2 demandant une regeneration InfraCost (boucle d'iteration gate-2)."
+    },
+    "infracost_iterations": {
+      "type": "array",
+      "description": "Historique des regenerations InfraCost pilotees par feedback (boucle d'iteration gate-2).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "iteration": {
+            "type": "integer"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "result": {
+            "type": "object"
+          },
+          "requested_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "iteration",
+          "prompt",
+          "result",
+          "requested_at"
+        ]
+      }
+    },
     "final_report": {
       "type": [
         "object",

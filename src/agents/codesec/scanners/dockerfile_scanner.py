@@ -81,6 +81,12 @@ def _run_trivy_config(repo_path: Path) -> list[DockerfileFinding]:
             except ValueError:
                 pass
 
+            cause_meta = misconf.get("CauseMetadata") or {}
+            lines = (cause_meta.get("Code") or {}).get("Lines") or []
+            first_line = lines[0] if lines else None
+            if isinstance(first_line, dict):
+                first_line = first_line.get("Content") or first_line.get("content")
+
             findings.append(
                 DockerfileFinding(
                     rule_id=misconf.get("ID", "DS000"),
@@ -88,9 +94,9 @@ def _run_trivy_config(repo_path: Path) -> list[DockerfileFinding]:
                     severity=severity,
                     category="dockerfile",
                     file=result_item.get("Target", ""),
-                    line=misconf.get("CauseMetadata", {}).get("StartLine", 1),
+                    line=cause_meta.get("StartLine", 1),
                     message=misconf.get("Title", misconf.get("Description", "")),
-                    snippet=misconf.get("CauseMetadata", {}).get("Code", {}).get("Lines", [""])[0] if misconf.get("CauseMetadata", {}).get("Code", {}).get("Lines") else None,
+                    snippet=first_line,
                     remediation=misconf.get("Resolution", None),
                 )
             )

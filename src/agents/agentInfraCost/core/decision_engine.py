@@ -13,6 +13,7 @@ container plus a docker-compose file).
 
 from __future__ import annotations
 
+import os
 from typing import Final, Literal
 
 from pydantic import BaseModel
@@ -116,8 +117,17 @@ def _choose_compute_type(scores: dict[str, float]) -> ComputeType:
     ec2) since ``_score_stack`` always builds the dict in that order and
     ``max`` keeps the first maximal item — a managed container service is
     the safer default when signals are genuinely inconclusive.
+
+    DeployOps only has a deployment path for compute_type='ecs' (lambda/ec2
+    raise ValueError in deployops/agent.py _normalize_payload before ever
+    reaching Terraform). To keep the real pipeline safe until those paths
+    land, the ECS force is gated behind DEVGUARD_FORCE_COMPUTE_ECS (default
+    "1" = force ecs). Unit tests set it to "0" so the scoring logic above
+    stays exercised; remove the flag entirely once DeployOps grows lambda/ec2.
     """
-    return "ecs"  # TEMPORARY: DeployOps only supports ecs (see agent.py _normalize_payload); forcing until lambda/ec2 land there. was: max(scores, key=lambda compute_type: scores[compute_type])
+    if os.getenv("DEVGUARD_FORCE_COMPUTE_ECS", "1").lower() == "1":
+        return "ecs"
+    return max(scores, key=lambda compute_type: scores[compute_type])  # type: ignore[return-value]
 
 
 def _size_ecs(analysis: RepoAnalysisInput) -> dict[str, int | str]:

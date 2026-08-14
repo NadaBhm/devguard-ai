@@ -138,23 +138,8 @@ export function GateApproval({
           >
             Reject
           </Button>
-          {canRegenerate && (
-            <Button
-              variant="ghost"
-              icon={<IconRefresh className="size-3.5" />}
-              onClick={() => {
-                setDecision("regenerate")
-                mutation.mutate({ approved: false, requestRegeneration: true })
-              }}
-              loading={mutation.isPending && decision === "regenerate"}
-              disabled={!comment.trim() || (decision !== null && decision !== "regenerate")}
-              className="text-accent hover:bg-accent/10 hover:text-accent"
-            >
-              Regenerate with feedback
-            </Button>
-          )}
           <Button
-            variant="primary"
+            variant={isGate2 ? "ghost" : "primary"}
             onClick={() => {
               setDecision("approve")
               mutation.mutate({ approved: true })
@@ -164,6 +149,20 @@ export function GateApproval({
           >
             Approve & continue
           </Button>
+          {canRegenerate && (
+            <Button
+              variant="primary"
+              icon={<IconRefresh className="size-3.5" />}
+              onClick={() => {
+                setDecision("regenerate")
+                mutation.mutate({ approved: false, requestRegeneration: true })
+              }}
+              loading={mutation.isPending && decision === "regenerate"}
+              disabled={!comment.trim() || (decision !== null && decision !== "regenerate")}
+            >
+              Regenerate with feedback
+            </Button>
+          )}
         </div>
         {mutation.isError && (
           <p className="text-[12px] text-critical">

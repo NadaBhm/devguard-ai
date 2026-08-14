@@ -98,9 +98,6 @@ export function NewRunPage() {
         )}
 
         <div className="flex items-center justify-between">
-          <p className="text-[12px] text-faint">
-            Requires an API connection to the DevGuard backend.
-          </p>
           <Button type="submit" variant="primary" loading={mutation.isPending}>
             Start analysis
           </Button>

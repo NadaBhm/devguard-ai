@@ -62,6 +62,39 @@ def test_ecs_fixture_builds_ecs_variant_with_nulls_elsewhere() -> None:
     assert output.artifacts.docker_image.tag == "sha-a1b2c3d"
 
 
+def test_deployment_config_health_check_tracks_refined_terraform() -> None:
+    """DeployOps's post-deploy health check must hit the same port/path the
+    ALB target group ships with. When the refiner rewrites the target group
+    (e.g. to the app's real 3000 + /api/health), deployment_config must
+    follow — not stay stuck on the template's 8080 + /health."""
+    from models.output_schema import TerraformFiles
+
+    analysis = _load_analysis("sample_input.json")
+    decision = decide_architecture(analysis)
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-abc1234")
+    base_tf = generate_terraform(decision, context)
+    refined_main = base_tf.main_tf.replace(
+        "port        = 8080", "port        = 3000"
+    ).replace(
+        'path                = "/health"', 'path                = "/api/health"'
+    )
+    assert refined_main != base_tf.main_tf
+    refined = TerraformFiles(
+        main_tf=refined_main,
+        variables_tf=base_tf.variables_tf,
+        outputs_tf=base_tf.outputs_tf,
+    )
+    cost = estimate_cost(decision)
+    output = build_output(
+        analysis, decision, refined, cost, _FALLBACK_ENRICHMENT
+    )
+
+    ecs_deploy = output.deployment_config.ecs
+    assert ecs_deploy is not None
+    assert ecs_deploy.health_check_port == 3000
+    assert ecs_deploy.health_check_path == "/api/health"
+
+
 def test_lambda_fixture_builds_lambda_variant_without_docker() -> None:
     analysis = _load_analysis("sample_input_variant_lambda_candidate.json")
     decision = decide_architecture(analysis)

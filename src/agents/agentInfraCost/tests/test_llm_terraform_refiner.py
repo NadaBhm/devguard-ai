@@ -141,7 +141,8 @@ class TestRefinerNominal:
         assert "=== CONTEXTE DU DÉPÔT ===" not in captured["prompt"]
 
     def test_valid_dockerfile_in_reply_refines_it(self, monkeypatch) -> None:
-        """A container run with a Dockerfile: the LLM may edit it too."""
+        """A container run with a Dockerfile: the LLM may edit it too when the
+        feedback explicitly targets the Dockerfile."""
         refined_dockerfile = "FROM python:3.11-slim\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . /app\n"
         _patch_call_llm(
             monkeypatch,
@@ -155,10 +156,58 @@ class TestRefinerNominal:
             ),
         )
 
-        files, dockerfile = refine_terraform(CURRENT, "base python 3.11 et multi-stage", dockerfile=DOCKERFILE)
+        files, dockerfile = refine_terraform(
+            CURRENT,
+            "utilise python 3.11 dans le dockerfile et multi-stage",
+            dockerfile=DOCKERFILE,
+        )
 
         assert files == CURRENT
         assert dockerfile == refined_dockerfile
+
+    def test_dockerfile_not_targeted_by_feedback_keeps_original(self, monkeypatch) -> None:
+        """Feedback that doesn't mention container concerns must NOT let the
+        LLM's rewritten Dockerfile through — the repo's real Dockerfile stays
+        untouched even if the reply carries a (possibly broken) replacement."""
+        llm_dockerfile = "FROM scratch\nCOPY . /app\nCMD [\"bogus\"]\n"
+        _patch_call_llm(
+            monkeypatch,
+            json.dumps(
+                {
+                    "main_tf": CURRENT.main_tf,
+                    "variables_tf": CURRENT.variables_tf,
+                    "outputs_tf": CURRENT.outputs_tf,
+                    "dockerfile": llm_dockerfile,
+                }
+            ),
+        )
+
+        files, dockerfile = refine_terraform(CURRENT, "make it cheaper", dockerfile=DOCKERFILE)
+
+        assert files == CURRENT
+        assert dockerfile == DOCKERFILE
+
+    def test_dockerfile_kept_when_feedback_only_asks_terraform(self, monkeypatch) -> None:
+        """The exact regression from the real run: 'make it cheaper' rewrote
+        the Dockerfile into a broken generic one. It must now be preserved."""
+        _patch_call_llm(
+            monkeypatch,
+            json.dumps(
+                {
+                    "main_tf": CURRENT.main_tf,
+                    "variables_tf": CURRENT.variables_tf,
+                    "outputs_tf": CURRENT.outputs_tf,
+                    "dockerfile": (
+                        "FROM python:3.12-slim\nCOPY requirements.txt .\nCMD uvicorn main:app\n"
+                    ),
+                }
+            ),
+        )
+
+        files, dockerfile = refine_terraform(CURRENT, "make it cheaper", dockerfile=DOCKERFILE)
+
+        assert files == CURRENT
+        assert dockerfile == DOCKERFILE
 
     def test_dockerfile_absent_in_reply_keeps_original(self, monkeypatch) -> None:
         """Backward compatibility: a Terraform-only reply must not wipe the

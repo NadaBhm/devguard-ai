@@ -137,7 +137,13 @@ def _estimate_ecs(
     nb_vcpu = int(decision.sizing["task_cpu"]) / _FARGATE_CPU_UNITS_PER_VCPU
     ram_gb = int(decision.sizing["task_memory"]) / _MB_PER_GB
 
-    return (vcpu_per_hour * nb_vcpu + memory_gb_per_hour * ram_gb) * hours_per_month
+    per_task = (vcpu_per_hour * nb_vcpu + memory_gb_per_hour * ram_gb) * hours_per_month
+
+    # The refiner may scale desired_count when the user asks for capacity
+    # ("big userbase"); the base sizing keys never carry it, so default to 1
+    # (a single task) when absent.
+    desired_count = int(decision.sizing.get("desired_count", 1))
+    return per_task * desired_count
 
 
 def _estimate_lambda(

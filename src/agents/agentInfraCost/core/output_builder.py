@@ -13,6 +13,7 @@ available, else ``"latest"`` plus a warning, never silently).
 from __future__ import annotations
 
 import logging
+import re
 
 from core.constants import (
     DOCKER_IMAGE_NAME,
@@ -57,6 +58,33 @@ from models.output_schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _health_check_from_terraform(main_tf: str) -> tuple[int, str]:
+    """Read the container port and health-check path out of the rendered
+    (and possibly refiner-edited) ``aws_lb_target_group`` block.
+
+    The ECS template renders ``port`` and ``health_check.path`` from the
+    constants (8080 + "/health"), but the Gate-2 refiner legitimately
+    rewrites them to match the app (e.g. 3000 + "/api/health"). The
+    ``deployment_config`` DeployOps consumes for its post-deploy health
+    check must agree with the Terraform that actually ships, so this returns
+    what main.tf really says. Fail-soft: falls back to the constants if the
+    block is unreadable.
+    """
+    tg = re.search(
+        r'resource\s+"aws_lb_target_group"\s+"[^"]*"\s*\{.*?\n\}',
+        main_tf,
+        re.DOTALL,
+    )
+    if tg is None:
+        return ECS_HEALTH_CHECK_PORT, ECS_HEALTH_CHECK_PATH
+    block = tg.group(0)
+    port_match = re.search(r"\bport\s*=\s*(\d+)", block)
+    path_match = re.search(r'\bpath\s*=\s*"([^"]+)"', block)
+    port = int(port_match.group(1)) if port_match else ECS_HEALTH_CHECK_PORT
+    path = path_match.group(1) if path_match else ECS_HEALTH_CHECK_PATH
+    return port, path
 
 
 def resolve_docker_artifacts(
@@ -141,8 +169,16 @@ def _build_ecs_output(
         deployment_config=DeploymentConfigEcs(
             ecs=EcsDeploymentConfig(
                 strategy="rolling",
-                health_check_path=ECS_HEALTH_CHECK_PATH,
-                health_check_port=ECS_HEALTH_CHECK_PORT,
+                # Read from the actual rendered/refined Terraform so the
+                # post-deploy health check DeployOps performs hits the same
+                # port/path the ALB target group ships with — the constants
+                # (8080 + "/health") are only the template's starting point.
+                health_check_path=_health_check_from_terraform(
+                    artifacts.terraform.files.main_tf
+                )[1],
+                health_check_port=_health_check_from_terraform(
+                    artifacts.terraform.files.main_tf
+                )[0],
                 timeout_minutes=5,
                 min_healthy_percent=50,
                 max_percent=200,

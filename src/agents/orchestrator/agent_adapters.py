@@ -263,6 +263,7 @@ async def call_infracost(
     *,
     feedback: str | None = None,
     previous_result: dict[str, Any] | None = None,
+    iteration_number: int | None = None,
 ) -> dict[str, Any]:
     """
     Run InfraCost on CodeSec's output and return the orchestrator-shaped result.
@@ -307,6 +308,11 @@ async def call_infracost(
         # it through the raw dict lets the pipeline's LLM advisors and the
         # new Terraform refiner act on the user's request.
         raw_input["user_feedback"] = feedback
+        if iteration_number is not None:
+            # 1-based regeneration round; the pipeline uses it to gate the
+            # hidden first-regen auto-fix (correct container port / health
+            # check to match the repo) to exactly one run.
+            raw_input["regen_iteration"] = iteration_number
         # CodeSec deletes its clone the moment analysis finishes, so at
         # Gate 2 we re-clone the repo and let the pipeline digest the whole
         # codebase for the OpenRouter LLM (see core.repo_ingestor). Fail-soft:

@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+import re
 import time
 from typing import Any, Final
 
@@ -41,6 +42,14 @@ logger = logging.getLogger(__name__)
 _OPENROUTER_URL: Final[str] = "https://openrouter.ai/api/v1/chat/completions"
 _DEFAULT_MODEL: Final[str] = "nvidia/nemotron-3-ultra-550b-a55b:free"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 20.0
+
+# Without an explicit max_tokens, OpenRouter caps completion length at a small
+# per-model default (commonly ~2k tokens). The Terraform refiner must echo the
+# whole main.tf/variables.tf/outputs.tf inside a single JSON string — a
+# monitoring stack easily runs to tens of thousands of output tokens — so the
+# refiner passes a large budget and truncation mid-JSON is what previously
+# produced "Unterminated string" validation failures and a retry loop.
+_DEFAULT_MAX_TOKENS: Final[int] = 16_384
 
 _MAX_LLM_RETRIES: Final[int] = 3
 _RETRY_BASE_DELAY_SECONDS: Final[float] = 1.0
@@ -90,6 +99,7 @@ def call_llm(
     provider_order: list[str] | None = None,
     temperature: float = 0.2,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    max_tokens: int | None = None,
 ) -> str | None:
     """Ask an LLM for one completion; return its text, or None on any failure.
 
@@ -111,6 +121,10 @@ def call_llm(
         temperature: Passed straight through to the API.
         timeout: Hard ceiling in seconds; a slow LLM must never hang the
             pipeline.
+        max_tokens: Completion token budget. Defaults to a generous value so
+            large-file echoes (the refiner's whole main.tf in one JSON string)
+            are never truncated mid-output; pass a smaller value for short,
+            latency-sensitive calls.
 
     Returns:
         The completion text, or ``None`` if ``OPENROUTER_API_KEY`` is unset,
@@ -129,6 +143,7 @@ def call_llm(
     payload: dict[str, Any] = {
         "model": resolved_model,
         "temperature": temperature,
+        "max_tokens": max_tokens or _DEFAULT_MAX_TOKENS,
         "messages": [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt},
@@ -148,6 +163,30 @@ def call_llm(
                 json=payload,
                 timeout=timeout,
             )
+            if response.status_code == 200:
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = None
+                if body is None or "choices" not in body or not body.get("choices"):
+                    # OpenRouter sometimes answers a 200 with an upstream error
+                    # object instead of a completion (observed: Nvidia 502
+                    # wrapped in a 200), or an empty body. Neither is a valid
+                    # completion — treat the wrapped error like the non-2xx
+                    # path below so the same retry policy applies. The body's
+                    # own code (502) is what decides retryability, since the
+                    # HTTP status (200) carries no signal.
+                    code = 200
+                    message = "missing choices"
+                    if isinstance(body, dict):
+                        code = body.get("error", {}).get("code", 200)
+                        message = body.get("error", {}).get("message", "missing choices")
+                    raise httpx.HTTPStatusError(
+                        f"{code} {message}",
+                        request=getattr(response, "request", None),
+                        response=response,
+                    )
+                return body["choices"][0]["message"]["content"]
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as exc:
@@ -157,7 +196,20 @@ def call_llm(
             # of discarding it.
             status = exc.response.status_code
             body = exc.response.text
-            if attempt == _MAX_LLM_RETRIES or not _is_transient_status(status, body):
+            # A 200 that wrapped an upstream error body carries the real code
+            # in the message (e.g. "502 Internal server error"); the HTTP
+            # status alone (200) would wrongly look permanent, so pull the
+            # code from the message when it starts with a status number.
+            if status == 200:
+                match = re.match(r"^(\d{3})\s", str(exc))
+                if match and int(match.group(1)) != 200:
+                    status = int(match.group(1))
+            # A 200 that carried neither a completion nor an upstream error
+            # code is a transient response glitch (missing-choices body) — the
+            # original contract retried those via the parse-error path, so
+            # keep treating them as retryable rather than permanent.
+            transient = _is_transient_status(status, body) or status == 200
+            if attempt == _MAX_LLM_RETRIES or not transient:
                 logger.warning(
                     "OpenRouter call failed (%s); caller falls back. Response body: %s",
                     status, body,

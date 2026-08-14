@@ -410,3 +410,42 @@ class TestCallInfraCostRepoClone:
 
         assert captured["repo_path"] is None
         assert result["cost_estimate"]["monthly_cost_usd"] == 10.0
+
+    async def test_iteration_number_is_threaded_into_raw_input(self, monkeypatch):
+        """The first-regen hidden fix lives in the pipeline; the adapter must
+        forward the 1-based regen round so the pipeline can gate it."""
+        captured = {}
+
+        def _fake_pipeline(raw_input):
+            captured["regen_iteration"] = raw_input.get("regen_iteration")
+            return {"cost_estimate": {"monthly_cost_usd": 10.0, "currency": "USD"}}
+
+        monkeypatch.setattr(
+            "src.agents.orchestrator.agent_adapters._run_infracost_pipeline",
+            _fake_pipeline,
+        )
+
+        await call_infracost(
+            self._minimal_codesec_result(),
+            "job-1",
+            feedback="bigger",
+            iteration_number=1,
+        )
+
+        assert captured["regen_iteration"] == 1
+
+    async def test_iteration_number_not_set_without_value(self, monkeypatch):
+        captured = {}
+
+        def _fake_pipeline(raw_input):
+            captured["regen_iteration"] = raw_input.get("regen_iteration")
+            return {"cost_estimate": {"monthly_cost_usd": 10.0, "currency": "USD"}}
+
+        monkeypatch.setattr(
+            "src.agents.orchestrator.agent_adapters._run_infracost_pipeline",
+            _fake_pipeline,
+        )
+
+        await call_infracost(self._minimal_codesec_result(), "job-1", feedback="bigger")
+
+        assert captured["regen_iteration"] is None

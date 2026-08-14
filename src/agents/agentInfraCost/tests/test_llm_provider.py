@@ -278,6 +278,39 @@ def test_retries_malformed_200_then_succeeds(
     _assert_called_times(fake, 2)
 
 
+def test_retries_wrapped_502_in_200_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, _no_backoff_sleep
+) -> None:
+    """OpenRouter wraps upstream failures (e.g. Nvidia 502) in an HTTP 200
+    with an error body instead of a completion. That must be treated like a
+    5xx — retried with backoff — not silently swallowed as a permanent
+    parse failure (the bug that wedged a live job in a retry loop)."""
+    ok = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    glitch = _FakeResponse(
+        payload={
+            "error": {
+                "message": "Upstream error from Nvidia: Internal server error",
+                "code": 502,
+            }
+        }
+    )
+    fake = _counting_fake([glitch, ok])
+    monkeypatch.setattr("core.llm_provider.httpx.post", fake)
+    assert call_llm(prompt="p", system_instruction="s") == "answer"
+    _assert_called_times(fake, 2)
+
+
+def test_wrapped_error_in_200_is_retryable_not_parse_failure(
+    monkeypatch: pytest.MonkeyPatch, _no_backoff_sleep
+) -> None:
+    ok = _FakeResponse(payload={"choices": [{"message": {"content": "answer"}}]})
+    glitch = _FakeResponse(payload={"error": {"message": "boom", "code": 502}})
+    fake = _counting_fake([glitch, ok])
+    monkeypatch.setattr("core.llm_provider.httpx.post", fake)
+    assert call_llm(prompt="p", system_instruction="s") == "answer"
+    _assert_called_times(fake, 2)
+
+
 def test_gives_up_after_max_retries(monkeypatch: pytest.MonkeyPatch, _no_backoff_sleep) -> None:
     fake = _counting_fake([_FakeResponse(status_code=503)])
     monkeypatch.setattr("core.llm_provider.httpx.post", fake)

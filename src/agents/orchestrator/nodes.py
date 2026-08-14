@@ -590,6 +590,11 @@ def infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
 
     feedback = state.get("infracost_feedback")
     previous_result = state.get("infracost_result")
+    # 1-based regeneration round. 1 == the first Gate-2 regen, which is the
+    # only round that gets the hidden "match the real server port / health
+    # check" auto-fix (see pipeline's _HIDDEN_FIRST_REGEN_FIX). Later rounds
+    # deliberately skip it: the user's own prompts own the artifacts by then.
+    iteration_number = len(state.get("infracost_iterations") or []) + 1
 
     state["infracost_result"] = run_sync(
         call_infracost(
@@ -597,6 +602,7 @@ def infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
             job_id,
             feedback=feedback,
             previous_result=previous_result,
+            iteration_number=iteration_number,
         )
     )
 

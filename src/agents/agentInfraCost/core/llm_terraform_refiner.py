@@ -52,7 +52,10 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     '{"main_tf": "...", "variables_tf": "...", "outputs_tf": "...", '
     '"dockerfile": "..." | null}, sans texte autour. Chaque valeur doit être '
     "le contenu complet du fichier, échappé dans la chaîne JSON. Si le "
-    "Dockerfile n'est pas fourni en entrée, renvoie null. Ne modifie ni la "
+    "Dockerfile n'est pas fourni en entrée, renvoie null. Si la demande de "
+    "l'utilisateur ne concerne pas le Dockerfile (rien sur docker, container, "
+    "image, base image, healthcheck), renvoie le Dockerfile fourni EXACTEMENT "
+    "tel quel, sans le modifier. Ne modifie ni la "
     "configuration de l'architecture ni les valeurs de dimensionnement déjà "
     "décidées, sauf si la demande le dit explicitement. Le "
     "'=== CONTEXTE DU DÉPÔT ===' est un résumé de faits extraits du code du "
@@ -129,6 +132,34 @@ def _valid_file(content: str) -> bool:
     return bool(content and content.strip())
 
 
+# Feedback only rewrites the Dockerfile when it explicitly targets container
+# concerns. The repo's real Dockerfile (captured by CodeSec) is otherwise
+# preserved verbatim — a free-tier LLM happily rewrites an unknown repo's
+# Dockerfile into something generic and broken when asked only to "make it
+# cheaper" (that bug ships a Dockerfile whose build context can't satisfy it).
+_DOCKER_FEEDBACK_TERMS: Final[tuple[str, ...]] = (
+    "docker",
+    "container",
+    "image",
+    "base image",
+    "base_image",
+    "from ",
+    "dockerfile",
+    "healthcheck",
+)
+
+
+def _feedback_targets_dockerfile(feedback: str) -> bool:
+    """True when the user's request plausibly concerns the Dockerfile.
+
+    Conservative keyword scan, not NLP: a mention of any container term means
+    the LLM may rewrite the Dockerfile; anything else (cost, AZs, region,
+    instance type, "regenerate") leaves it untouched.
+    """
+    lower = (feedback or "").lower()
+    return any(term in lower for term in _DOCKER_FEEDBACK_TERMS)
+
+
 def refine_terraform(
     current: TerraformFiles,
     feedback: str,
@@ -164,15 +195,24 @@ def refine_terraform(
             and _valid_file(refined.variables_tf)
             and _valid_file(refined.outputs_tf)
         ):
-            # Dockerfile: refine only when one exists AND the LLM returned a
-            # valid replacement. Backward-compatible: Terraform-only responses
-            # keep the original Dockerfile untouched.
+            # Dockerfile: refine only when one exists, the feedback explicitly
+            # targets container concerns, AND the LLM returned a valid
+            # replacement. Anything else keeps the original Dockerfile
+            # untouched. Backward-compatible: Terraform-only responses keep
+            # the original Dockerfile too.
             refined_dockerfile = dockerfile
-            if dockerfile is not None and refined.dockerfile is not None:
-                if not _valid_file(refined.dockerfile):
-                    logger.warning("Artifact refiner returned an empty Dockerfile; keeping original")
+            if dockerfile is not None and _feedback_targets_dockerfile(feedback):
+                if refined.dockerfile is None or not _valid_file(refined.dockerfile):
+                    logger.warning(
+                        "Artifact refiner returned no usable Dockerfile; keeping original"
+                    )
                 else:
                     refined_dockerfile = refined.dockerfile
+            elif dockerfile is not None:
+                logger.info(
+                    "Feedback doesn't target the Dockerfile; keeping the repo's "
+                    "Dockerfile untouched"
+                )
 
             logger.info("Artifact refiner applied user feedback")
             return (

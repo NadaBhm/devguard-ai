@@ -35,14 +35,13 @@ from src.agents.deployops.models import (
 
 logging.basicConfig(level=logging.INFO)
 
-# Standing-sandbox resources that generated Terraform modules may require
-# (agentInfraCost templates/ecs/variables.tf.j2 declares vpc_id/subnet_ids and
-# db_* as required variables with no defaults). Configure once in the
-# environment; DeployOps injects them into terraform.tfvars.json so
-# `terraform plan` never blocks waiting for interactive input.
+# agentInfraCost's generated ecs/variables.tf.j2 declares vpc_id, subnet_ids and
+# db_* as required vars with no defaults; inject env values into tfvars so
+# `terraform plan` never blocks on interactive input.
 _ENV_TF_VARS = (
     ("DEVGUARD_VPC_ID", "vpc_id"),
     ("DEVGUARD_SUBNET_IDS", "subnet_ids"),
+    ("DEVGUARD_SUBNET_ID", "subnet_id"),
     ("DEVGUARD_DB_HOST", "db_host"),
     ("DEVGUARD_DB_PORT", "db_port"),
     ("DEVGUARD_DB_NAME", "db_name"),
@@ -52,7 +51,6 @@ _ENV_TF_VARS = (
 
 
 def _terraform_env_vars() -> Dict[str, Any]:
-    """Map DEVGUARD_* environment settings onto Terraform variable names."""
     tf_vars: Dict[str, Any] = {}
     for env_name, tf_name in _ENV_TF_VARS:
         value = os.getenv(env_name)
@@ -75,17 +73,12 @@ class DeployOpsAgent:
 
     @staticmethod
     def _workspace_dir(job_id: str) -> Path:
-        """Single source of truth for a job's workspace path -- was
-        hardcoded to /tmp/deployops/{job_id} in three separate places,
-        which would have silently gone out of sync the moment only one of
-        them got a configurable root."""
+        """Central workspace path; was hardcoded in three places that could diverge."""
         root = Path(os.getenv("DEPLOYOPS_WORKSPACE_ROOT", "/tmp/deployops"))
         return root / job_id
 
     @xray_recorder.capture("deploy")  # type: ignore[reportCallIssue]
     async def deploy(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Deploy infrastructure using Terraform artifacts and Docker images."""
-        # Parse, normalize and validate payload before deployment
         try:
             payload = self.sanitize_and_validate(payload)
             deploy_payload = DeployPayload(**payload)
@@ -103,22 +96,14 @@ class DeployOpsAgent:
         if deploy_payload.metadata.get("ecs_update_only"):
             return await self._deploy_existing_ecs_revision(deploy_payload)
 
-        # Configurable via DEPLOYOPS_WORKSPACE_ROOT (_workspace_dir) so a
-        # real deployment can point this at a persistent volume -- /tmp is
-        # wiped on every container/host restart, which previously meant
-        # every job's workspace (and, more importantly, its local
-        # Terraform state -- see _write_artifacts' backend.tf generation)
-        # was ephemeral by accident, not by choice.
+        # DEPLOYOPS_WORKSPACE_ROOT is configurable; /tmp is wiped on restart, which
+        # once made every job's workspace and local Terraform state ephemeral.
         workspace_dir = self._workspace_dir(job_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
 
-        # Real source for the docker build. InfraCost's payload only carries
-        # Dockerfile + terraform; without the repo checkout the build context
-        # has no package.json/app code and any real image build fails (e.g.
-        # `npm ci` -> "npm ci can only install packages when your package.json
-        # and package-lock.json ... are in sync"). Clone the source into the
-        # workspace when the payload gives us a URL, as the mock/sandbox
-        # environments do via _write_artifacts' context copy.
+        # Payload carries only Dockerfile + terraform; without a checkout the build
+        # context lacks app code and real image builds fail (npm ci). Clone when
+        # a repo_url is provided.
         repo_url = (deploy_payload.metadata or {}).get("repo_url")
         if repo_url:
             from src.lib.repo import clone_repo
@@ -129,10 +114,9 @@ class DeployOpsAgent:
                 self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
                 return {"status": "failed", "job_id": job_id, "error": f"source clone failed: {exc}"}
 
-        # Write Terraform artifacts to workspace
         await self._write_artifacts(deploy_payload.artifacts, workspace_dir)
 
-        # Build and push Docker images
+        # S3 static sites ship plain files and carry no images, so the loop is a no-op for them.
         for docker_image in deploy_payload.artifacts.docker_images:
             image_uri = await self._build_and_push_image(
                 docker_image, deploy_payload.aws_config, job_id
@@ -145,7 +129,6 @@ class DeployOpsAgent:
                     "error": f"image build/push failed: {docker_image.name}",
                 }
 
-        # Run Terraform
         tf_dir = workspace_dir / "terraform"
         tf_runner = TerraformRunner(tf_dir)
         if not tf_runner.init():
@@ -164,21 +147,22 @@ class DeployOpsAgent:
         output = tf_runner.output()
         self.logger.info(f"Deployment successful for job {job_id}")
 
-        # Health checks
-        health_check_path = deploy_payload.deployment_config.health_check_path
-        deployed_url = (
-            output.get("frontend_url", {}).get("value")
-            or output.get("alb_dns_name", {}).get("value")
-            or output.get("alb_dns", {}).get("value")
-            or output.get("load_balancer_dns_name", {}).get("value")
-            or output.get("url", {}).get("value")
-            or output.get("frontend_url")
-            or output.get("alb_dns_name")
-            or output.get("alb_dns")
-            or output.get("load_balancer_dns_name")
-            or output.get("url")
-        )
+        # Upload before URL resolution so the bucket has objects before any health check.
+        if deploy_payload.compute_type == "s3":
+            sync_result = await self._sync_static_to_s3(
+                workspace_dir, deploy_payload.aws_config, job_id
+            )
+            if not sync_result["ok"]:
+                self.logger.error(f"S3 sync failed: {sync_result['error']}")
+                return {
+                    "status": "failed",
+                    "job_id": job_id,
+                    "error": f"s3 sync failed: {sync_result['error']}",
+                    "resources": output,
+                }
 
+        health_check_path = deploy_payload.deployment_config.health_check_path
+        deployed_url = self._resolve_deployed_url(output, deploy_payload)
         if not deployed_url:
             self.logger.error("No deployed URL found in Terraform outputs; health check cannot run")
             return {
@@ -217,11 +201,115 @@ class DeployOpsAgent:
             "resources": output,
         }
 
+    def _resolve_deployed_url(
+        self, output: Dict[str, Any], payload: DeployPayload
+    ) -> Optional[str]:
+        """Pick the reachable URL from Terraform outputs for any compute type.
+
+        EC2 uses the first of public_ips, S3 its website endpoint; ECS and other
+        types fall back to the legacy output keys DeployOps historically read.
+        """
+        compute = payload.compute_type
+
+        if compute == "ec2":
+            public_ips = output.get("public_ips", {}).get("value") or output.get("public_ips")
+            if isinstance(public_ips, list) and public_ips:
+                port = payload.deployment_config.health_check_port
+                return f"http://{public_ips[0]}:{port}"
+            public_ip = output.get("public_ip", {}).get("value") or output.get("public_ip")
+            if public_ip:
+                port = payload.deployment_config.health_check_port
+                return f"http://{public_ip}:{port}"
+
+        if compute == "s3":
+            website = output.get("website_endpoint", {}).get("value") or output.get("website_endpoint")
+            if website:
+                return f"http://{website}"
+
+        return (
+            output.get("frontend_url", {}).get("value")
+            or output.get("alb_dns_name", {}).get("value")
+            or output.get("alb_dns", {}).get("value")
+            or output.get("load_balancer_dns_name", {}).get("value")
+            or output.get("url", {}).get("value")
+            or output.get("frontend_url")
+            or output.get("alb_dns_name")
+            or output.get("alb_dns")
+            or output.get("load_balancer_dns_name")
+            or output.get("url")
+        )
+
+    async def _sync_static_to_s3(
+        self, workspace_dir: Path, aws_config: AWSConfig, job_id: str
+    ) -> Dict[str, Any]:
+        """Upload the site into Terraform's bucket via boto3 (the aws CLI isn't guaranteed). Skips .git and dotfiles."""
+        bucket = aws_config.bucket_name
+        if not bucket:
+            return {"ok": False, "error": "no bucket_name in aws_config"}
+
+        region = aws_config.region
+        aws = AWSClient(region=region, assume_role_arn=aws_config.assume_role_arn)
+        s3 = aws.session.client("s3", region_name=region, config=RETRY_CONFIG)
+
+        source = workspace_dir
+        if not source.exists():
+            return {"ok": False, "error": f"source dir {source} missing"}
+
+        uploaded = 0
+        skipped = 0
+        try:
+            for filepath in sorted(source.rglob("*")):
+                if not filepath.is_file():
+                    continue
+                rel = filepath.relative_to(source)
+                if ".git" in rel.parts or rel.parts[0].startswith("."):
+                    skipped += 1
+                    continue
+                key = rel.as_posix()
+                content_type = self._s3_content_type(key)
+                s3.upload_file(
+                    str(filepath),
+                    bucket,
+                    key,
+                    ExtraArgs={"ContentType": content_type},
+                )
+                uploaded += 1
+            self.logger.info(
+                f"S3 sync complete for job {job_id}: {uploaded} uploaded, {skipped} skipped to {bucket}"
+            )
+            return {"ok": True, "uploaded": uploaded, "skipped": skipped}
+        except Exception as exc:  # noqa: BLE001 - surfaced as failed deploy
+            self.logger.error(f"S3 sync failed for job {job_id}: {exc}")
+            return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _s3_content_type(key: str) -> str:
+        """S3 serves text/plain by default, which breaks HTML/JS/CSS in the browser."""
+        ext = key.rsplit(".", 1)[-1].lower() if "." in key else ""
+        return {
+            "html": "text/html; charset=utf-8",
+            "htm": "text/html; charset=utf-8",
+            "css": "text/css; charset=utf-8",
+            "js": "application/javascript; charset=utf-8",
+            "mjs": "application/javascript; charset=utf-8",
+            "json": "application/json; charset=utf-8",
+            "svg": "image/svg+xml",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "ico": "image/x-icon",
+            "woff": "font/woff",
+            "woff2": "font/woff2",
+            "txt": "text/plain; charset=utf-8",
+            "xml": "text/xml; charset=utf-8",
+            "pdf": "application/pdf",
+        }.get(ext, "application/octet-stream")
+
     @xray_recorder.capture("_deploy_existing_ecs_revision")  # type: ignore[reportCallIssue]
     async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
-        """Create a new ECS task-definition revision for an existing service.
-
-        """
+        """Create a new ECS task-definition revision for an existing service."""
         region = payload.aws_config.region
         cluster = payload.aws_config.model_dump().get("ecs_cluster") or "todo-app-cluster"
         service_name = payload.aws_config.model_dump().get("service_name") or "todo-app-dev-frontend"
@@ -253,11 +341,9 @@ class DeployOpsAgent:
             return {"status": "failed", "job_id": payload.job_id, "error": str(exc)}
 
     async def status(self) -> Dict[str, Any]:
-        """Check current agent status for enhanced user experience"""
         return {"status": "ready", "agent": "deployops"}
 
     def app_status(self, app_name: str, environment: str, region: str | None = None) -> Dict[str, Any]:
-        """Return ECS services and task-definition history for one app environment."""
         region = region or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
         aws = AWSClient(region=region)
         cluster = f"{app_name}-cluster"
@@ -288,7 +374,6 @@ class DeployOpsAgent:
             return {"status": "failed", "error": str(exc)}
 
     async def promote(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Promote the active task definition from one environment service to another."""
         required = ["app_name", "source_cluster", "source_service", "target_cluster", "target_service"]
         missing = [field for field in required if not request.get(field)]
         if missing:
@@ -321,8 +406,6 @@ class DeployOpsAgent:
 
     @xray_recorder.capture("rollback")  # type: ignore[reportCallIssue]
     async def rollback(self, job_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Rollback ECS service to previous task definition"""
-        
         aws = AWSClient(
             region=payload["aws_config"].get("region", "us-east-1"),
             assume_role_arn=payload["aws_config"].get("assume_role_arn"),
@@ -343,8 +426,7 @@ class DeployOpsAgent:
                 task_arn = None
             current_task = deployments[0]["taskDefinition"] if deployments else None
 
-            # ECS removes completed deployments from the service response, so
-            # use registered task-definition revisions as the durable history.
+            # ECS drops completed deployments from its response; use registered revisions as durable history.
             if not task_arn and current_task:
                 family = current_task.rsplit("/", 1)[-1].rsplit(":", 1)[0]
                 revisions = aws.ecs().list_task_definitions(
@@ -392,7 +474,6 @@ class DeployOpsAgent:
         region: str | None = None,
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Rollback one app/environment service to an ECS task-definition revision."""
         aws = AWSClient(region=region)
         cluster = f"{app_name}-cluster"
         service = f"{app_name}-{environment}-{service_name}"
@@ -433,12 +514,7 @@ class DeployOpsAgent:
         service_name: str,
         region: str | None = None,
     ) -> Dict[str, Any]:
-        """List every deployable ECS task-definition revision for a service.
-
-        Used to power the "roll back to a specific version" picker in the UI.
-        Returns revisions newest-first, tagging the currently-active one so the
-        frontend can flag it.
-        """
+        """List deployable ECS revisions newest-first, tagging the active one for the rollback-picker UI."""
         aws = AWSClient(region=region)
         cluster = f"{app_name}-cluster"
         service = f"{app_name}-{environment}-{service_name}"
@@ -483,10 +559,6 @@ class DeployOpsAgent:
         health_check_path: str = "/health",
         retry_delay: int = 30,
     ) -> dict[str, Any]:
-        """
-        Check if deployed service is healthy.
-        Returns a health result dictionary with status, timing, and code.
-        """
         if not url:
             self.logger.error("No URL provided for health check")
             return {
@@ -546,20 +618,10 @@ class DeployOpsAgent:
             
     @staticmethod
     def _write_remote_state_backend(tf_dir: Path, job_id: str) -> None:
-        """Write an S3 remote-state backend.tf, only if the team has
-        actually configured one (TF_STATE_BUCKET set).
+        """Write an S3 remote-state backend.tf only when TF_STATE_BUCKET is set.
 
-        Without this, `terraform init` defaults to local state --
-        terraform.tfstate sitting inside the job's own workspace directory,
-        which lives under DEPLOYOPS_WORKSPACE_ROOT (/tmp by default) and is
-        lost on restart, with no locking against two concurrent runs
-        touching the same infrastructure. This was previously unconditional
-        (no backend.tf ever written) rather than a deliberate choice.
-
-        No bucket/table name is invented here: if TF_STATE_BUCKET isn't
-        set, this silently does nothing and Terraform keeps behaving
-        exactly as before -- local state, not a regression, just not
-        remote until the team supplies real infrastructure to point at.
+        Without it, state sits in the job workspace (under /tmp) and is lost on
+        restart, with no locking. When unset, do nothing and keep local state.
         """
         bucket = os.getenv("TF_STATE_BUCKET")
         if not bucket:
@@ -583,15 +645,10 @@ class DeployOpsAgent:
         (tf_dir / "backend.tf").write_text(backend_tf)
 
     async def _write_artifacts(self, artifacts: Artifacts, workspace: Path) -> None:
-        """Write terraform files and docker images to workspace"""
-
-        # Write terraform files
         tf_dir = workspace / "terraform"
         tf_dir.mkdir(parents=True, exist_ok=True)
         self._write_remote_state_backend(tf_dir, job_id=workspace.name)
 
-        """ The payload is self-contained: every Terraform file required by the
-         configuration must be included in artifacts.terraform.files. """
         tf_root = tf_dir.resolve()
         for filename, content in artifacts.terraform.files.items():
             filepath = tf_root / Path(filename)
@@ -601,11 +658,6 @@ class DeployOpsAgent:
             filepath.write_text(content)
             self.logger.info(f"Wrote {filename} to {filepath}")
 
-        """ Keep the test payload deployable while its generated module strings
-         are being migrated to the canonical module sources. This is still
-         performed by DeployOps during artifact materialization; the payload
-         remains the source of the root configuration and variables."""
-         
         module_source_root = Path(__file__).resolve().parents[3] / "testing" / "artifacts" / "terraform-modules"
         for module_name in ("ecs-cluster", "environment", "deployment"):
             source = module_source_root / module_name / "main.tf"
@@ -617,8 +669,7 @@ class DeployOpsAgent:
             if variables_file.exists():
                 variables_file.unlink()
         
-        # Write terraform variables if provided, merged with standing-sandbox
-        # VPC/database values from the environment.
+        # Merge payload variables with standing-sandbox env-derived values.
         tf_vars = dict(artifacts.terraform.variables or {})
         tf_vars.update(_terraform_env_vars())
         if tf_vars:
@@ -626,9 +677,7 @@ class DeployOpsAgent:
             vars_path.write_text(json.dumps(tf_vars, indent=2))
             self.logger.info(f"Wrote variables to {vars_path}")
         
-        # Write Dockerfiles to their build contexts. Source files are already
-        # present when the context points into the repository; otherwise the
-        # payload still provides a valid Dockerfile-only context.
+        # Payloads ship Dockerfile-only contexts; copy repo source when a local context exists.
         for docker_image in artifacts.docker_images:
             context_path = Path(docker_image.context)
             if context_path.is_absolute() or any(part == ".." for part in context_path.parts):
@@ -681,19 +730,15 @@ class DeployOpsAgent:
 
     @xray_recorder.capture("_build_and_push_image")  # type: ignore[reportCallIssue]
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
-        """Build Docker image and push to ECR"""
-
         workspace = self._workspace_dir(job_id)
 
         image_name = docker_image.name
         image_tag = docker_image.tag
         region = aws_config.region
 
-        # Get AWS account ID
         aws = AWSClient(region=region, assume_role_arn=aws_config.assume_role_arn)
         account_id = aws_config.target_account_id or aws.get_account_id()
 
-        # Create the ECR repository if it doesn't already exist
         ecr_client = aws.session.client("ecr", region_name=region, config=RETRY_CONFIG)
         try:
             ecr_client.create_repository(repositoryName=image_name)
@@ -709,14 +754,11 @@ class DeployOpsAgent:
         decoded_token = base64.b64decode(token).decode("utf-8")
         password = decoded_token.split(":", 1)[1]
 
-        # ECR login with temporary DOCKER_CONFIG to avoid macOS credential helper hangs
-        login_cmd = ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint]
         returncode, stdout, stderr = await self._run_docker_cmd(["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint], timeout=60.0)
         if returncode != 0:
             self.logger.error(f"ECR login failed: {stderr}")
             return None
 
-        # ECR repository URI
         ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
         image_uri = f"{ecr_repo}:{image_tag}"
 
@@ -728,7 +770,6 @@ class DeployOpsAgent:
             self.logger.error(f"Docker build failed: {stderr}")
             return None
 
-        # Push to ECR
         push_cmd = ["docker", "push", image_uri]
         returncode, stdout, stderr = await self._run_docker_cmd(["docker", "push", image_uri], timeout=300.0)
         if returncode != 0:
@@ -739,20 +780,15 @@ class DeployOpsAgent:
         return image_uri
     
     async def _build_and_push_backend_image(self, backend_image_uri: str, region: str, account_id: str, job_id: str) -> bool:
-        """Build and push backend Docker image to ECR"""
-        
-        # Extract repo name from URI
-        # Format: account.dkr.ecr.region.amazonaws.com/repo:tag
+        # URI format: account.dkr.ecr.region.amazonaws.com/repo:tag
         repo_name = backend_image_uri.split('/')[-1].split(':')[0]
         ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{repo_name}"
         
-        # Check if backend Dockerfile exists in testing/three-tier-app/backend
         backend_dockerfile = Path("testing/three-tier-app/backend/Dockerfile")
         if not backend_dockerfile.exists():
             self.logger.warning(f"Backend Dockerfile not found at {backend_dockerfile}")
             return False
         
-        # Build backend image with platform
         build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", backend_image_uri, str(backend_dockerfile.parent)]
         result = await asyncio.create_subprocess_exec(
             *build_cmd,
@@ -767,7 +803,6 @@ class DeployOpsAgent:
             )
             return False
         
-        # Push backend image
         push_cmd = ["docker", "push", backend_image_uri]
         result = await asyncio.create_subprocess_exec(
             *push_cmd,
@@ -787,7 +822,6 @@ class DeployOpsAgent:
 
 
     def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize payload to DeployOps-native shape for validation and deployment."""
         if "compute_type" not in payload:
             return payload
 
@@ -797,16 +831,6 @@ class DeployOpsAgent:
         dep_config = payload.get("deployment_config", {})
         approval = payload.get("approval", {})
 
-        # DeployOps is ECS-only. EC2/Lambda payloads have no deployment path
-        # here — refuse them loudly instead of collapsing to a payload with
-        # null ecs_cluster/service_name that fails validation downstream.
-        if compute != "ecs":
-            raise ValueError(
-                f"DeployOps only supports compute_type='ecs', got "
-                f"compute_type={compute!r}. No ec2/lambda mapping exists."
-            )
-
-        # Map the nested compute-specific block onto the flat shape.
         if compute == "ecs":
             ecs_aws = aws_config.get("ecs") or {}
             ecs_dep = dep_config.get("ecs") or {}
@@ -843,6 +867,23 @@ class DeployOpsAgent:
                 "auto_rollback": True,
                 "rollback_on_alarm": True,
             }
+        elif compute == "s3":
+            s3_aws = aws_config.get("s3") or {}
+            s3_dep = dep_config.get("s3") or {}
+            flat_aws = {
+                "region": aws_config.get("region", "us-east-1"),
+                "ecs_cluster": None,
+                "service_name": None,
+                "bucket_name": s3_aws.get("bucket_name"),
+            }
+            flat_dep = {
+                "strategy": s3_dep.get("strategy", "static"),
+                "health_check_path": s3_dep.get("health_check_path", "/"),
+                "health_check_port": 80,
+                "timeout_minutes": s3_dep.get("timeout_minutes", 15),
+                "auto_rollback": True,
+                "rollback_on_alarm": True,
+            }
         else:  # lambda
             lambda_dep = dep_config.get("lambda") or {}
             flat_aws = {
@@ -859,15 +900,12 @@ class DeployOpsAgent:
                 "rollback_on_alarm": True,
             }
 
-        # Build the docker_images list from the singular image + dockerfile.
         docker_images: List[Dict[str, Any]] = []
         image = artifacts.get("docker_image")
         if image:
             dockerfile = artifacts.get("dockerfile")
             if not dockerfile:
-                # CodeScan deletes its clone after extracting artifacts, so
-                # there is never a checked-out source to fall back on , refuse to fabricate an unusable image instead.
-                
+                # CodeScan deletes its clone after extracting artifacts; never fabricate an image.
                 raise ValueError(
                     f"InfraCost payload for {image.get('name')!r} carries no "
                     "Dockerfile content; DeployOps cannot build from a "
@@ -901,17 +939,13 @@ class DeployOpsAgent:
                 "approved_by": approval.get("approved_by"),
             },
             "metadata": payload.get("metadata", {}) or {},
+            "compute_type": compute,
         }
 
     def sanitize_and_validate(self, payload: Dict[str, Any]) -> Dict[str, Any]:         
-        """
-        Validate and sanitize incoming payload. will return a cleaned payload with defaults for missing optional fields.
-        Accepts both the DeployOps-native shape and the InfraCost output format
-        (which is normalized to the native shape first).
-        """
+        """Validate/sanitize a payload; accepts DeployOps-native or InfraCost shapes (normalized first)."""
         payload = self._normalize_payload(payload)
 
-        # 1. Check top-level required fields
         required_top = ["job_id", "artifacts", "aws_config", "deployment_config", "approval"]
         for field in required_top:
             if field not in payload:
@@ -920,16 +954,13 @@ class DeployOpsAgent:
         job_id = payload["job_id"]
         if not isinstance(job_id, str) or not job_id.strip():
             raise ValueError("job_id must be a non-empty string")
-        # Sanitize job_id: alphanumeric, dash, underscore only
         if not re.match(r'^[a-zA-Z0-9_-]+$', job_id):
             raise ValueError("job_id contains invalid characters")
         
-        # 2. Validate artifacts
         artifacts = payload["artifacts"]
         if not isinstance(artifacts, dict):
             raise ValueError("artifacts must be a dictionary")
         
-        # 2a. Terraform
         terraform = artifacts.get("terraform")
         if not terraform or not isinstance(terraform, dict):
             raise ValueError("artifacts.terraform is required and must be a dict")
@@ -938,35 +969,29 @@ class DeployOpsAgent:
         if not tf_files or not isinstance(tf_files, dict):
             raise ValueError("artifacts.terraform.files is required and must be a dict")
         
-        # Validate and sanitize each terraform file
         sanitized_tf_files = {}
         for filename, content in tf_files.items():
-            # Filename sanitization: only allow alphanumeric, dot, underscore, dash
             if not re.match(r'^[a-zA-Z0-9_.-]+\.tf$', filename):
                 raise ValueError(f"Invalid terraform filename: {filename}")
-            # Ensure content is string
             if not isinstance(content, str):
                 raise ValueError(f"Content of {filename} must be a string")
-            # (Optional) More content sanitization? Not needed for terraform.
             sanitized_tf_files[filename] = content
         
-        # 2b. Terraform variables (optional)
         tf_vars = terraform.get("variables", {})
         if not isinstance(tf_vars, dict):
             raise ValueError("artifacts.terraform.variables must be a dict")
-        # Validate variable keys/values (simple type check)
         for key, value in tf_vars.items():
             if not isinstance(key, str):
                 raise ValueError("terraform variable keys must be strings")
-            # Values can be string, number, bool, list, dict, or null
             if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
                 raise ValueError(f"Invalid type for variable {key}")
         
-        # 2c. Docker images (required)
+        # s3 static sites ship plain files and carry no container images.
+        compute_type = payload.get("compute_type", "ecs")
         docker_images = artifacts.get("docker_images")
         if not docker_images or not isinstance(docker_images, list):
             raise ValueError("artifacts.docker_images is required and must be a list")
-        if len(docker_images) == 0:
+        if compute_type != "s3" and len(docker_images) == 0:
             raise ValueError("artifacts.docker_images must contain at least one image")
         for docker_image in docker_images:
             if not isinstance(docker_image, dict):
@@ -989,27 +1014,22 @@ class DeployOpsAgent:
                     "docker_image.context must be a safe relative path inside the workspace"
                 )
         
-        # 3. AWS Config
         aws_config = payload["aws_config"]
         if not isinstance(aws_config, dict):
             raise ValueError("aws_config must be a dict")
-        # Required fields
         required_aws = ["region", "ecs_cluster", "service_name"]
         for field in required_aws:
             if field not in aws_config:
                 raise ValueError(f"Missing required aws_config field: {field}")
             if not isinstance(aws_config[field], str) or not aws_config[field].strip():
                 raise ValueError(f"aws_config.{field} must be a non-empty string")
-        # Sanitize region (simple allowlist? just check format)
         region_pattern = r'^[a-z]{2}-[a-z]+-\d$'
         if not re.match(region_pattern, aws_config["region"]):
             raise ValueError(f"Invalid AWS region: {aws_config['region']}")
-        # ECS cluster name: alphanumeric, dash, underscore
         if not re.match(r'^[a-zA-Z0-9_-]+$', aws_config["ecs_cluster"]):
             raise ValueError("Invalid ecs_cluster name")
         if not re.match(r'^[a-zA-Z0-9_-]+$', aws_config["service_name"]):
             raise ValueError("Invalid service_name")
-        # Optional CPU/Memory
         task_cpu = aws_config.get("task_cpu", "256")
         task_memory = aws_config.get("task_memory", "512")
         if not isinstance(task_cpu, str) or not task_cpu.isdigit():
@@ -1017,13 +1037,10 @@ class DeployOpsAgent:
         if not isinstance(task_memory, str) or not task_memory.isdigit():
             raise ValueError("task_memory must be a string of digits")
         
-        # 4. Deployment Config
         dep_config = payload["deployment_config"]
         if not isinstance(dep_config, dict):
             raise ValueError("deployment_config must be a dict")
-        # Optional fields with default rolling deployment
         strategy = dep_config.get("strategy", "rolling")
-        #might remove canary deployment
         if strategy not in ["rolling", "blue-green", "canary"]:
             raise ValueError("deployment_config.strategy must be rolling, blue-green, or canary")
         health_path = dep_config.get("health_check_path", "/health")
@@ -1042,7 +1059,6 @@ class DeployOpsAgent:
         if not isinstance(max_percent, int) or max_percent < 100:
             raise ValueError("max_percent must be at least 100")
         
-        # 5. Approval
         approval = payload["approval"]
         if not isinstance(approval, dict):
             raise ValueError("approval must be a dict")
@@ -1053,7 +1069,6 @@ class DeployOpsAgent:
         if approved_by and not isinstance(approved_by, str):
             raise ValueError("approved_by must be a string")
         
-        # Build sanitized payload to pass to next job
         sanitized = {
             "job_id": job_id,
             "artifacts": {

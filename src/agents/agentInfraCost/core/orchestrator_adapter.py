@@ -35,14 +35,13 @@ from core.region_comparator import compare_regions
 from core.scenario_simulator import simulate_load_scenarios
 from models.output_schema import InfraCostOutput
 
-OrchestratorArchitecture = Literal["ecs_fargate", "lambda", "ec2", "hybrid"]
+OrchestratorArchitecture = Literal["ecs_fargate", "lambda", "ec2", "s3", "hybrid"]
 
 
 class OrchestratorInfraCostResult(TypedDict):
-    """Mirrors ``src/subgroup2/orchestrator/graph.py``'s ``InfraCostResult``
-    (as of 2026-08-05). See the module docstring for why this is a local
-    copy rather than an import.
-    """
+    """Mirrors the orchestrator's ``InfraCostResult`` TypedDict (as of
+    2026-08-05). See the module docstring for why this is a local copy
+    rather than an import."""
 
     architecture_recommendation: OrchestratorArchitecture
     justification: str
@@ -55,12 +54,13 @@ class OrchestratorInfraCostResult(TypedDict):
 
 # "hybrid" is part of the orchestrator's Literal but this agent never
 # produces it — decide_architecture_via_llm is itself restricted to
-# {ecs, lambda, ec2} (see llm_architecture_advisor.py), so there is no
+# {ecs, lambda, ec2, s3} (see llm_architecture_advisor.py), so there is no
 # ComputeType value that would need to map to it.
 _ARCHITECTURE_RECOMMENDATION: dict[ComputeType, OrchestratorArchitecture] = {
     "ecs": "ecs_fargate",
     "lambda": "lambda",
     "ec2": "ec2",
+    "s3": "s3",
 }
 
 

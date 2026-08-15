@@ -41,21 +41,27 @@ REFINER_RETRY_DELAY_SECONDS: Final[float] = float(
     os.getenv("REFINER_RETRY_DELAY_SECONDS", "1.0")
 )
 
-# ECS
 ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
 ECS_SERVICE_NAME: Final[str] = "app-service"
 ECS_HEALTH_CHECK_PORT: Final[int] = 8080
 ECS_HEALTH_CHECK_PATH: Final[str] = "/health"
 ECS_TASK_EXECUTION_ROLE_NAME: Final[str] = "devguard-task-execution-role"
 
-# Lambda
 LAMBDA_FUNCTION_NAME: Final[str] = "app-handler"
 LAMBDA_HANDLER: Final[str] = "handler.main"
 LAMBDA_RUNTIME: Final[str] = "python3.12"
 LAMBDA_TIMEOUT_SECONDS: Final[int] = 30
 
-# EC2
 EC2_AMI_ID: Final[str] = "ami-0000000000000000"
 EC2_KEY_PAIR_NAME: Final[str] = "devguard-key"
 EC2_INSTANCE_COUNT: Final[int] = 1
 EC2_INSTANCE_NAME: Final[str] = "devguard-app"
+EC2_HEALTH_CHECK_PORT: Final[int] = 8080
+EC2_HEALTH_CHECK_PATH: Final[str] = "/health"
+EC2_INSTANCE_PORT: Final[int] = 8080
+EC2_SSH_CIDR: Final[str] = "0.0.0.0/0"
+
+S3_BUCKET_PREFIX: Final[str] = "devguard-static"
+S3_INDEX_DOCUMENT: Final[str] = "index.html"
+S3_ERROR_DOCUMENT: Final[str] = "404.html"
+S3_HEALTH_CHECK_PATH: Final[str] = "/"

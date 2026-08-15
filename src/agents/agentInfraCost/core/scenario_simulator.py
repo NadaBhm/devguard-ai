@@ -62,8 +62,6 @@ _EC2_USERS_PER_REFERENCE_INSTANCE: Final[int] = 400
 
 
 class ScenarioResult(BaseModel):
-    """The recomputed sizing and cost for one load level."""
-
     users: int
     sizing: dict[str, int | str]
     estimated_monthly_cost: Money
@@ -126,10 +124,19 @@ def _simulate_ec2(decision: DecisionResult, users: int) -> ScenarioResult:
     )
 
 
+def _simulate_s3(decision: DecisionResult, users: int) -> ScenarioResult:
+    # Static hosting doesn't scale compute with traffic — a flat cost at every
+    # load level, roughly the baseline (storage dominates, not users).
+    cost = estimate_cost(decision)
+    sizing = {**decision.sizing}
+    return ScenarioResult(users=users, sizing=sizing, estimated_monthly_cost=cost)
+
+
 _SIMULATORS = {
     "ecs": _simulate_ecs,
     "lambda": _simulate_lambda,
     "ec2": _simulate_ec2,
+    "s3": _simulate_s3,
 }
 
 

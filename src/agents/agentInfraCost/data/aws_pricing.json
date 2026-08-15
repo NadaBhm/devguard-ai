@@ -28,6 +28,7 @@
     "m5.large": 0.096, "m6i.large": 0.096, "m7g.large": 0.0816
   },
   "ebs_gp3_per_gb_month": 0.08,
+  "s3_standard_per_gb_month": 0.023,
   "optimization_discounts": {
     "spot_avg_pct": 0.65, "reserved_1yr_pct": 0.42, "reserved_3yr_pct": 0.60, "graviton_pct": 0.20,
     "_note": "Pourcentages moyens observés, utilisés par finops_optimizer.py pour projeter une économie estimée. Ne remplacent pas un devis AWS réel."

@@ -34,8 +34,6 @@ _PRIVATE_KEY_PREFIX: Final[str] = "_"
 
 
 class RegionCost(BaseModel):
-    """The estimated monthly cost of the same architecture in one region."""
-
     region: str
     estimated_monthly_cost: Money
 

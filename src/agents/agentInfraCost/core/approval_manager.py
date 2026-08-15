@@ -19,8 +19,6 @@ from models.output_schema import Approval, ApprovalStatus
 
 
 class InvalidApprovalTransitionError(Exception):
-    """An approve/reject action was attempted from a non-``pending`` state."""
-
     def __init__(self, job_id: str, current_status: ApprovalStatus, attempted_action: str) -> None:
         self.job_id = job_id
         self.current_status = current_status
@@ -53,24 +51,12 @@ class ApprovalManager:
         return self._approved_by
 
     def approve(self, approved_by: str) -> None:
-        """Move ``pending`` -> ``approved``.
-
-        Raises:
-            InvalidApprovalTransitionError: the job isn't ``pending``
-                (already approved, or already rejected).
-        """
         if self._status != "pending":
             raise InvalidApprovalTransitionError(self.job_id, self._status, "approve")
         self._status = "approved"
         self._approved_by = approved_by
 
     def reject(self) -> None:
-        """Move ``pending`` -> ``rejected``.
-
-        Raises:
-            InvalidApprovalTransitionError: the job isn't ``pending``
-                (already approved, or already rejected).
-        """
         if self._status != "pending":
             raise InvalidApprovalTransitionError(self.job_id, self._status, "reject")
         self._status = "rejected"

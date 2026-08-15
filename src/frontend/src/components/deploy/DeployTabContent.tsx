@@ -5,7 +5,7 @@ import type { Deployment, DeploymentStatus } from "../../types/results"
 import { formatCurrency, formatDate } from "../../lib/format"
 import { Button } from "../ui/Button"
 import { Badge } from "../ui/Badge"
-import { IconCheck, IconX } from "../icons"
+import { IconCheck, IconExternal, IconX } from "../icons"
 
 const statusMeta: Record<DeploymentStatus, { label: string; tone: "accent" | "neutral" | "success" | "warning" | "danger" }> = {
   pending: { label: "Pending", tone: "neutral" },
@@ -19,6 +19,45 @@ const envMeta = {
   dev: { label: "Development", dot: "bg-low" },
   staging: { label: "Staging", dot: "bg-medium" },
   prod: { label: "Production", dot: "bg-accent" },
+}
+
+function getTerraformOutputs(infrastructureJson: Record<string, unknown> | null): {
+  ecsClusterName?: string;
+  serviceName?: string;
+  albDns?: string;
+} {
+  if (!infrastructureJson?.terraform_outputs) return {};
+  const outputs = infrastructureJson.terraform_outputs as Record<string, unknown>;
+  return {
+    ecsClusterName: outputs.ecs_cluster_name as string,
+    serviceName: outputs.service_name as string,
+    albDns: outputs.alb_dns as string,
+  };
+}
+
+function normalizeExternalUrl(value: string | null | undefined): string | undefined {
+  if (!value) return undefined
+
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  if (trimmed.startsWith("//")) return `http:${trimmed}`
+  if (/^[a-z0-9.-]+(?::\d+)?(?:\/.*)?$/i.test(trimmed) && !trimmed.startsWith("/")) {
+    return `http://${trimmed}`
+  }
+
+  return undefined
+}
+
+function getDeployedUrl(infrastructureJson: Record<string, unknown> | null): string | undefined {
+  if (!infrastructureJson) return undefined
+
+  const deployedUrl = normalizeExternalUrl(infrastructureJson.deployed_url as string | undefined)
+  if (deployedUrl) return deployedUrl
+
+  const outputs = getTerraformOutputs(infrastructureJson)
+  if (outputs.albDns) return normalizeExternalUrl(outputs.albDns)
+  return undefined
 }
 
 export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; jobId?: string }) {
@@ -140,6 +179,8 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
       {deployments.map((d) => {
         const meta = statusMeta[d.status]
         const envMetaFor = envMeta[d.environment] ?? envMeta.dev
+        const tfOutputs = getTerraformOutputs(d.infrastructure_json)
+        const deployedUrl = getDeployedUrl(d.infrastructure_json)
         return (
           <div key={d.id} className="rounded-lg border border-border bg-surface-2">
             <div className="flex items-center gap-3 px-4 py-3">
@@ -169,6 +210,34 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
                 <dt className="text-faint">State ID</dt>
                 <dd className="max-w-[180px] truncate font-mono text-muted">{d.terraform_state_id ?? "—"}</dd>
               </div>
+              {tfOutputs.ecsClusterName && (
+                <div className="col-span-2 flex justify-between">
+                  <dt className="text-faint">ECS Cluster</dt>
+                  <dd className="font-mono text-foreground">{tfOutputs.ecsClusterName}</dd>
+                </div>
+              )}
+              {tfOutputs.serviceName && (
+                <div className="col-span-2 flex justify-between">
+                  <dt className="text-faint">ECS Service</dt>
+                  <dd className="font-mono text-foreground">{tfOutputs.serviceName}</dd>
+                </div>
+              )}
+              {deployedUrl && (
+                <div className="col-span-2 flex justify-between items-center">
+                  <dt className="text-faint">URL</dt>
+                  <dd className="flex items-center gap-2">
+                    <a
+                      href={deployedUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-mono text-accent hover:underline flex items-center gap-1.5"
+                    >
+                      {deployedUrl}
+                      <IconExternal className="size-3.5" />
+                    </a>
+                  </dd>
+                </div>
+              )}
               {d.rollback_reason && (
                 <div className="col-span-2 flex justify-between">
                   <dt className="text-faint">Rollback reason</dt>

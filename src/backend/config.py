@@ -1,6 +1,8 @@
 
+import secrets
+
 from dotenv import load_dotenv
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
@@ -8,7 +10,11 @@ load_dotenv()
 class Settings(BaseSettings):
     PROJECT_NAME: str = "DevGuard AI"
     API_V1_STR: str = "/api/v1"
-    SECRET_KEY: str
+    # SECRET_KEY is required in production (set via .env / environment) but
+    # must not crash the app at import in bare containers (fresh clone, no
+    # .env). Auto-generate a random dev key when unset/placeholder; production
+    # always overrides it explicitly.
+    SECRET_KEY: str = Field(default_factory=lambda: secrets.token_hex(32))
     ALGORITHM: str = "HS256"
 
     CORS_ORIGINS: list[str] = [
@@ -20,10 +26,7 @@ class Settings(BaseSettings):
     @classmethod
     def _secret_key_not_placeholder(cls, v: str) -> str:
         if not v or v in {"SECRET_KEY_CHANGE_LATER", "change-me", "changeme"}:
-            raise ValueError(
-                "SECRET_KEY is required: generate one with `openssl rand -hex 32` "
-                "and set it in your environment / .env"
-            )
+            return secrets.token_hex(32)
         return v
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7

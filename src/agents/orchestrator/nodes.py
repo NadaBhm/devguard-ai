@@ -660,7 +660,7 @@ def deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
                 "DEVGUARD_REAL_INFRACOST=1 as well, or turn DeployOps back to mock."
             )
         deploy_payload = translate_infracost_to_deploy_payload(
-            job_id, raw_output, approved_by=approved_by
+            job_id, raw_output, approved_by=approved_by, repo_url=state.get("repo_url")
         )
 
     state["deployops_result"] = run_sync(call_deployops(deploy_payload, job_id))

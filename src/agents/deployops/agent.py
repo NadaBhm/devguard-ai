@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,6 +111,23 @@ class DeployOpsAgent:
         # was ephemeral by accident, not by choice.
         workspace_dir = self._workspace_dir(job_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        # Real source for the docker build. InfraCost's payload only carries
+        # Dockerfile + terraform; without the repo checkout the build context
+        # has no package.json/app code and any real image build fails (e.g.
+        # `npm ci` -> "npm ci can only install packages when your package.json
+        # and package-lock.json ... are in sync"). Clone the source into the
+        # workspace when the payload gives us a URL, as the mock/sandbox
+        # environments do via _write_artifacts' context copy.
+        repo_url = (deploy_payload.metadata or {}).get("repo_url")
+        if repo_url:
+            from src.lib.repo import clone_repo
+            try:
+                clone_repo(repo_url, workspace_dir)
+                self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
+            except Exception as exc:  # noqa: BLE001 - surface as failed deploy
+                self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
+                return {"status": "failed", "job_id": job_id, "error": f"source clone failed: {exc}"}
 
         # Write Terraform artifacts to workspace
         await self._write_artifacts(deploy_payload.artifacts, workspace_dir)
@@ -640,6 +658,27 @@ class DeployOpsAgent:
                     self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
+    async def _run_docker_cmd(self, cmd: list[str], timeout: float = 300.0) -> tuple[int, str, str]:
+        """Run a docker command with a temporary DOCKER_CONFIG to avoid macOS credential helper hangs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text('{"credsStore": ""}')
+            env = os.environ.copy()
+            env["DOCKER_CONFIG"] = tmpdir
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                return -1, "", f"timed out after {timeout}s"
+            return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+
     @xray_recorder.capture("_build_and_push_image")  # type: ignore[reportCallIssue]
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
@@ -662,7 +701,7 @@ class DeployOpsAgent:
         except ecr_client.exceptions.RepositoryAlreadyExistsException:
             pass
 
-        # Use ECR authorization token instead of relying on AWS CLI env
+# Use ECR authorization token instead of relying on AWS CLI env
         auth_response = ecr_client.get_authorization_token()
         auth_data = auth_response["authorizationData"][0]
         token = auth_data["authorizationToken"]
@@ -670,16 +709,11 @@ class DeployOpsAgent:
         decoded_token = base64.b64decode(token).decode("utf-8")
         password = decoded_token.split(":", 1)[1]
 
-        login_cmd = ["docker", "login", "--username", "AWS", "--password-stdin", proxy_endpoint]
-        process = await asyncio.create_subprocess_exec(
-            *login_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate(input=password.encode())
-        if process.returncode != 0:
-            self.logger.error(f"ECR login failed: {stderr.decode('utf-8', errors='replace')}")
+        # ECR login with temporary DOCKER_CONFIG to avoid macOS credential helper hangs
+        login_cmd = ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint]
+        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint], timeout=60.0)
+        if returncode != 0:
+            self.logger.error(f"ECR login failed: {stderr}")
             return None
 
         # ECR repository URI
@@ -687,29 +721,18 @@ class DeployOpsAgent:
         image_uri = f"{ecr_repo}:{image_tag}"
 
         # Build Docker image with platform for Fargate compatibility
-        # Build context is relative to workspace
         build_context = self._workspace_dir(job_id) / docker_image.context
         build_cmd = ["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)]
-        result = await asyncio.create_subprocess_exec(
-            *build_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.logger.error(f"Docker build failed: {stderr.decode('utf-8', errors='replace')}")
+        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)], timeout=600.0)
+        if returncode != 0:
+            self.logger.error(f"Docker build failed: {stderr}")
             return None
 
         # Push to ECR
         push_cmd = ["docker", "push", image_uri]
-        result = await asyncio.create_subprocess_exec(
-            *push_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.logger.error(f"Docker push failed: {stderr.decode('utf-8', errors='replace')}")
+        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "push", image_uri], timeout=300.0)
+        if returncode != 0:
+            self.logger.error(f"Docker push failed: {stderr}")
             return None
 
         self.logger.info(f"Image pushed: {image_uri}")
@@ -877,6 +900,7 @@ class DeployOpsAgent:
                 "deploy_approved": status == "approved",
                 "approved_by": approval.get("approved_by"),
             },
+            "metadata": payload.get("metadata", {}) or {},
         }
 
     def sanitize_and_validate(self, payload: Dict[str, Any]) -> Dict[str, Any]:         
@@ -1066,7 +1090,8 @@ class DeployOpsAgent:
             "approval": {
                 "deploy_approved": deploy_approved,
                 "approved_by": approved_by
-            }
+            },
+            "metadata": payload.get("metadata", {}) or {}
         }
         
         self.logger.info(f"Payload validated and sanitized for job {job_id}")

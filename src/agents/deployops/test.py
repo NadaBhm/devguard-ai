@@ -395,6 +395,58 @@ async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_
 @patch("asyncio.create_subprocess_exec")
 @patch("src.agents.deployops.agent.AWSClient")
 @patch("src.agents.deployops.agent.TerraformRunner")
+@patch("src.lib.repo.clone_repo")
+async def test_deploy_clones_repo_into_workspace(mock_clone, mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
+    """A payload carrying metadata.repo_url must clone the source into the
+    build workspace, otherwise a real image build has no package.json and dies
+    (npm ci)."""
+    tf_instance = MagicMock()
+    tf_instance.init.return_value = True
+    tf_instance.plan.return_value = {"planned": "changes"}
+    tf_instance.apply.return_value = True
+    tf_instance.output.return_value = {"frontend_url": {"value": "http://test.com"}}
+    mock_tf_runner.return_value = tf_instance
+
+    aws_instance = MagicMock()
+    aws_instance.get_account_id.return_value = "123456789012"
+    mock_aws_client.return_value = aws_instance
+
+    ecr_client = MagicMock()
+    ecr_client.get_authorization_token.return_value = {
+        "authorizationData": [
+            {
+                "authorizationToken": "QVdTOmZha2V0b2tlbg==",
+                "proxyEndpoint": "https://123456789012.dkr.ecr.us-east-1.amazonaws.com",
+            }
+        ]
+    }
+    aws_instance.session.client.return_value = ecr_client
+
+    mock_proc = AsyncMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    mock_create_subprocess_shell.return_value = mock_proc
+    mock_create_subprocess_exec.return_value = mock_proc
+
+    sample_payload["metadata"] = {"repo_url": "https://github.com/owner/repo"}
+    workspace_dir = Path("/tmp/deployops/test_job_123")
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch.object(agent, "health_check", new_callable=AsyncMock, return_value={"passed": True}):
+        result = await agent.deploy(sample_payload)
+
+    assert result["status"] == "success"
+    mock_clone.assert_called_once()
+    args, kwargs = mock_clone.call_args
+    assert args[0] == "https://github.com/owner/repo"
+    assert Path(args[1]).resolve() == workspace_dir.resolve()
+
+
+@pytest.mark.asyncio
+@patch("asyncio.create_subprocess_shell")
+@patch("asyncio.create_subprocess_exec")
+@patch("src.agents.deployops.agent.AWSClient")
+@patch("src.agents.deployops.agent.TerraformRunner")
 async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
     """Test deploy when health check fails -> rollback called."""
     # Setup similar mocks

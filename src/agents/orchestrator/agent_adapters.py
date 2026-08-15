@@ -512,6 +512,7 @@ def translate_infracost_to_deploy_payload(
     deploy_inputs: dict[str, Any],
     *,
     approved_by: str,
+    repo_url: str | None = None,
 ) -> dict[str, Any]:
     """
     Build a DeployOps-compatible payload from InfraCost's raw output.
@@ -522,6 +523,10 @@ def translate_infracost_to_deploy_payload(
             _run_infracost_pipeline() - compute_type / artifacts / aws_config
             / deployment_config, model_dump(by_alias=True).
         approved_by: whoever approved human gate 2.
+        repo_url: source repository URL, forwarded so DeployOps can clone the
+            code into its build workspace. Without it DeployOps would try to
+            build an image from an empty context (only Dockerfile + terraform),
+            which fails for any real repo (e.g. `npm ci` finds no package.json).
 
     Raises:
         ValueError: if the compute type is one DeployOps can't deploy, or if
@@ -613,7 +618,7 @@ def translate_infracost_to_deploy_payload(
             "approved_by": approved_by,
             "approved_at": datetime.now(timezone.utc).isoformat(),
         },
-        "metadata": {},
+        "metadata": {"repo_url": repo_url} if repo_url else {},
     }
 
     if not payload["aws_config"]["ecs_cluster"] or not payload["aws_config"]["service_name"]:

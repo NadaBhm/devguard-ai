@@ -220,6 +220,19 @@ class TestInfraCostToDeployPayload:
         )
         assert payload["job_id"] == "job-abc"
 
+    def test_repo_url_is_forwarded_when_given(self, deploy_inputs):
+        payload = translate_infracost_to_deploy_payload(
+            "job-abc", deploy_inputs, approved_by="x",
+            repo_url="https://github.com/owner/repo",
+        )
+        assert payload["metadata"]["repo_url"] == "https://github.com/owner/repo"
+
+    def test_repo_url_omitted_when_not_given(self, deploy_inputs):
+        payload = translate_infracost_to_deploy_payload(
+            "job-abc", deploy_inputs, approved_by="x"
+        )
+        assert payload["metadata"] == {}
+
 
 class TestTranslationFailsLoudly:
     """Every one of these would otherwise be a silent no-op deep inside AWS."""

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react"
+import { useState, type ChangeEvent, type FormEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { useMutation } from "@tanstack/react-query"
 import { jobsApi } from "../api/jobs"
@@ -9,20 +9,44 @@ import { PageHeader } from "../components/ui/Misc"
 import { IconCost, IconDeploy, IconRepo, IconShield } from "../components/icons"
 import { ApiError } from "../api/client"
 
+type SourceType = "github" | "gitlab" | "local_folder"
+
 export function NewRunPage() {
   const navigate = useNavigate()
+  const [sourceType, setSourceType] = useState<SourceType>("github")
   const [repoUrl, setRepoUrl] = useState("")
   const [commitSha, setCommitSha] = useState("HEAD")
   const [defaultBranch, setDefaultBranch] = useState("main")
+  const [uploadedFiles, setUploadedFiles] = useState<FileList | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const mutation = useMutation({
-    mutationFn: () =>
-      jobsApi.create({
-        repo_url: repoUrl.trim(),
+    mutationFn: async () => {
+      if (sourceType === "local_folder") {
+        if (!uploadedFiles || uploadedFiles.length === 0) {
+          throw new Error("Select a project folder to upload")
+        }
+
+        const formData = new FormData()
+        formData.append("commit_sha", commitSha || "HEAD")
+        formData.append("default_branch", defaultBranch)
+        formData.append("source_type", "local_folder")
+        Array.from(uploadedFiles).forEach((file) => {
+          const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+          formData.append("files", file, relPath)
+        })
+
+        return jobsApi.upload(formData)
+      }
+
+      const validUrl = getRepoUrl(sourceType, repoUrl)
+      return jobsApi.create({
+        repo_url: validUrl,
+        source_type: sourceType,
         commit_sha: commitSha || "HEAD",
         default_branch: defaultBranch,
-      }),
+      })
+    },
     onSuccess: (res) => {
       if (res.job_id) navigate(`/runs/${res.job_id}`)
     },
@@ -31,10 +55,25 @@ export function NewRunPage() {
   function onSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
-    if (!isValidRepoUrl(repoUrl)) {
-      setError("Enter a valid GitHub repository URL, e.g. https://github.com/org/repo")
+
+    if (sourceType === "local_folder") {
+      if (!uploadedFiles || uploadedFiles.length === 0) {
+        setError("Please upload a project folder first.")
+        return
+      }
+      mutation.mutate()
       return
     }
+
+    if (!isValidRepoUrl(repoUrl, sourceType)) {
+      setError(
+        sourceType === "gitlab"
+          ? "Enter a valid GitLab repository URL, e.g. https://gitlab.com/org/repo"
+          : "Enter a valid GitHub repository URL, e.g. https://github.com/org/repo",
+      )
+      return
+    }
+
     mutation.mutate()
   }
 
@@ -46,22 +85,67 @@ export function NewRunPage() {
       />
 
       <form onSubmit={onSubmit} className="space-y-5">
-        <Card title="Repository" description="DevGuard clones the repo and runs the analysis pipeline.">
+        <Card title="Repository" description="Choose a public repo or upload a local project folder.">
           <div className="space-y-4">
-            <Field label="GitHub URL" hint="Public repository">
-              <div className="relative">
-                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-faint">
-                  <IconRepo className="size-4" />
-                </span>
-                <Input
-                  autoFocus
-                  value={repoUrl}
-                  onChange={(e) => setRepoUrl(e.target.value)}
-                  placeholder="https://github.com/org/repo"
-                  className="pl-9 font-mono text-[13px]"
-                />
+            <Field label="Repository source">
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { value: "github", label: "GitHub" },
+                  { value: "gitlab", label: "GitLab" },
+                  { value: "local_folder", label: "Local folder" },
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setSourceType(option.value as SourceType)}
+                    className={`rounded-md border px-3 py-2 text-sm transition ${
+                      sourceType === option.value
+                        ? "border-accent bg-accent/10 text-foreground"
+                        : "border-border bg-surface-2 text-muted hover:border-border-strong"
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
               </div>
             </Field>
+
+            {sourceType !== "local_folder" && (
+              <Field label={sourceType === "gitlab" ? "GitLab URL" : "GitHub URL"} hint="Public repository">
+                <div className="relative">
+                  <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-faint">
+                    <IconRepo className="size-4" />
+                  </span>
+                  <Input
+                    autoFocus
+                    value={repoUrl}
+                    onChange={(e) => setRepoUrl(e.target.value)}
+                    placeholder={
+                      sourceType === "gitlab"
+                        ? "https://gitlab.com/org/project"
+                        : "https://github.com/org/repo"
+                    }
+                    className="pl-9 font-mono text-[13px]"
+                  />
+                </div>
+              </Field>
+            )}
+
+            {sourceType === "local_folder" && (
+              <Field label="Project folder" hint="Upload a directory">
+                <input
+                  {...({
+                    type: "file",
+                    multiple: true,
+                    webkitdirectory: "",
+                    directory: "",
+                    onChange: (e: ChangeEvent<HTMLInputElement>) => setUploadedFiles(e.target.files),
+                    className:
+                      "block w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-foreground file:mr-3 file:rounded file:border-0 file:bg-accent/10 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-accent",
+                  } as any)}
+                />
+              </Field>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <Field label="Default branch">
@@ -107,10 +191,22 @@ export function NewRunPage() {
   )
 }
 
-function isValidRepoUrl(url: string): boolean {
+function getRepoUrl(_sourceType: SourceType, value: string): string {
+  return value.trim().replace(/\/+$/, "")
+}
+
+function isValidRepoUrl(url: string, sourceType: SourceType): boolean {
   try {
     const u = new URL(url)
-    return u.protocol === "https:" && u.hostname.endsWith("github.com") && u.pathname.split("/").filter(Boolean).length >= 2
+    if (u.protocol !== "https:") return false
+    const parts = u.pathname.split("/").filter(Boolean)
+    if (sourceType === "github") {
+      return u.hostname.endsWith("github.com") && parts.length >= 2
+    }
+    if (sourceType === "gitlab") {
+      return u.hostname.endsWith("gitlab.com") && parts.length >= 2
+    }
+    return false
   } catch {
     return false
   }

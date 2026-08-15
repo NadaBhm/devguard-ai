@@ -28,8 +28,11 @@ export interface JobListResponse {
   jobs: JobSummary[]
 }
 
+export type SourceType = "github" | "gitlab" | "local_folder"
+
 export interface JobCreate {
-  repo_url: string
+  repo_url?: string
+  source_type?: SourceType
   commit_sha?: string
   commit_message?: string
   default_branch?: string

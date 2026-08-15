@@ -26,10 +26,11 @@ functions :
 
 import asyncio
 import logging
+import tempfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -57,7 +58,8 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 class JobCreate(BaseModel):
-    repo_url: str = Field(..., description="Public GitHub repository URL")
+    repo_url: str | None = Field(default=None, description="Public GitHub/GitLab repository URL or local folder path")
+    source_type: str = Field(default="github", description="github | gitlab | local_folder")
     commit_sha: str = "HEAD"
     commit_message: str | None = None
     default_branch: str = "main"
@@ -122,6 +124,22 @@ def _create_run(
     return run
 
 
+def _store_uploaded_files(files: list[UploadFile], job_id: str) -> Path:
+    """Persist uploaded project files into a temp folder and return the directory."""
+    base_dir = Path(tempfile.mkdtemp(prefix=f"devguard_upload_{job_id}_"))
+    for uploaded in files:
+        if not uploaded.filename:
+            continue
+        relative = PurePosixPath(uploaded.filename)
+        if relative.is_absolute() or any(part in ("..", "") for part in relative.parts):
+            continue
+        target = base_dir.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = uploaded.file.read()
+        target.write_bytes(content)
+    return base_dir
+
+
 def _get_owned_run(db: Session, job_id: str, user_id: str) -> models.AnalysisRun:
     """Fetch a run that belongs to ``user_id`` or 404 (without revealing the
     run's existence to other tenants)."""
@@ -174,28 +192,28 @@ def _publish_node_progress(job_id: str):
     return handler
 
 
-@router.post("/", status_code=201)
-def create_job(
-    body: JobCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+def _create_job_for_repo(
+    db: Session,
+    current_user: models.User,
+    repo_url: str,
+    default_branch: str,
+    commit_sha: str,
+    commit_message: str | None,
 ):
-    """Start a job: create Project + AnalysisRun, run the orchestrator up to
-    the first human gate, and persist the resulting state."""
-    project = _get_or_create_project(db, current_user.id, body.repo_url, body.default_branch)
-    run = _create_run(db, project, current_user.id, body.commit_sha, body.commit_message)
+    project = _get_or_create_project(db, current_user.id, repo_url, default_branch)
+    run = _create_run(db, project, current_user.id, commit_sha, commit_message)
 
-    logger.info(f"Starting orchestrator for run {run.id} | repo {body.repo_url}")
+    logger.info(f"Starting orchestrator for run {run.id} | repo {repo_url}")
     publish_progress(str(run.id), phase="start", progress=5, message="Job started")
 
     try:
         from src.agents.orchestrator.graph import run_workflow
         state = run_workflow(
-            repo_url=body.repo_url,
+            repo_url=repo_url,
             thread_id=str(run.id),
             on_node_progress=_publish_node_progress(str(run.id)),
         )
-        state["job_id"] = str(run.id)  # keep orchestrator job_id == DB run id
+        state["job_id"] = str(run.id)
     except Exception as exc:
         logger.error(f"run_workflow failed for {run.id}: {exc}", exc_info=True)
         state = {"status": "failed", "error": str(exc), "job_id": str(run.id)}
@@ -215,6 +233,51 @@ def create_job(
         "mode": report_mode(),
         "state": serialize_state(state),
     }
+
+
+@router.post("/", status_code=201)
+def create_job(
+    body: JobCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Start a job: create Project + AnalysisRun, run the orchestrator up to
+    the first human gate, and persist the resulting state."""
+    if not body.repo_url:
+        raise HTTPException(status_code=400, detail="A repository URL is required")
+    return _create_job_for_repo(
+        db,
+        current_user,
+        body.repo_url,
+        body.default_branch,
+        body.commit_sha,
+        body.commit_message,
+    )
+
+
+@router.post("/upload", status_code=201)
+def upload_job(
+    files: list[UploadFile] = File(...),
+    commit_sha: str = Form("HEAD"),
+    commit_message: str | None = Form(default=None),
+    default_branch: str = Form("main"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Create a run from a locally uploaded project directory."""
+    if not files:
+        raise HTTPException(status_code=400, detail="No project files were uploaded")
+
+    extracted_dir = _store_uploaded_files(files, "upload")
+    repo_url = str(extracted_dir)
+    return _create_job_for_repo(
+        db,
+        current_user,
+        repo_url,
+        default_branch,
+        commit_sha,
+        commit_message,
+    )
 
 
 @router.post("/{job_id}/approve")

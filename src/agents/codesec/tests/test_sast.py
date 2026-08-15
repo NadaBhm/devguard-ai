@@ -1,4 +1,3 @@
-"""Tests for SAST (Static Application Security Testing) scanner."""
 import json
 import subprocess
 from pathlib import Path
@@ -17,8 +16,6 @@ from codesec.models import SASTFinding, Severity
 
 
 class TestNormalizeSeverity:
-    """Test severity string normalization."""
-
     def test_critical(self):
         assert _normalize_severity("critical") == Severity.CRITICAL
         assert _normalize_severity("CRITICAL") == Severity.CRITICAL
@@ -48,8 +45,6 @@ class TestNormalizeSeverity:
 
 
 class TestMapCWEToOWASP:
-    """Test CWE to OWASP Top 10 mapping."""
-
     def test_sql_injection(self):
         result = _map_cwe_to_owasp("CWE-89")
         assert result is not None
@@ -83,8 +78,6 @@ class TestMapCWEToOWASP:
 
 
 class TestSASTFindingModel:
-    """Test SASTFinding Pydantic model."""
-
     def test_creation(self):
         finding = SASTFinding(
             rule_id="python.sql-injection",
@@ -136,10 +129,7 @@ class TestSASTFindingModel:
 
 
 class TestRunSAST:
-    """Test the main SAST scan function."""
-
     def test_run_sast_on_python_repo(self, sample_python_repo: Path):
-        """SAST should find or handle Python repo."""
         findings = run_sast(sample_python_repo)
 
         assert isinstance(findings, list)
@@ -150,7 +140,6 @@ class TestRunSAST:
             assert finding.message
 
     def test_run_sast_on_node_repo(self, sample_node_repo: Path):
-        """SAST should handle Node.js repos."""
         findings = run_sast(sample_node_repo)
 
         assert isinstance(findings, list)
@@ -158,14 +147,12 @@ class TestRunSAST:
             assert isinstance(finding, SASTFinding)
 
     def test_run_sast_empty_repo(self, temp_repo: Path):
-        """SAST on empty repo should return empty list."""
         findings = run_sast(temp_repo)
         assert findings == []
 
     @patch("codesec.scanners.sast._run_semgrep")
     @patch("codesec.scanners.sast._run_bandit")
     def test_run_sast_uses_semgrep_first(self, mock_bandit, mock_semgrep, sample_python_repo: Path):
-        """Test that Semgrep is tried first, Bandit as fallback."""
         mock_semgrep.return_value = [
             SASTFinding(
                 rule_id="test.rule",
@@ -184,13 +171,11 @@ class TestRunSAST:
         mock_semgrep.assert_called_once()
         assert len(findings) == 1
         assert findings[0].tool == "semgrep"
-        # Bandit should NOT be called since Semgrep found something
         mock_bandit.assert_not_called()
 
     @patch("codesec.scanners.sast._run_semgrep")
     @patch("codesec.scanners.sast._run_bandit")
     def test_run_sast_falls_back_to_bandit(self, mock_bandit, mock_semgrep, sample_python_repo: Path):
-        """Test Bandit fallback when Semgrep returns empty."""
         mock_semgrep.return_value = []
         mock_bandit.return_value = [
             SASTFinding(
@@ -214,7 +199,6 @@ class TestRunSAST:
     @patch("codesec.scanners.sast._run_semgrep")
     @patch("codesec.scanners.sast._run_bandit")
     def test_run_sast_deduplicates(self, mock_bandit, mock_semgrep, sample_python_repo: Path):
-        """Test that duplicate findings are deduplicated."""
         finding = SASTFinding(
             rule_id="dup.rule",
             tool="semgrep",
@@ -224,20 +208,17 @@ class TestRunSAST:
             line=10,
             message="Duplicate",
         )
-        mock_semgrep.return_value = [finding, finding]  # Duplicate
+        mock_semgrep.return_value = [finding, finding]
         mock_bandit.return_value = []
 
         findings = run_sast(sample_python_repo)
 
-        assert len(findings) == 1  # Should be deduplicated
+        assert len(findings) == 1
 
 
 class TestRunSemgrep:
-    """Test Semgrep execution."""
-
     @patch("codesec.scanners.sast.run_subprocess")
     def test_run_semgrep_success(self, mock_run, tmp_path: Path):
-        """Test successful Semgrep execution."""
         mock_output = {
             "results": [
                 {
@@ -262,7 +243,6 @@ class TestRunSemgrep:
             stderr=""
         )
 
-        # Create a Python file
         (tmp_path / "app.py").write_text("from flask import Flask\napp = Flask(__name__)")
 
         findings = _run_semgrep(tmp_path)
@@ -274,7 +254,6 @@ class TestRunSemgrep:
 
     @patch("codesec.scanners.sast.run_subprocess")
     def test_run_semgrep_not_installed(self, mock_run, tmp_path: Path):
-        """Test Semgrep when tool is not installed."""
         from codesec.scanners import ScannerError
         mock_run.side_effect = ScannerError("semgrep not found")
 
@@ -285,7 +264,6 @@ class TestRunSemgrep:
 
     @patch("codesec.scanners.sast.run_subprocess")
     def test_run_semgrep_invalid_json(self, mock_run, tmp_path: Path):
-        """Test Semgrep returning invalid JSON."""
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="not valid json",
@@ -299,7 +277,6 @@ class TestRunSemgrep:
 
     @patch("codesec.scanners.sast.run_subprocess")
     def test_run_semgrep_no_source_files(self, mock_run, tmp_path: Path):
-        """Test Semgrep with no source files."""
         (tmp_path / "README.md").write_text("# No code here")
 
         findings = _run_semgrep(tmp_path)
@@ -308,11 +285,8 @@ class TestRunSemgrep:
 
 
 class TestRunBandit:
-    """Test Bandit fallback execution."""
-
     @patch("codesec.scanners.sast.run_subprocess")
     def test_run_bandit_success(self, mock_run, tmp_path: Path):
-        """Test successful Bandit execution."""
         mock_output = {
             "results": [
                 {
@@ -343,7 +317,6 @@ class TestRunBandit:
 
     @patch("codesec.scanners.sast.run_subprocess")
     def test_run_bandit_not_installed(self, mock_run, tmp_path: Path):
-        """Test Bandit when tool is not installed."""
         from codesec.scanners import ScannerError
         mock_run.side_effect = ScannerError("bandit not found")
 

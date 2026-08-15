@@ -1,16 +1,12 @@
 """
-CodeSec Agent - Configuration
-===============================
-Centralized configuration for all scanners, scoring weights, severity mappings,
-and tool paths.  Environment-aware with sensible defaults.
+CodeSec Agent - Configuration.
+Centralized configuration for scanners, scoring weights, severity mappings,
+and tool paths. Environment-aware with sensible defaults.
 
-Design Decisions (ADR-style):
-- Scoring weights favor exploitability (SAST > Secrets > Dependencies > Dockerfile > SBOM > Stack)
-- Severity multipliers align with CVSS v3.1 qualitative severity ratings
-- Tool paths are overridable via env vars for CI/CD flexibility
-- All thresholds are configurable to allow tuning without code changes
-
-Author: Nada 
+Design decisions:
+- Scoring weights favor exploitability (SAST > Secrets > Dependencies > Dockerfile > SBOM > Stack).
+- Severity multipliers align with CVSS v3.1 qualitative severity ratings.
+- Tool paths and thresholds are overridable via env vars for CI/CD flexibility.
 """
 
 from __future__ import annotations
@@ -21,10 +17,7 @@ from pathlib import Path
 from typing import Final
 
 
-# ---------------------------------------------------------------------------
-# Severity Multipliers (CVSS v3.1 aligned)
-# ---------------------------------------------------------------------------
-# Used by the scorer to weight findings by severity.
+# Severity multipliers (CVSS v3.1 aligned)
 SEVERITY_MULTIPLIERS: Final[dict[str, float]] = {
     "critical": 10.0,
     "high": 7.5,
@@ -33,19 +26,16 @@ SEVERITY_MULTIPLIERS: Final[dict[str, float]] = {
     "info": 0.0,
 }
 
-# Reverse mapping for grade thresholds
 GRADE_THRESHOLDS: Final[list[tuple[int, str]]] = [
     (95, "A"),
     (85, "B"),
     (70, "C"),
     (50, "D"),
-    # F is default for <50
+    # F is the default for <50
 ]
 
 
-# ---------------------------------------------------------------------------
 # Scoring Weights (must sum to 100)
-# ---------------------------------------------------------------------------
 # Rationale:
 #   SAST (25):  Direct code vulnerabilities = highest exploitability risk
 #   Secrets (20): Hardcoded creds = immediate breach vector
@@ -62,14 +52,10 @@ SCORING_WEIGHTS: Final[dict[str, int]] = {
     "stack_detection": 10,
 }
 
-# Validate weights sum to 100
 assert sum(SCORING_WEIGHTS.values()) == 100, "Scoring weights must sum to 100"
 
 
-# ---------------------------------------------------------------------------
-# Penalty Curves (exponential decay per finding count)
-# ---------------------------------------------------------------------------
-# Base penalty per finding severity, multiplied by count with decay.
+# Penalty curves (exponential decay per finding count)
 PENALTY_BASE: Final[dict[str, float]] = {
     "critical": 15.0,
     "high": 8.0,
@@ -78,18 +64,12 @@ PENALTY_BASE: Final[dict[str, float]] = {
     "info": 0.0,
 }
 
-# Decay factor: each additional finding of same severity contributes less
+# Each additional finding of the same severity contributes less
 PENALTY_DECAY: Final[float] = 0.85
 
 
-# ---------------------------------------------------------------------------
-# Tool Configurations
-# ---------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class ToolConfig:
-    """Configuration for an external security scanning tool."""
-
     name: str
     executable: str
     version_flag: str = "--version"
@@ -179,14 +159,8 @@ TOOLS: Final[dict[str, ToolConfig]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Scanner-Specific Configurations
-# ---------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class ScannerConfig:
-    """Per-scanner tunable parameters."""
-
     max_file_size_mb: int = 10
     exclude_patterns: tuple[str, ...] = field(default_factory=tuple)
     include_patterns: tuple[str, ...] = field(default_factory=tuple)
@@ -255,10 +229,7 @@ SCANNER_CONFIGS: Final[dict[str, ScannerConfig]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Stack Detection Heuristics
-# ---------------------------------------------------------------------------
-# Maps filename patterns to technology indicators.
+# Stack detection heuristics
 STACK_INDICATORS: Final[dict[str, dict[str, list[str]]]] = {
     "languages": {
         "python": ["*.py", "requirements.txt", "Pipfile", "pyproject.toml", "setup.py"],
@@ -311,9 +282,7 @@ STACK_INDICATORS: Final[dict[str, dict[str, list[str]]]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# OWASP Top 10 2021 → CWE Mapping (for SAST categorization)
-# ---------------------------------------------------------------------------
+# OWASP Top 10 2021 → CWE mapping (for SAST categorization)
 OWASP_CWE_MAP: Final[dict[str, list[str]]] = {
     "A01:2021 – Broken Access Control": ["CWE-22", "CWE-284", "CWE-285", "CWE-639"],
     "A02:2021 – Cryptographic Failures": ["CWE-261", "CWE-296", "CWE-310", "CWE-319", "CWE-326", "CWE-327", "CWE-328", "CWE-330", "CWE-331", "CWE-335", "CWE-338", "CWE-345", "CWE-347", "CWE-523", "CWE-720", "CWE-757", "CWE-759", "CWE-760", "CWE-780", "CWE-916"],
@@ -328,10 +297,6 @@ OWASP_CWE_MAP: Final[dict[str, list[str]]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Global Defaults
-# ---------------------------------------------------------------------------
-
 DEFAULT_CLONE_DIR: Final[str] = os.getenv("CODESEC_CLONE_DIR", "/tmp/codesec-clones")
 MAX_REPO_SIZE_MB: Final[int] = int(os.getenv("CODESEC_MAX_REPO_SIZE_MB", "500"))
 MAX_FILES_PER_REPO: Final[int] = int(os.getenv("CODESEC_MAX_FILES", "10000"))
@@ -340,14 +305,12 @@ GITLAB_URL_PATTERN: Final[str] = r"^https?://gitlab\.com/[a-zA-Z0-9_.-]+/[a-zA-Z
 
 
 def get_tool_config(tool_name: str) -> ToolConfig:
-    """Retrieve configuration for a named tool."""
     if tool_name not in TOOLS:
         raise ValueError(f"Unknown tool: {tool_name}. Available: {list(TOOLS.keys())}")
     return TOOLS[tool_name]
 
 
 def get_scanner_config(scanner_name: str) -> ScannerConfig:
-    """Retrieve configuration for a named scanner."""
     if scanner_name not in SCANNER_CONFIGS:
         raise ValueError(f"Unknown scanner: {scanner_name}")
     return SCANNER_CONFIGS[scanner_name]

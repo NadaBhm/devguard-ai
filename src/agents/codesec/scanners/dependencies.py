@@ -1,6 +1,5 @@
 """
 CodeSec Dependency Vulnerability Scanner
-=========================================
 Parses package manifest files and checks for known CVEs in dependencies.
 
 US-1.1.x: Detect vulnerable dependencies with known CVEs.
@@ -13,7 +12,6 @@ Technology Decision (ADR):
 - Tertiary: Trivy — multi-ecosystem (npm, go, maven, etc.), excellent for
   non-Python repos. OSS, maintained by Aqua Security.
 - Not chosen: Snyk — commercial, requires API key, rate-limited free tier.
-
 """
 
 from __future__ import annotations
@@ -46,7 +44,7 @@ def _parse_pip_audit_output(stdout: str) -> list[VulnerablePackage]:
         fix_versions = vuln.get("fix_versions", [])
         # FIX #5: use first fix version instead of cross-product N×M
         best_fix = fix_versions[0] if fix_versions else None
-        
+
         for adv in vuln.get("vulns", []):
             severity_str = adv.get("severity", "low")
             # FIX #5 bis: protect against unknown severity values
@@ -202,10 +200,7 @@ def _run_trivy_fs(repo_path: Path) -> list[VulnerablePackage]:
 
 
 def _parse_manifest_files(repo_path: Path) -> tuple[int, int, int]:
-    """
-    Parse manifest files to count total/direct/transitive packages.
-    Returns (total, direct, transitive).
-    """
+    """Parse manifest files to count total/direct/transitive packages."""
     total = 0
     direct = 0
     transitive = 0
@@ -256,12 +251,6 @@ def run_dependency_scan(repo_path: Path) -> DependenciesResult:
     Run dependency vulnerability scanning on a repository.
 
     Tries pip-audit for Python, Safety as fallback, and Trivy for multi-ecosystem.
-
-    Args:
-        repo_path: Path to the cloned repository.
-
-    Returns:
-        DependenciesResult with vulnerability findings and package counts.
     """
     all_vulns: list[VulnerablePackage] = []
 

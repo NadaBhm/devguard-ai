@@ -1,4 +1,3 @@
-"""Tests for Dependency Vulnerability Scanner."""
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,8 +16,6 @@ from codesec.models import DependenciesResult, VulnerablePackage, Severity
 
 
 class TestParsePipAuditOutput:
-    """Test parsing pip-audit JSON output."""
-
     def test_parse_valid_output(self):
         stdout = json.dumps({
             "dependencies": [
@@ -69,8 +66,6 @@ class TestParsePipAuditOutput:
 
 
 class TestParseManifestFiles:
-    """Test manifest file parsing."""
-
     def test_parse_requirements_txt(self, tmp_path: Path):
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -109,10 +104,7 @@ class TestParseManifestFiles:
 
 
 class TestRunDependencyScan:
-    """Test the main dependency scan function."""
-
     def test_run_dependency_scan_empty_repo(self, temp_repo: Path):
-        """Dependency scan on empty repo."""
         result = run_dependency_scan(temp_repo)
 
         assert isinstance(result, DependenciesResult)
@@ -120,7 +112,6 @@ class TestRunDependencyScan:
         assert result.vulnerable_packages == []
 
     def test_run_dependency_scan_python_repo(self, sample_python_repo: Path):
-        """Dependency scan on Python repo."""
         result = run_dependency_scan(sample_python_repo)
 
         assert isinstance(result, DependenciesResult)
@@ -148,7 +139,6 @@ class TestRunDependencyScan:
         result = run_dependency_scan(sample_python_repo)
 
         mock_pip_audit.assert_called_once()
-        # Safety and Trivy should still run for additional coverage
         assert len(result.vulnerable_packages) >= 1
 
     @patch("codesec.scanners.dependencies._run_pip_audit")
@@ -157,7 +147,6 @@ class TestRunDependencyScan:
     def test_run_dependency_scan_deduplicates(
         self, mock_trivy, mock_safety, mock_pip_audit, tmp_path: Path
     ):
-        """Test deduplication of vulnerabilities from multiple tools."""
         vuln = VulnerablePackage(
             package="requests",
             installed_version="2.25.0",
@@ -165,7 +154,7 @@ class TestRunDependencyScan:
             severity=Severity.HIGH,
         )
         mock_pip_audit.return_value = [vuln]
-        mock_safety.return_value = [vuln]  # Same vuln
+        mock_safety.return_value = [vuln]
         mock_trivy.return_value = []
 
         repo = tmp_path / "repo"
@@ -174,13 +163,10 @@ class TestRunDependencyScan:
 
         result = run_dependency_scan(repo)
 
-        # Should deduplicate - only 1 unique (package, cve_id)
         assert len(result.vulnerable_packages) == 1
 
 
 class TestVulnerablePackageModel:
-    """Test VulnerablePackage model."""
-
     def test_creation(self):
         pkg = VulnerablePackage(
             package="requests",

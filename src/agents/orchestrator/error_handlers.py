@@ -82,7 +82,6 @@ def _backoff_delay(attempt: int) -> float:
 
 
 def _is_retryable(node_name: str, exc: Exception) -> bool:
-    """Whether a failure of `node_name` with `exc` is worth another attempt."""
     if node_name not in RETRYABLE_NODES:
         return False
     if isinstance(exc, NON_RETRYABLE_EXCEPTIONS):

@@ -1,16 +1,8 @@
 """
-Test rapide du graphe - Auto-approve les gates pour tester le flow complet
-Place dans: src/agents/orchestrator/tests/test_graph_auto.py
+Full pipeline integration test with auto-approved human gates.
 
-NOTE (v1.0.6): mis a jour suite au decoupage de graph.py. Les gates humaines
-vivent maintenant dans human_gates.py (human_gate_1_impl / human_gate_2_impl,
-sans underscore). graph.py les importe et les reference dans les lambdas de
-build_orchestrator_graph() - on patche donc ces noms dans le namespace de
-graph.py (src.agents.orchestrator.graph.human_gate_1_impl), pas directement
-dans human_gates.py, pour que le graphe construit APRES le patch utilise
-bien nos versions auto-approve.
-
-Lancer avec: pytest depuis la racine du repo (pas depuis tests/).
+Patches human_gate_1_impl / human_gate_2_impl in graph.py's namespace
+so the lambdas in build_orchestrator_graph() resolve to our mocks.
 """
 
 from unittest.mock import patch
@@ -21,11 +13,7 @@ from src.agents.orchestrator.graph import build_orchestrator_graph
 
 
 def test_full_pipeline_auto_approve():
-    """Test le pipeline complet en auto-approvant les gates via mock."""
-
-    # Patch les fonctions de gate pour auto-approve SANS interrupt
     def mock_human_gate_1(state):
-        """Version mock du gate 1 - auto-approve sans interrupt."""
         from datetime import datetime, timezone
         import logging
 
@@ -36,7 +24,6 @@ def test_full_pipeline_auto_approve():
         state["orchestrator_metadata"]["current_node"] = "human_gate_1"
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        # Auto-approve sans interrupt
         state["human_gates"]["gate_1_pre_infracost"]["approved"] = True
         state["human_gates"]["gate_1_pre_infracost"]["comment"] = "Auto-approved for testing"
         state["human_gates"]["gate_1_pre_infracost"]["approved_at"] = datetime.now(timezone.utc).isoformat()
@@ -45,7 +32,6 @@ def test_full_pipeline_auto_approve():
         return state
 
     def mock_human_gate_2(state):
-        """Version mock du gate 2 - auto-approve sans interrupt."""
         from datetime import datetime, timezone
         import logging
 
@@ -56,7 +42,6 @@ def test_full_pipeline_auto_approve():
         state["orchestrator_metadata"]["current_node"] = "human_gate_2"
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        # Auto-approve sans interrupt
         state["human_gates"]["gate_2_pre_deployops"]["approved"] = True
         state["human_gates"]["gate_2_pre_deployops"]["comment"] = "Auto-approved for testing"
         state["human_gates"]["gate_2_pre_deployops"]["approved_at"] = datetime.now(timezone.utc).isoformat()
@@ -64,7 +49,6 @@ def test_full_pipeline_auto_approve():
 
         return state
 
-    # Creer l'etat initial
     state = create_initial_state("https://github.com/test/repo")
     config = {"configurable": {"thread_id": state["job_id"]}}
 
@@ -75,22 +59,18 @@ def test_full_pipeline_auto_approve():
 
     node_state = state
 
-    # Build le graph avec les gates mockees.
-    # On patche dans le namespace de graph.py (pas human_gates.py), car
-    # c'est de la que les lambdas de build_orchestrator_graph() resolvent
-    # ces noms au moment de l'appel.
+    # Patch in graph.py's namespace so lambdas in build_orchestrator_graph()
+    # resolve to our mocks.
     with patch.object(graph_module, "human_gate_1_impl", mock_human_gate_1), \
          patch.object(graph_module, "human_gate_2_impl", mock_human_gate_2):
 
         graph = build_orchestrator_graph()
         print("Graph compile avec gates auto-approve")
 
-        # Stream le graph complet
         for event in graph.stream(state, config):
             for node_name, node_state in event.items():
                 print(f"Node '{node_name}' | status: {node_state.get('status', 'N/A')}")
 
-        # Mettre a jour le state final
         state = node_state
 
     print("-" * 60)
@@ -98,7 +78,6 @@ def test_full_pipeline_auto_approve():
     print(f"Nodes executes: {state['orchestrator_metadata']['nodes_executed']}")
     print(f"Duree: {state['orchestrator_metadata']['elapsed_seconds']:.2f}s")
 
-    # Verifications finales
     assert state["codesec_result"] is not None, "CodeSec manquant"
     print(f"CodeSec: Score {state['codesec_result']['security_score']['score']}/100")
 

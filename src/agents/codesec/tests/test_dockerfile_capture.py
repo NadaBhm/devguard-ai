@@ -37,7 +37,6 @@ def _stack(dockerfile_path: str | None) -> StackDetection:
 
 
 def test_prefers_detected_dockerfile_path(tmp_path: Path):
-    """The path stack detection chose wins over other Dockerfiles in the repo."""
     repo = _make_repo(tmp_path, {
         "infrastructure/Dockerfile.backend": (
             "FROM python:3.12-slim\nCOPY --from=builder /app /app\n"
@@ -52,7 +51,6 @@ def test_prefers_detected_dockerfile_path(tmp_path: Path):
 
 
 def test_fallback_scans_dockerfile_variants(tmp_path: Path):
-    """With no detected path, Dockerfile.backend is still found by the scan."""
     repo = _make_repo(tmp_path, {
         "infrastructure/Dockerfile.backend": "FROM python:3.12-slim\nCOPY . /app\n",
     })
@@ -64,7 +62,6 @@ def test_fallback_scans_dockerfile_variants(tmp_path: Path):
 
 
 def test_fallback_finds_bare_dockerfile(tmp_path: Path):
-    """A plain Dockerfile at the repo root is captured too."""
     repo = _make_repo(tmp_path, {
         "Dockerfile": "FROM python:3.9\nCMD [\"python\", \"app.py\"]\n",
     })
@@ -76,7 +73,6 @@ def test_fallback_finds_bare_dockerfile(tmp_path: Path):
 
 
 def test_no_dockerfile_returns_none(tmp_path: Path):
-    """No Dockerfile anywhere -> None, never an exception."""
     repo = _make_repo(tmp_path, {
         "src/main.py": "print('hi')\n",
         "README.md": "# repo\n",
@@ -86,7 +82,6 @@ def test_no_dockerfile_returns_none(tmp_path: Path):
 
 
 def test_detected_path_missing_uses_scan(tmp_path: Path):
-    """A stale detected path (file removed) falls through to the scan."""
     repo = _make_repo(tmp_path, {
         "Dockerfile.web": "FROM alpine:3.19\n",
     })

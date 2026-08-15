@@ -1,6 +1,5 @@
 """
 Tests for the retry/backoff policy (T-2.18 / US-2.2.4)
-Place dans: src/agents/orchestrator/tests/test_retry.py
 
 US-2.2.4: "Given a failed agent call, When error occurs, Then orchestrator
 retries up to 3 times with exponential backoff before escalating."
@@ -8,8 +7,6 @@ retries up to 3 times with exponential backoff before escalating."
 Sleeps are patched out (monkeypatching error_handlers.time.sleep) so the
 suite stays fast; the delays themselves are asserted separately against
 _backoff_delay rather than by wall-clock timing, which would be flaky in CI.
-
-Lancer avec: pytest depuis la racine du repo.
 """
 
 import pytest
@@ -35,7 +32,6 @@ def state():
 
 @pytest.fixture
 def slept(monkeypatch):
-    """Capture backoff delays instead of actually sleeping."""
     delays: list[float] = []
     monkeypatch.setattr(error_handlers.time, "sleep", delays.append)
     return delays
@@ -84,8 +80,8 @@ class TestRetrySucceeds:
         result = safe_node_wrapper(flaky, "codesec_agent", state)
 
         assert calls["n"] == 3
-        assert result["status"] == "analyzing"   # not "failed"
-        assert slept == [1.0, 2.0]               # exponential, no sleep after the win
+        assert result["status"] == "analyzing"
+        assert slept == [1.0, 2.0]
 
     def test_earlier_failures_are_logged_as_resolved(self, state, slept):
         """Kept for diagnostics, but must not read as a workflow failure."""

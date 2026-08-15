@@ -6,7 +6,6 @@
 
 
 
-# tests/test_deployops.py
 import asyncio
 import json
 import subprocess
@@ -18,15 +17,11 @@ import httpx
 from moto import mock_aws
 import boto3
 
-# Adjust import to your actual module
 from src.agents.deployops.agent import DeployOpsAgent
 
 
-# ---------- Fixtures ----------
-
 @pytest.fixture
 def sample_payload():
-    """Minimal valid payload for testing."""
     return {
         "job_id": "test_job_123",
         "artifacts": {
@@ -73,11 +68,8 @@ def agent():
 
 @pytest.fixture
 def workspace(tmp_path):
-    """Temporary workspace for artifact writing."""
     return tmp_path / "deployops" / "test_job_123"
 
-
-# ---------- Validation Tests ----------
 
 def test_sanitize_and_validate_valid(agent, sample_payload):
     result = agent.sanitize_and_validate(sample_payload)
@@ -89,7 +81,7 @@ def test_sanitize_and_validate_valid(agent, sample_payload):
 
 
 def test_sanitize_and_validate_missing_field(agent):
-    payload = {"job_id": "test"}  # missing required
+    payload = {"job_id": "test"}
     with pytest.raises(ValueError, match="Missing required field: 'artifacts'"):
         agent.sanitize_and_validate(payload)
 
@@ -103,7 +95,7 @@ def test_sanitize_and_validate_invalid_job_id(agent, sample_payload):
 
 def test_sanitize_and_validate_invalid_region(agent, sample_payload):
     payload = sample_payload.copy()
-    payload["aws_config"]["region"] = "eu-central-1a"  # invalid format
+    payload["aws_config"]["region"] = "eu-central-1a"
     with pytest.raises(ValueError, match="Invalid AWS region"):
         agent.sanitize_and_validate(payload)
 
@@ -122,32 +114,24 @@ def test_sanitize_and_validate_invalid_docker_context(agent, sample_payload):
         agent.sanitize_and_validate(payload)
 
 
-# ---------- Artifact Writing Tests ----------
-
 @pytest.mark.asyncio
 async def test_write_artifacts(agent, sample_payload, workspace):
     from src.agents.deployops.models import Artifacts
     artifacts = Artifacts(**sample_payload["artifacts"])
     
-    # Mock the modules copy to avoid overwriting test files
     with patch("shutil.copytree") as mock_copytree:
-        # Make copytree do nothing
         mock_copytree.return_value = None
         
         await agent._write_artifacts(artifacts, workspace)
 
-    # Check files exist
     tf_dir = workspace / "terraform"
     assert (tf_dir / "main.tf").exists()
     assert (tf_dir / "variables.tf").exists()
-    # Dockerfile should be in the context directory
     assert (workspace / "test_context" / "Dockerfile").exists()
 
-    # Check content
     content = (tf_dir / "main.tf").read_text()
     assert "aws_s3_bucket" in content
 
-    # Variables file should exist if variables provided
     assert (tf_dir / "terraform.tfvars.json").exists()
     vars_content = json.loads((tf_dir / "terraform.tfvars.json").read_text())
     assert vars_content["region"] == "us-east-1"
@@ -204,8 +188,6 @@ async def test_write_artifacts_merges_env_tfvars(agent, sample_payload, workspac
     assert vars_content["subnet_ids"] == ["subnet-1", "subnet-2"]
 
 
-# ---------- Health Check Tests ----------
-
 @pytest.mark.asyncio
 @patch("httpx.AsyncClient.get", new_callable=AsyncMock)
 async def test_health_check_success(mock_get, agent):
@@ -247,14 +229,9 @@ async def test_health_check_missing_url(agent):
     assert result["status_code"] == 0
 
 
-# ---------- Rollback Tests (using moto) ----------
-
 @pytest.mark.asyncio
 @patch("src.agents.deployops.agent.AWSClient")
 async def test_rollback_success(mock_aws_client, agent, sample_payload):
-    """Test rollback uses previous task definition."""
-    
-    # Mock ECS response with 2 deployments
     mock_ecs = MagicMock()
     mock_ecs.describe_services.return_value = {
     "services": [{
@@ -271,19 +248,15 @@ async def test_rollback_success(mock_aws_client, agent, sample_payload):
     }]
     }
     
-    # Mock update_service
     mock_ecs.update_service.return_value = {}
     
-    # Mock waiter
     mock_waiter = MagicMock()
     mock_ecs.get_waiter.return_value = mock_waiter
     
-    # Set up AWS client mock
     aws_instance = MagicMock()
     aws_instance.ecs.return_value = mock_ecs
     mock_aws_client.return_value = aws_instance
     
-    # Call rollback
     result = await agent.rollback("test_job_123", sample_payload)
     
     assert result["status"] == "success"
@@ -298,8 +271,6 @@ async def test_rollback_success(mock_aws_client, agent, sample_payload):
 @patch("src.agents.deployops.agent.AWSClient")
 @pytest.mark.asyncio
 async def test_rollback_no_previous(mock_aws_client, agent, sample_payload):
-    """Rollback fails if only one deployment exists."""
-    # Mock ECS response with only 1 deployment
     mock_ecs = MagicMock()
     mock_ecs.describe_services.return_value = {
         "services": [{
@@ -324,7 +295,6 @@ async def test_rollback_no_previous(mock_aws_client, agent, sample_payload):
 @patch("src.agents.deployops.agent.AWSClient")
 @pytest.mark.asyncio
 async def test_rollback_service_not_found(mock_aws_client, agent, sample_payload):
-    """Rollback fails if service doesn't exist."""
     mock_ecs = MagicMock()
     mock_ecs.describe_services.side_effect = Exception("Service not found")
     
@@ -337,16 +307,12 @@ async def test_rollback_service_not_found(mock_aws_client, agent, sample_payload
     assert "error" in result
 
 
-# ---------- Mocked Deploy Test (full flow with mocks) ----------
-
 @pytest.mark.asyncio
 @patch("asyncio.create_subprocess_shell")
 @patch("asyncio.create_subprocess_exec")
 @patch("src.agents.deployops.agent.AWSClient")
 @patch("src.agents.deployops.agent.TerraformRunner")
 async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
-    """Test full deploy with all steps mocked to success."""
-    # Mock TerraformRunner methods
     tf_instance = MagicMock()
     tf_instance.init.return_value = True
     tf_instance.plan.return_value = {"planned": "changes"}
@@ -354,12 +320,10 @@ async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_
     tf_instance.output.return_value = {"frontend_url": {"value": "http://test.com"}}
     mock_tf_runner.return_value = tf_instance
 
-    # Mock AWSClient
     aws_instance = MagicMock()
     aws_instance.get_account_id.return_value = "123456789012"
     mock_aws_client.return_value = aws_instance
 
-    # Mock ECR authorization token (agent base64-decodes it for docker login)
     ecr_client = MagicMock()
     ecr_client.get_authorization_token.return_value = {
         "authorizationData": [
@@ -371,14 +335,12 @@ async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_
     }
     aws_instance.session.client.return_value = ecr_client
 
-    # Mock subprocess calls
     mock_proc = AsyncMock()
     mock_proc.returncode = 0
     mock_proc.communicate = AsyncMock(return_value=(b"", b""))
     mock_create_subprocess_shell.return_value = mock_proc
     mock_create_subprocess_exec.return_value = mock_proc
 
-    # CREATE THE DIRECTORY FIRST
     workspace_dir = Path("/tmp/deployops/test_job_123")
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -448,8 +410,6 @@ async def test_deploy_clones_repo_into_workspace(mock_clone, mock_tf_runner, moc
 @patch("src.agents.deployops.agent.AWSClient")
 @patch("src.agents.deployops.agent.TerraformRunner")
 async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
-    """Test deploy when health check fails -> rollback called."""
-    # Setup similar mocks
     tf_instance = MagicMock()
     tf_instance.init.return_value = True
     tf_instance.plan.return_value = {"planned": "changes"}
@@ -461,7 +421,6 @@ async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws
     aws_instance.get_account_id.return_value = "123456789012"
     mock_aws_client.return_value = aws_instance
 
-    # Mock ECR authorization token (agent base64-decodes it for docker login)
     ecr_client = MagicMock()
     ecr_client.get_authorization_token.return_value = {
         "authorizationData": [
@@ -491,11 +450,8 @@ async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws
     mock_rollback.assert_called_once()
 
 
-# ---------- Additional Edge Cases ----------
-
 @pytest.mark.asyncio
 async def test_deploy_not_approved(agent, sample_payload):
-    """Deploy returns early if not approved."""
     payload = sample_payload.copy()
     payload["approval"]["deploy_approved"] = False
     result = await agent.deploy(payload)
@@ -503,17 +459,11 @@ async def test_deploy_not_approved(agent, sample_payload):
     assert "not approved" in result["error"]
 
 
-# ---------- moto-grounded AWS tests (real boto3 against moto) ----------
-#
-# These run the agent's real AWS client code against moto's in-memory AWS.
-# They replace the MagicMock-based unit tests above for the AWS boundaries
-# that the real pipeline touches (ECR auth, STS account, ECS revisions,
-# promote, rollback fallback). Waiters are intentionally avoided because
-# moto never reaches a stable service state.
+# Real boto3 against moto for the AWS boundaries the pipeline touches.
+# Waiters are avoided because moto never reaches a stable service state.
 
 @pytest.fixture
 def moto_ecs():
-    """Set up a real (moto-backed) VPC + ECS cluster + task definitions + service."""
     with mock_aws():
         ec2 = boto3.client("ec2", region_name="us-east-1")
         vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
@@ -558,7 +508,6 @@ def moto_ecs():
 
 @pytest.mark.asyncio
 async def test_moto_get_account_id(agent):
-    """Real STS call returns moto's sandbox account id."""
     from src.agents.deployops.agent import AWSClient
     with mock_aws():
         assert AWSClient(region="us-east-1").get_account_id() == "123456789012"
@@ -566,7 +515,6 @@ async def test_moto_get_account_id(agent):
 
 @pytest.mark.asyncio
 async def test_moto_ecr_authorization_token(agent):
-    """Real ECR get_authorization_token returns a base64 token for docker login."""
     import base64
 
     from src.agents.deployops.agent import AWSClient
@@ -581,7 +529,6 @@ async def test_moto_ecr_authorization_token(agent):
 
 @pytest.mark.asyncio
 async def test_moto_list_revisions_real_ecs(agent, moto_ecs):
-    """list_revisions reads the real ECS task-definition history, flagging the current one."""
     ecs = moto_ecs["ecs"]
     ecs.register_task_definition(**moto_ecs["register_td"]("app-task"))
     ecs.register_task_definition(**moto_ecs["register_td"]("app-task"))
@@ -601,7 +548,6 @@ async def test_moto_list_revisions_real_ecs(agent, moto_ecs):
 
 @pytest.mark.asyncio
 async def test_moto_promote_copies_primary_revision(agent, moto_ecs):
-    """promote pushes the source service's PRIMARY task definition onto the target."""
     ecs = moto_ecs["ecs"]
     ecs.register_task_definition(**moto_ecs["register_td"]("app-task"))
     moto_ecs["create_service"]("moto-cluster", "app-dev-web", "app-task")
@@ -624,7 +570,6 @@ async def test_moto_promote_copies_primary_revision(agent, moto_ecs):
 
 @pytest.mark.asyncio
 async def test_moto_rollback_no_previous_real_ecs(agent, moto_ecs, sample_payload):
-    """rollback returns a clean failure when there is no prior task-definition revision."""
     ecs = moto_ecs["ecs"]
     ecs.register_task_definition(**moto_ecs["register_td"]("app-task"))
     moto_ecs["create_service"]("moto-cluster", "test-service", "app-task")
@@ -641,12 +586,7 @@ async def test_moto_rollback_no_previous_real_ecs(agent, moto_ecs, sample_payloa
 
 @pytest.mark.asyncio
 async def test_moto_rollback_uses_prior_revision(agent, moto_ecs, sample_payload):
-    """rollback falls back to the prior registered task-definition revision and updates the service.
-
-    A single deployment plus a second registered revision exercises the
-    list_task_definitions fallback path. The waiter is stubbed since moto
-    never reports a stable service.
-    """
+    """Exercises the list_task_definitions fallback; waiter stubbed since moto never stabilizes."""
     ecs = moto_ecs["ecs"]
     ecs.register_task_definition(**moto_ecs["register_td"]("app-task"))
     ecs.register_task_definition(**moto_ecs["register_td"]("app-task"))

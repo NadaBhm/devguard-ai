@@ -64,7 +64,6 @@ _PROVIDER_404_MARKER: Final[str] = "Provider returned error"
 
 
 def _retry_delay(attempt: int) -> float:
-    """Exponential backoff (plus jitter) before the retry following `attempt`."""
     wait = _RETRY_BASE_DELAY_SECONDS * (_RETRY_FACTOR ** (attempt - 1))
     return wait + random.uniform(0, _RETRY_JITTER_SECONDS)
 

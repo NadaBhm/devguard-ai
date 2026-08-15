@@ -1,4 +1,3 @@
-"""Tests for Hugging Face embedding client."""
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -9,15 +8,11 @@ from lib.rag.config import RAGConfig
 
 
 class TestEmbeddingClient:
-    """Test embedding generation."""
-
     def setup_method(self):
-        """Clear model cache before each test to avoid cross-test pollution."""
         EmbeddingClient._model_cache.clear()
 
     @patch("lib.rag.embeddings.SentenceTransformer")
     def test_model_caching(self, mock_st_class):
-        """Same model should not be loaded twice."""
         mock_model = MagicMock()
         mock_model.encode.return_value = np.array([[0.1] * 768])
         mock_st_class.return_value = mock_model
@@ -26,7 +21,6 @@ class TestEmbeddingClient:
         client1 = EmbeddingClient(config)
         client2 = EmbeddingClient(config)
 
-        # Should reuse cached model
         mock_st_class.assert_called_once()
         assert client1.model is client2.model
 
@@ -62,7 +56,6 @@ class TestEmbeddingClient:
         call_args = mock_model.encode.call_args
         texts = call_args[0][0]
         assert not any(t.startswith("Represent") for t in texts)
-        # Raw text preserved
         assert texts[0] == "hello world"
 
     @patch("lib.rag.embeddings.SentenceTransformer")
@@ -116,8 +109,6 @@ class TestEmbeddingClient:
 
 
 class TestGetEmbedding:
-    """Test convenience function."""
-
     def setup_method(self):
         EmbeddingClient._model_cache.clear()
 

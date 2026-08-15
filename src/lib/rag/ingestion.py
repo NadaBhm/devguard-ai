@@ -1,9 +1,3 @@
-"""
-Ingestion Pipeline
-==================
-Chunks repository files and ingests them into Qdrant.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -22,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[str]:
-    """Split text into overlapping chunks."""
     if not text or chunk_size <= 0:
         return []
 
@@ -33,13 +26,11 @@ def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[s
     while start < text_len:
         end = min(start + chunk_size, text_len)
 
-        # Try to break at word boundary, but only if not at end of text
+        # Prefer a word boundary over a mid-word cut (skip at end of text)
         if end < text_len:
             original_end = end
-            # Look backward for a space or newline
             while end > start and text[end - 1] not in " \n":
                 end -= 1
-            # If no good boundary found, use original cut point
             if end == start:
                 end = original_end
 
@@ -47,7 +38,6 @@ def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[s
         if chunk:
             chunks.append(chunk)
 
-        # Move forward, accounting for overlap
         next_start = end - overlap
         if next_start <= start:  # Prevent infinite loop at end of text
             next_start = end
@@ -57,21 +47,17 @@ def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> list[s
 
 
 def _read_repo_files(repo_path: Path) -> list[dict[str, Any]]:
-    """Read relevant files from a repository."""
     files: list[dict[str, Any]] = []
     code_extensions = (".py", ".js", ".ts", ".go", ".java", ".rb", ".rs")
     
-    # Folders to completely skip
     IGNORE_DIRS = {".venv", "venv", "node_modules", "__pycache__", ".git", ".pytest_cache", "dist", "build"}
 
     def _should_ignore(path: Path) -> bool:
-        """Check if any parent directory should be ignored."""
         for part in path.parts:
             if part in IGNORE_DIRS:
                 return True
         return False
 
-    # README and docs
     for pattern in ("README*", "CONTRIBUTING*", "*.md"):
         for file_path in repo_path.rglob(pattern):
             if file_path.is_file() and not _should_ignore(file_path):
@@ -86,7 +72,6 @@ def _read_repo_files(repo_path: Path) -> list[dict[str, Any]]:
                 except Exception:
                     pass
 
-    # Sample code files (limit 20)
     code_count = 0
     for ext in code_extensions:
         if code_count >= 20:
@@ -114,12 +99,7 @@ def ingest_repo(
     job_id: str,
     config: RAGConfig | None = None,
 ) -> int:
-    """
-    Ingest a repository into Qdrant for RAG retrieval.
-
-    Returns:
-        Number of chunks ingested.
-    """
+    """Ingest a repository into Qdrant; returns the number of chunks ingested."""
     config = config or get_rag_config()
     collection_name = f"{config.qdrant_collection}_{job_id}"
 
@@ -140,7 +120,7 @@ def ingest_repo(
             logger.info("Collection %s already exists", collection_name)
         else:
             logger.error("Qdrant error creating collection: %s", exc)
-            raise  # Relève si c'est un vrai problème
+            raise
 
     files = _read_repo_files(repo_path)
     all_chunks: list[dict[str, Any]] = []
@@ -189,7 +169,6 @@ def ingest_text(
     metadata: dict[str, Any] | None = None,
     config: RAGConfig | None = None,
 ) -> int:
-    """Ingest arbitrary text into Qdrant."""
     config = config or get_rag_config()
     collection_name = f"{config.qdrant_collection}_{job_id}"
 

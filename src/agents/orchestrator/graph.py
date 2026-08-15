@@ -2,8 +2,6 @@
 DevGuard AI - Orchestrator Agent
 LangGraph-based workflow orchestrator for the DevSecOps pipeline.
 
-Owner: Hbib (Subgroup 2 - Execution & Control)
-
 This module wires the graph together: nodes (nodes.py), human gates
 (human_gates.py), state shape (state.py), and error handling
 (error_handlers.py). It also exposes the public API used by the backend:
@@ -16,70 +14,13 @@ run_workflow() and resume_workflow().
 - Chat LLM -> Conversational interface with job context
 - Error Handler -> Retry logic with exponential backoff
 
-IMPORTANT: codesec_result uses the EXACT payload format from Nada's codesec-mock-schema.json
-Option 1: "Accept everything from Nada" - no transformation, direct passthrough.
+IMPORTANT: codesec_result uses the EXACT payload format from Nada's
+codesec-mock-schema.json (Option 1: "Accept everything from Nada" - no
+transformation, direct passthrough).
 
 CDC Reference: Section 4.2 (Epic 2.2: Orchestrator Agent)
 
-CHANGELOG:
-- v1.0.1: Fixed error handling (removed time.sleep), secured dict access, added route guards
-- v1.0.1: Added safe_node_wrapper for automatic error catching in graph nodes
-- v1.0.1: Added pipeline timeout tracking
-- v1.0.1: Fixed error_log resolved flag logic
-- v1.0.1: Added conditional routing with failure checks
-- v1.0.2: Aligned DeployOpsResult with deployops-mock-schema.json (Oussema)
-- v1.0.2: Added job_id to DeployOpsResult (required by schema)
-- v1.0.2: Changed terraform_outputs from Optional[dict] to dict (required by schema)
-- v1.0.2: Added HealthCheckResult TypedDict for strict typing
-- v1.0.2: Added job_id to mock_deployops_agent_impl payload
-- v1.0.3: Fixed GraphInterrupt being swallowed by the generic except in _safe_node_wrapper
-- v1.0.3: Fixed run_workflow / docs to use the real Command(resume=...) API
-- v1.0.4: Fixed _safe_node_wrapper signature (removed stray extra "str" parameter
-          that shadowed the built-in str() and caused a TypeError on every node call)
-- v1.0.4: Fixed _human_gate_2_impl to use status "rejected" instead of "failed"
-          on human rejection, consistent with _human_gate_1_impl
-- v1.3.1: InfraCost API on master reverted to run_pipeline_with_context() +
-          core.orchestrator_adapter.to_orchestrator_result() (the API v1.3.0
-          replaced no longer matches master - see agent_adapters.py's module
-          docstring on the churn). This build ALSO generates real Dockerfile
-          content (output_builder.resolve_docker_artifacts), unblocking the
-          DeployOps translation that v1.3.0's build could not complete.
-          normalize_infracost_result() now does real work again: fixes
-          cost_estimate.amount -> .monthly_cost_usd, a real gap in Karim's
-          own to_orchestrator_result() caught by test_schema_conformance.py.
-- v1.3.0: agent_adapters.py rewritten for InfraCost's REAL API on master.
-          run_pipeline_with_context()/core.orchestrator_adapter never existed
-          on master - only run_pipeline() -> InfraCostOutput. Also surfaced a
-          real integration gap: real InfraCost never provides Dockerfile
-          CONTENT (only a source_code path, which is CodeSec's clone -
-          already deleted by the time DeployOps needs it). The translator
-          now fails loudly on this instead of silently sending an unusable
-          payload. Needs a team decision (see agent_adapters.py docstring).
-- v1.2.1: InfraCost output is normalized to the documented schema shape
-          (agent_adapters.normalize_infracost_result). The real agent emits
-          Money.amount / files{} / projected_monthly_savings, none of which
-          match orchestrator-input-schema.json - unnormalized, the final
-          report told stakeholders the deployment cost $0/month. Schema also
-          gained "rejected" status and __interrupt__, both of which the
-          orchestrator already produced but the schema rejected.
-- v1.2.0: Final report generation (T-3.12 / US-2.2.6) in report.py.
-          Jinja2 -> HTML always; WeasyPrint -> PDF best-effort (its native
-          libs are absent on some dev machines). Inline SVG architecture
-          diagram, no extra dependency. Secret VALUES are never rendered.
-- v1.1.0: Chat with conversation memory (T-3.10 / T-3.11, US-2.2.5) in
-          chat.py. Combines orchestrator job results with Nada's RAG repo
-          retrieval; memory is orchestrator-side because lib/rag is stateless.
-- v1.0.8: Retry with exponential backoff on agent nodes (T-2.18 / US-2.2.4).
-          Transient failures retry up to 3x (1s/2s); deterministic ones
-          (ValueError/TypeError/KeyError) escalate immediately; each attempt
-          runs on an isolated state copy so partial mutations can't leak.
-- v1.0.7: Agent nodes now go through agent_adapters.py (T-2.17 / T-3.16).
-          The three mock_*_agent_impl functions are kept in nodes.py and are
-          still what the adapters return in mock mode (the default), so
-          behavior is unchanged until DEVGUARD_REAL_* is switched on.
-- v1.0.6: Split into state.py / error_handlers.py / human_gates.py / nodes.py.
-          graph.py now only wires the graph together and exposes the public API.
-          No behavior change - pure refactor.
+Owner: Hbib (Subgroup 2 - Execution & Control)
 """
 
 from __future__ import annotations
@@ -90,7 +31,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-# LangGraph imports
 from langgraph.graph import StateGraph, END
 import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -111,32 +51,24 @@ from .nodes import (
     route_after_health_check,
 )
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 
 # =============================================================================
 # PERSISTENT CHECKPOINTER (replaces MemorySaver - T-4.3)
 # =============================================================================
-# MemorySaver kept every paused job's state in a plain Python object, living
-# only inside the current process. Any backend restart (a crash, a redeploy,
-# even `uvicorn --reload` picking up a code change) silently lost every job
-# waiting at a human gate - verified concretely today: a fresh process has no
-# way to resume a thread_id checkpointed by a process that no longer exists.
+# MemorySaver kept every paused job's state only inside the current process:
+# any backend restart (a crash, a redeploy, even `uvicorn --reload`) silently
+# lost every job waiting at a human gate, and a fresh process had no way to
+# resume a thread_id checkpointed by a dead process.
 #
-# SqliteSaver persists the same checkpoints to a file on disk instead, so a
-# freshly-built graph in a brand new process can resume exactly where an
-# earlier process left off. Verified with a two-process test: process A ran
-# up to a human gate and exited; process B, sharing nothing but the sqlite
-# file, resumed and got the correct state back.
-#
-# Chosen over PostgresSaver for now because it works immediately without a
-# running Postgres instance - useful today, and matches devguard.db (the
-# backend's own SQLite dev database). Both checkpointers implement the same
-# BaseCheckpointSaver interface, so swapping to PostgresSaver later (T-5.12,
-# once a real Postgres is deployed) is a one-line change here, not a rewrite.
+# SqliteSaver persists the same checkpoints to a file on disk, so a freshly
+# built graph in a brand new process can resume exactly where an earlier
+# process left off. Chosen over PostgresSaver because it works immediately
+# without a running Postgres (and matches devguard.db, the backend's own
+# SQLite dev database); both implement BaseCheckpointSaver, so swapping to
+# PostgresSaver later (T-5.12) is a one-line change.
 
 CHECKPOINT_DB_PATH = os.getenv("DEVGUARD_CHECKPOINT_DB", "orchestrator_checkpoints.sqlite")
 
@@ -151,7 +83,7 @@ def _build_checkpointer() -> SqliteSaver:
     conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     saver = SqliteSaver(conn)
-    saver.setup()  # creates the checkpoint tables if this file is new
+    saver.setup()
     return saver
 
 # =============================================================================
@@ -160,12 +92,6 @@ def _build_checkpointer() -> SqliteSaver:
 
 
 def build_orchestrator_graph() -> StateGraph:
-    """
-    Build and compile the LangGraph state graph.
-
-    NOTE: Uses MemorySaver for Sprint 1.
-    TODO Sprint 2: Replace with PostgresSaver for persistence across restarts.
-    """
     builder = StateGraph(OrchestratorState)
 
     builder.add_node(
@@ -244,28 +170,20 @@ def build_orchestrator_graph() -> StateGraph:
 # =============================================================================
 # SECTION 7.1: GRAPH SINGLETON
 # =============================================================================
-# BUGFIX v1.0.5: run_workflow() used to call build_orchestrator_graph() on
-# every invocation, which creates a brand new MemorySaver each time. Since
-# MemorySaver keeps checkpoints only inside the object it was constructed
-# with, a fresh graph means a fresh (empty) checkpoint store - any job
-# paused at an interrupt() became unresumable, because the checkpoint that
-# graph.invoke(Command(resume=...), config) needs to look up simply isn't
-# there anymore. The graph (and its checkpointer) must be built ONCE and
-# reused for every call - typically once at FastAPI app startup.
+# The graph (and its checkpointer) must be built ONCE and reused: rebuilding
+# per call creates a fresh, empty checkpoint store, so a job paused at an
+# interrupt() would become unresumable. Built lazily on first use (typically
+# once at FastAPI app startup).
 
 _graph_singleton: Optional[StateGraph] = None
 
 
 def get_orchestrator_graph() -> StateGraph:
     """
-    Return the single, shared, compiled orchestrator graph.
-    Builds it once (lazily) and reuses it afterwards so that the
-    MemorySaver checkpoints survive across separate run_workflow /
-    resume_workflow calls within the same process.
-
-    NOTE: In FastAPI, prefer building this once in a startup/lifespan
-    hook and reusing that instance, rather than relying on the
-    lazy-singleton fallback here.
+    Return the single shared, compiled graph, building it once (lazily) so
+    checkpoints survive across run_workflow / resume_workflow calls in the
+    same process. In FastAPI, prefer building once in a startup/lifespan
+    hook rather than relying on this lazy fallback.
     """
     global _graph_singleton
     if _graph_singleton is None:
@@ -275,9 +193,8 @@ def get_orchestrator_graph() -> StateGraph:
 
 def reset_orchestrator_graph() -> None:
     """
-    Force the next get_orchestrator_graph() call to rebuild a fresh graph
-    (and a fresh MemorySaver). Mostly useful for tests that need isolated
-    checkpoint state between test cases.
+    Force the next get_orchestrator_graph() call to rebuild a fresh graph and
+    checkpointer. Useful for tests that need isolated checkpoint state.
     """
     global _graph_singleton
     _graph_singleton = None
@@ -295,19 +212,13 @@ def run_workflow(
     """
     Run the complete orchestrator workflow for a repository.
 
-    NOTE: For human gates, execution will pause at interrupt points.
-    Resume with resume_workflow(thread_id, resume_data) below - do NOT
-    call run_workflow() again for the same job, it would start a brand
-    new job with a brand new job_id.
+    For human gates, execution pauses at interrupt points; resume with
+    resume_workflow(thread_id, resume_data) below - do NOT call run_workflow()
+    again for the same job, it would start a brand new job with a new job_id.
 
-    BUGFIX v1.0.5: now uses get_orchestrator_graph() (a shared, cached
-    graph instance) instead of build_orchestrator_graph() directly, so
-    the MemorySaver checkpoint created here is still around when
-    resume_workflow() is called later for the same thread_id.
-
-    on_node_progress: optional callback invoked as each graph node
-    completes, (node_name, state_snapshot). The backend uses it to stream
-    per-node progress over WebSocket instead of only coarse milestones.
+    on_node_progress: optional callback invoked as each graph node completes,
+    (node_name, state_snapshot). The backend uses it to stream per-node
+    progress over WebSocket instead of only coarse milestones.
     """
     graph = get_orchestrator_graph()
     state = create_initial_state(repo_url, job_id=thread_id)
@@ -354,20 +265,12 @@ def resume_workflow(
     on_node_progress: Optional[Callable[[str, dict], None]] = None,
 ) -> OrchestratorState:
     """
-    Resume a workflow that is paused at a human gate (interrupt()).
+    Resume a workflow paused at a human gate (interrupt()).
 
     thread_id must match the one used in the original run_workflow() call
-    (defaults to the job_id if none was passed explicitly).
-
-    resume_data is handed back as the return value of interrupt(...) inside
-    the paused node - e.g. for a human gate:
-        {"approved": True, "comment": "OK", "approved_by": "user@email.com"}
-
-    Example:
-        result = resume_workflow(
-            job_id,
-            {"approved": True, "comment": "Looks good", "approved_by": "alice@company.com"},
-        )
+    (defaults to the job_id if none was passed explicitly). resume_data is
+    handed back as the return value of interrupt(...) inside the paused node,
+    e.g. {"approved": True, "comment": "OK", "approved_by": "user@email.com"}.
     """
     from langgraph.types import Command
 
@@ -399,7 +302,7 @@ def resume_workflow(
         raise
 
 
-# ===============   ==============================================================
+# =============================================================================
 # SECTION 9: MAIN (for testing)
 # =============================================================================
 
@@ -437,7 +340,6 @@ if __name__ == "__main__":
     config = {"configurable": {"thread_id": state["job_id"]}}
 
     try:
-        # Stream to see progress step by step
         for event in graph.stream(state, config):
             for node_name, node_state in event.items():
                 if node_name == "__interrupt__":

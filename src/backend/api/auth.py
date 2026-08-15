@@ -59,8 +59,6 @@ def read_users_me_stats(
     db: Session = Depends(get_db),
     current_user: schemas.User = Depends(auth.get_current_active_user),
 ):
-    """Aggregate usage stats for the current user (projects, runs, findings,
-    deployments and estimated infra spend)."""
     from sqlalchemy import func
 
     total_projects = (

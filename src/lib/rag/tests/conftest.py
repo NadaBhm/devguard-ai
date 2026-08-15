@@ -1,11 +1,9 @@
-"""Shared test fixtures."""
 import pytest
 from pathlib import Path
 
 
 @pytest.fixture
 def sample_repo(tmp_path: Path) -> Path:
-    """Create a fake repo with README and Python file."""
     repo = tmp_path / "fake_repo"
     repo.mkdir()
     

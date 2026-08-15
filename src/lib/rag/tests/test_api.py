@@ -1,4 +1,3 @@
-"""Tests for RAG Public API."""
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,8 +6,6 @@ from lib.rag.api import ask_about_repo, get_repo_context
 
 
 class TestAskAboutRepo:
-    """Primary integration point for Orchestrator Chat."""
-
     @patch("lib.rag.api.ask_repo")
     def test_ask_about_repo_delegates(self, mock_ask_repo):
         mock_ask_repo.return_value = "It uses FastAPI."
@@ -37,8 +34,6 @@ class TestAskAboutRepo:
 
 
 class TestGetRepoContext:
-    """Raw context retrieval for debugging."""
-
     @patch("lib.rag.api.retrieve_context")
     def test_get_repo_context_delegates(self, mock_retrieve):
         mock_retrieve.return_value = "[Source: README.md]\nThis is a FastAPI project."

@@ -10,8 +10,6 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 def require_admin(
     current_user: models.User = Depends(auth.get_current_active_user),
 ) -> models.User:
-    """Dependency that rejects any non-admin user with 403, before the
-    endpoint body runs."""
     if current_user.role != schemas.UserRole.ADMIN.value:
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return current_user
@@ -24,7 +22,6 @@ def list_users(
     db: Session = Depends(get_db),
     _admin: models.User = Depends(require_admin),
 ):
-    """List all users. Admin only."""
     return crud.get_users(db, skip=skip, limit=limit)
 
 
@@ -35,7 +32,6 @@ def update_user_role(
     db: Session = Depends(get_db),
     _admin: models.User = Depends(require_admin),
 ):
-    """Change a user's role. Admin only."""
     user = crud.get_user(db, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")

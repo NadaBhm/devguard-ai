@@ -17,8 +17,7 @@ class GeminiClientFactory:
     """Create GenerativeModel instances without polluting every __init__."""
     
     _configured_key: str | None = None
-    # FIX: removed _models class-level cache to prevent cross-test/state leaks
-    
+
     @classmethod
     def create(cls, config: RAGConfig | None = None) -> Any:
         """Return a fresh Gemini model (configures globally on first call)."""
@@ -31,5 +30,5 @@ class GeminiClientFactory:
             genai.configure(api_key=key)  # type: ignore[reportPrivateImportUsage]
             cls._configured_key = key
         
-        # FIX: create a new instance each time — no global cache that leaks between tests
+        # Fresh instance per call — no global model cache, which leaks state between tests
         return genai.GenerativeModel(model_name)  # type: ignore[reportPrivateImportUsage]

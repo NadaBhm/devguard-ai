@@ -4,14 +4,11 @@ DevGuard AI - Orchestrator Nodes
 Agent node implementations for the LangGraph workflow, plus the conditional
 routing functions that decide which node runs next.
 
-Sprint 1: all three agent nodes below are MOCKS returning realistic static
-payloads (matching Nada's codesec-mock-schema.json / Karim's InfraCost
-schema / Oussema's deployops-mock-schema.json), so the graph could be built
-and tested end-to-end before the real agents existed.
-
-Sprint 2 (T-2.17): these mock implementations are what needs to be replaced
-by real calls to CodeSecAgent.analyze(), run_pipeline() (InfraCost), and
-DeployOpsAgent.deploy() - see the TODO markers below.
+The mock_*_agent_impl functions return static payloads matching the three
+agents' mock-schema.json files, so the graph could be built and tested
+end-to-end before the real agents existed. The real-agent nodes (Section 7)
+delegate to agent_adapters.py, which returns these mocks by default until
+DEVGUARD_REAL_* is switched on.
 
 Split out of graph.py (originally Sections 3, 5, and 6).
 
@@ -31,15 +28,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # SECTION 3: MOCK AGENT FUNCTIONS (Sprint 1)
 # =============================================================================
-# TODO (T-2.17): replace each of these three functions with a real call to
-# the corresponding agent. See docs/api-contracts/ for the exact contracts:
-#   - CodeSec (Nada):    await CodeSecAgent().analyze(repo_url, job_id)  [async class method]
-#   - InfraCost (Karim): run_pipeline(payload, region=..., environment=...) [sync plain function]
-#   - DeployOps (Oussema): await DeployOpsAgent().deploy(payload)        [async class method]
-# NOTE: the three contracts are NOT uniform (async class / async class / sync
-# function) - InfraCost's call will need to go through
-# `await loop.run_in_executor(None, run_pipeline, payload)` to stay
-# consistent with the rest of this (async-friendly) graph.
 
 def mock_codesec_agent_impl(state: OrchestratorState) -> OrchestratorState:
     """MOCK: CodeSec Agent (Nada). CDC: US-1.1.1 to US-1.1.6"""
@@ -319,9 +307,7 @@ def mock_deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
     state["orchestrator_metadata"]["nodes_executed"].append("deployops_agent")
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    # ALIGNED with deployops-mock-schema.json - all required fields present
     state["deployops_result"] = build_mock_deployops_result(state["job_id"])
-
     logger.info(f"[{state['job_id']}] DeployOps complete. URL: {state['deployops_result']['deployed_url']}")
     return state
 
@@ -460,7 +446,6 @@ def generate_report_impl(state: OrchestratorState) -> OrchestratorState:
 
 
 def _summary_fallback(state: OrchestratorState, elapsed: float) -> dict:
-    """Minimal summary used when full rendering fails."""
     codesec = state.get("codesec_result") or {}
     summary = codesec.get("summary", {})
     infracost = state.get("infracost_result") or {}

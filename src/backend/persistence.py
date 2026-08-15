@@ -25,10 +25,9 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = ("completed", "rolled_back", "failed", "rejected")
 
-# The codesec agent's Severity enum includes "info", but the
-# ck_codesec_findings_severity CHECK constraint only accepts the classic
-# four. Map everything into the constrained set so real-mode scans can't
-# 500 on commit.
+# The codesec agent's Severity enum has "info", but the severity CHECK
+# constraint only accepts the classic four; map into the constrained set so
+# real scans can't 500 on commit.
 _ALLOWED_SEVERITIES = ("critical", "high", "medium", "low")
 
 
@@ -49,16 +48,24 @@ def _normalize_severity(severity: str | None) -> str:
     return mapping.get(value, "low")
 
 
-def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
-    """Pull the Docker artifacts from an orchestrator ``state``/``run_metadata``.
+_ALLOWED_SCANNERS = ("semgrep", "gitleaks", "trivy", "bandit")
 
-    The real InfraCost agent stashes them at
-    ``infracost_result._deploy_inputs.artifacts.{dockerfile, docker_image}``;
-    the orchestrator's mock/legacy shape carries them at
-    ``deployops_result.artifacts.{dockerfile, docker_image}``. Returns a list
-    of ``(file_path, artifact_type, content)`` tuples — content ``None`` when
-    the artifact is absent (e.g. a serverless Lambda run with no container).
-    """
+
+def _normalize_scanner(scanner: str | None) -> str:
+    """Map scanner names into the constrained codesec_findings set (the
+    built-in secrets scanner's ``regex-fallback`` maps to ``gitleaks``)."""
+    value = (scanner or "").strip().lower()
+    if value in _ALLOWED_SCANNERS:
+        return value
+    return "gitleaks" if "regex" in value else "semgrep"
+
+
+def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
+    """Docker artifacts from an orchestrator ``state``: the real InfraCost
+    agent stashes them at ``infracost_result._deploy_inputs.artifacts``, the
+    mock/legacy shape at ``deployops_result.artifacts``. Returns
+    ``(file_path, artifact_type, content)`` tuples, content None when absent
+    (e.g. a serverless Lambda run)."""
     artifacts = {}
     infracost = state.get("infracost_result") or {}
     deploy_inputs = (infracost.get("_deploy_inputs") or {}).get("artifacts") or {}
@@ -86,9 +93,9 @@ def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
 
 
 def _artifact_specs(state: dict) -> list[tuple[str, str, str]]:
-    """The ``(file_path, artifact_type, content)`` rows for a state, combining
-    the generated Terraform files (nested ``files`` from the real agent, flat
-    keys from the mock) with the Docker artifacts from ``_docker_artifacts``.
+    """The ``(file_path, artifact_type, content)`` rows for a state: the
+    generated Terraform files (nested ``files`` from the real agent, flat
+    keys from the mock) plus the Docker artifacts from ``_docker_artifacts``.
     """
     infracost = state.get("infracost_result") or {}
     terraform = infracost.get("generated_terraform") or {}
@@ -108,8 +115,6 @@ def _artifact_specs(state: dict) -> list[tuple[str, str, str]]:
 
 
 def _write_artifact_rows(db: Session, run_id: str, state: dict) -> int:
-    """Materialize the artifact rows (Terraform + Docker) for a run from its
-    current state. Returns the number of rows written."""
     written = 0
     for file_path, artifact_type, content in _artifact_specs(state):
         db.add(TerraformArtifact(
@@ -133,8 +138,7 @@ def coarse_status(orch_status: str) -> str:
 
 def _jsonable_interrupt(entry):
     """LangGraph ``Interrupt`` objects -> the dict shape the frontend expects
-    (``state.__interrupt__[i].value.{gate,message,context,...}``). Plain dicts
-    (already-serialized states) pass through unchanged."""
+    (``state.__interrupt__[i].value``); plain dicts pass through."""
     if isinstance(entry, dict):
         return entry
     value = getattr(entry, "value", None)
@@ -144,10 +148,9 @@ def _jsonable_interrupt(entry):
 
 
 def serialize_state(state: dict) -> dict:
-    """Make an orchestrator state dict JSON-safe, preserving the human-gate
-    interrupt payload (``__interrupt__``) the frontend's GateApproval reads —
-    it carries the gate context (iteration, cost breakdown, recommendations)
-    that would otherwise be lost, leaving the approval card blank."""
+    """JSON-safe state, preserving the ``__interrupt__`` payload the frontend
+    GateApproval reads (it carries gate context that would otherwise be lost,
+    leaving the approval card blank)."""
     clean = {k: v for k, v in state.items() if not k.startswith("__")}
     interrupt = state.get("__interrupt__")
     if interrupt is not None:
@@ -156,10 +159,6 @@ def serialize_state(state: dict) -> dict:
 
 
 def update_run_state(db: Session, run_id: str, state: dict) -> AnalysisRun:
-    """
-    Persist coarse status + full orchestrator state onto the analysis run row.
-    Cheap enough to call in the request path after every start/resume.
-    """
     run = db.query(AnalysisRun).filter(AnalysisRun.id == run_id).first()
     if not run:
         raise ValueError(f"AnalysisRun {run_id} not found")
@@ -176,13 +175,9 @@ def update_run_state(db: Session, run_id: str, state: dict) -> AnalysisRun:
 
 
 def persist_results(db: Session, run_id: str, state: dict) -> int:
-    """
-    Materialize a completed orchestrator state into the child result tables.
-    Idempotent: existing child rows for the run are replaced first.
-
-    Returns the number of rows written.
-    """
-    # Idempotency: remove previously persisted children for this run.
+    """Materialize a completed orchestrator state into the child result
+    tables. Idempotent: existing child rows for the run are replaced first.
+    Returns the number of rows written."""
     db.query(Deployment).filter(Deployment.run_id == run_id).delete()
     db.query(TerraformArtifact).filter(TerraformArtifact.run_id == run_id).delete()
     db.query(InfracostEstimate).filter(InfracostEstimate.run_id == run_id).delete()
@@ -191,7 +186,6 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
 
     written = 0
 
-    # ---- agent_tasks ----------------------------------------------------
     for agent_name, result in {
         "codesec": state.get("codesec_result"),
         "infracost": state.get("infracost_result"),
@@ -211,12 +205,11 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         ))
         written += 1
 
-    # ---- codesec findings ------------------------------------------------
     codesec = state.get("codesec_result") or {}
     for finding in codesec.get("sast_findings", []):
         db.add(CodeSecFinding(
             run_id=run_id,
-            scanner=finding.get("tool", "semgrep"),
+            scanner=_normalize_scanner(finding.get("tool", "semgrep")),
             severity=_normalize_severity(finding.get("severity", "low")),
             file_path=finding.get("file", ""),
             line_number=finding.get("line"),
@@ -234,7 +227,7 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         secret_type = finding.get("type", "secret")
         db.add(CodeSecFinding(
             run_id=run_id,
-            scanner=finding.get("tool", "gitleaks"),
+            scanner=_normalize_scanner(finding.get("tool", "gitleaks")),
             severity=_normalize_severity(finding.get("severity", "high")),
             file_path=finding.get("file", ""),
             line_number=finding.get("line"),
@@ -246,7 +239,6 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         ))
         written += 1
 
-    # ---- infracost estimates ----------------------------------------------
     infracost = state.get("infracost_result") or {}
     breakdown = infracost.get("cost_estimate", {}).get("breakdown", []) or []
     if not breakdown and infracost.get("cost_estimate", {}).get("monthly_cost_usd"):
@@ -268,10 +260,8 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         ))
         written += 1
 
-    # ---- terraform + docker artifacts ------------------------------------
     written += _write_artifact_rows(db, run_id, state)
 
-    # ---- deployments ---------------------------------------------------------
     deployops = state.get("deployops_result") or {}
     status_map = {"success": "succeeded", "failed": "failed", "rolled_back": "rolled_back"}
     deploy_status = status_map.get(deployops.get("deployment_status", "pending"), "failed")
@@ -295,18 +285,16 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
 def derive_results_from_state(metadata: dict) -> dict:
     """Build normalized result rows straight from orchestrator state.
 
-    The normalized child tables are only materialized when a run reaches a
-    terminal status (see ``persist_results``). For an in-flight or paused run
-    (e.g. waiting at a human gate) the UI still needs CodeSec findings and
-    generated Terraform to render its tabs, so this derives the same row
-    shapes purely from ``run_metadata``.
+    The child tables are only materialized at a terminal status (see
+    ``persist_results``); for an in-flight or gate-paused run the UI still
+    needs these row shapes, so derive them from ``run_metadata``.
     """
     from uuid import uuid4
 
     codesec = metadata.get("codesec_result") or {}
     findings = []
     for finding in list(codesec.get("sast_findings") or []) + list(codesec.get("secrets") or []):
-        scanner = finding.get("tool") or finding.get("scanner") or "semgrep"
+        scanner = _normalize_scanner(finding.get("tool") or finding.get("scanner") or "semgrep")
         findings.append({
             "id": str(uuid4()),
             "run_id": metadata.get("job_id"),
@@ -344,9 +332,8 @@ def derive_results_from_state(metadata: dict) -> dict:
         estimates.append(_estimate_row(
             item.get("service", "unknown"), item.get("service", "unknown"), monthly
         ))
-    # The real InfraCost agent reports a single total (range_min/max) with an
-    # empty per-service breakdown, which the UI sums to $0. Derive one total
-    # row so the tab and summary show the actual estimate.
+    # The real InfraCost agent reports one total with an empty per-service
+    # breakdown, which the UI sums to $0; derive a single total row instead.
     if not estimates and cost_estimate.get("monthly_cost_usd"):
         estimates.append(_estimate_row(
             "Estimated total", "total", float(cost_estimate["monthly_cost_usd"])

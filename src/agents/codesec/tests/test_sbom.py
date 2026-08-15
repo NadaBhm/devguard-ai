@@ -1,4 +1,3 @@
-"""Tests for SBOM Generator."""
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -18,8 +17,6 @@ from codesec.models import SBOM, SbomComponent, SbomFormat, LicenseInfo
 
 
 class TestParseRequirementsTxt:
-    """Test requirements.txt parsing."""
-
     def test_parse_simple(self):
         content = "flask==2.0.1\nrequests>=2.25.0\n"
         components = _parse_requirements_txt(content)
@@ -47,8 +44,6 @@ class TestParseRequirementsTxt:
 
 
 class TestParsePackageJson:
-    """Test package.json parsing."""
-
     def test_parse_dependencies(self):
         content = json.dumps({
             "dependencies": {"express": "^4.17.1"},
@@ -71,8 +66,6 @@ class TestParsePackageJson:
 
 
 class TestParseGoMod:
-    """Test go.mod parsing."""
-
     def test_parse_require(self):
         content = "module example.com/test\ngo 1.19\nrequire github.com/gin-gonic/gin v1.9.0\n"
         components = _parse_go_mod(content)
@@ -86,8 +79,6 @@ class TestParseGoMod:
 
 
 class TestGenerateFallbackSBOM:
-    """Test fallback SBOM generation."""
-
     def test_from_requirements(self, tmp_path: Path):
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -116,10 +107,7 @@ class TestGenerateFallbackSBOM:
 
 
 class TestGenerateSBOM:
-    """Test the main SBOM generation function."""
-
     def test_generate_sbom_python_repo(self, sample_python_repo: Path):
-        """Generate SBOM for Python repo."""
         sbom = generate_sbom(sample_python_repo)
 
         assert isinstance(sbom, SBOM)
@@ -127,7 +115,6 @@ class TestGenerateSBOM:
         assert sbom.components_count >= 0
 
     def test_generate_sbom_empty_repo(self, temp_repo: Path):
-        """Generate SBOM for empty repo."""
         sbom = generate_sbom(temp_repo)
 
         assert isinstance(sbom, SBOM)
@@ -155,7 +142,7 @@ class TestGenerateSBOM:
     @patch("codesec.scanners.sbom._run_cyclonedx_py")
     @patch("codesec.scanners.sbom._run_trivy_sbom")
     def test_generate_sbom_falls_back_to_trivy(self, mock_trivy, mock_cyclonedx, tmp_path: Path):
-        mock_cyclonedx.return_value = None  # Failed
+        mock_cyclonedx.return_value = None
         mock_trivy.return_value = SBOM(
             serial_number="urn:uuid:test2",
             components_count=3,
@@ -189,8 +176,6 @@ class TestGenerateSBOM:
 
 
 class TestSBOMModel:
-    """Test SBOM Pydantic model."""
-
     def test_creation(self):
         sbom = SBOM(
             serial_number="urn:uuid:test",

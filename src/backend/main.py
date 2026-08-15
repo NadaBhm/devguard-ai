@@ -38,7 +38,6 @@ def on_startup():
     except Exception as exc:
         logger.warning(f"Orchestrator graph unavailable at startup: {exc}")
 
-    # Redis progress relay -> WebSocket clients.
     global _relay_task
     try:
         _relay_task = asyncio.create_task(redis_progress_relay())
@@ -52,23 +51,17 @@ def on_shutdown():
     if _relay_task is not None:
         _relay_task.cancel()
         _relay_task = None
-    # FIX: the SQLAlchemy engine was never disposed on shutdown. On Linux
-    # this went unnoticed (the OS releases the file handle once the process
-    # exits regardless), but on Windows the sqlite file stays locked as long
-    # as the engine's connection pool is alive - test_jobs.py's teardown
-    # fixture (TEST_DB.unlink() right after the TestClient context manager
-    # closes, which triggers this very shutdown event) failed with
-    # PermissionError [WinError 32] because of exactly this. Disposing the
-    # engine here releases the file handle for real, on every platform.
+    # The SQLAlchemy engine was never disposed on shutdown; on Windows the
+    # sqlite file stays locked while the connection pool is alive, so dispose
+    # it here to release the file handle (test teardown unlinks the DB right
+    # after this shutdown event).
     from .database import engine
     engine.dispose()
 
 
-# REST API routes
 app.include_router(auth.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 
-#main functionalities are found here
 app.include_router(jobs.router, prefix="/api")
 
 app.include_router(notifications.router, prefix="/api")
@@ -76,7 +69,6 @@ app.include_router(alerts.router, prefix="/api")
 app.include_router(deployments.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
-# WebSocket endpoint for real-time progress + RAG chat
 @app.websocket("/ws/jobs/{job_id}")
 async def ws_jobs(websocket: WebSocket, job_id: str):
     await websocket_endpoint(websocket, job_id)

@@ -346,6 +346,33 @@ def test_persist_results_materializes_secrets(db: Session) -> None:
     assert by_file["src/client.js"].description == "sk-***"
 
 
+def test_persist_results_normalizes_regex_fallback_scanner(db: Session) -> None:
+    """The built-in secrets scanner emits tool='regex-fallback', which violates
+    the ck_codesec_findings_scanner constraint. It must be persisted as
+    'gitleaks' so the commit does not fail."""
+    state = _make_state({"main_tf": "resource \"x\" {}"})
+    state["codesec_result"] = {
+        "secrets": [
+            {
+                "type": "generic_api_key",
+                "tool": "regex-fallback",
+                "file": "main.py",
+                "line": 52,
+                "severity": "high",
+                "value_preview": "***",
+                "remediation": "Remove hardcoded secrets",
+            },
+        ]
+    }
+    written = persist_results(db, "test-run-regex-scanner", state)
+
+    assert written >= 1
+    rows = db.query(models.CodeSecFinding).filter_by(run_id="test-run-regex-scanner").all()
+    assert len(rows) == 1
+    assert rows[0].scanner == "gitleaks"
+    assert rows[0].rule_id == "generic_api_key"
+
+
 class _FakeInterrupt:
     """Stand-in for langgraph.types.Interrupt (value dict, not a dict itself)."""
 

@@ -2,14 +2,12 @@ from sqlalchemy.orm import Session
 
 from . import models, schemas
 
-# get_password_hash is imported lazily inside each function that needs it
-# (not at module level) to avoid a circular import: auth.py imports crud
-# for crud.get_user_by_email, so crud importing from auth at module load
-# time creates a cycle -- same pattern already used in api/jobs.py's
-# _get_or_create_system_user for the same reason.
+# get_password_hash is imported lazily inside each function that needs it to
+# avoid a circular import: auth.py imports crud, so crud importing from auth
+# at module load time would cycle.
 
 
-def get_user(db: Session, user_id: str):  # FIX: was int, now str
+def get_user(db: Session, user_id: str):
     return db.query(models.User).filter(models.User.id == user_id).first()
 
 def get_user_by_email(db: Session, email: str):
@@ -37,11 +35,10 @@ def create_user(db: Session, user: schemas.UserCreate):
     db.refresh(db_user)
     return db_user
 
-def update_user(db: Session, user_id: str, user_update: schemas.UserUpdate):  # FIX: was int, now str
+def update_user(db: Session, user_id: str, user_update: schemas.UserUpdate):
     db_user = get_user(db, user_id)
     if not db_user:
         return None
-    # FIX: Pydantic v2 uses model_dump, not dict
     update_data = user_update.model_dump(exclude_unset=True)
     if "password" in update_data:
         from .auth import get_password_hash
@@ -60,7 +57,7 @@ def update_user(db: Session, user_id: str, user_update: schemas.UserUpdate):  # 
     db.refresh(db_user)
     return db_user
 
-def delete_user(db: Session, user_id: str):  # FIX: was int, now str
+def delete_user(db: Session, user_id: str):
     db_user = get_user(db, user_id)
     if not db_user:
         return None

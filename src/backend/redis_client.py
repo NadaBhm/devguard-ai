@@ -1,4 +1,3 @@
-# src/backend/redis_client.py
 import json
 from typing import Optional
 
@@ -29,7 +28,6 @@ class RedisClient:
         except Exception:
             return False
 
-# Convenience function
 def get_redis():
     return RedisClient.get_client()
 
@@ -40,10 +38,7 @@ PROGRESS_CHANNEL = "progress:{job_id}"
 
 
 def publish_event(job_id: str, event_type: str, **payload) -> bool:
-    """Publish a typed live event for a job. Safe no-op if Redis is down.
-
-    Event types: progress, phase, gate, results_ready, error, ...
-    """
+    """Publish a typed live event for a job. Safe no-op if Redis is down."""
     try:
         message = json.dumps({
             "type": event_type,
@@ -57,15 +52,12 @@ def publish_event(job_id: str, event_type: str, **payload) -> bool:
 
 
 def publish_progress(job_id: str, phase: str, progress: int, message: str = "") -> bool:
-    """Publish a progress event for a job (backwards-compatible)."""
     return publish_event(job_id, "progress", phase=phase, progress=progress, message=message)
 
 
 def publish_gate(job_id: str, gate: str, status: str) -> bool:
-    """Publish a human-gate event: a run is waiting on approval (or was approved)."""
     return publish_event(job_id, "gate", gate=gate, status=status)
 
 
 def publish_results_ready(job_id: str) -> bool:
-    """Signal that a run's results were persisted and are available via /results."""
     return publish_event(job_id, "results_ready")

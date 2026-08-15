@@ -1,14 +1,3 @@
-"""
-RAG Backend — Retrieval-Augmented Generation
-=============================================
-Shared library for embedding repo docs and semantic retrieval.
-
-Stack:
-- Embeddings: Hugging Face (local, free)
-- Vector DB: Qdrant (self-hosted)
-- LLM: Google Gemini (free tier)
-"""
-
 from __future__ import annotations
 
 from .api import ask_about_repo, get_repo_context

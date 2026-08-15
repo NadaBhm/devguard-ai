@@ -1,19 +1,16 @@
 """
 CodeSec Stack Detection Scanner
-=================================
 Detects primary language, frameworks, database, build tool, and container
 information from repository file list and content.
 
 US-1.1.2: As a user, I want to know my project's tech stack so that I
-understand its architecture.  Detection accuracy target: >=80% on test repos.
+understand its architecture. Detection accuracy target: >=80% on test repos.
 
 Design Decisions:
 - Heuristic-based detection using filename patterns and content grepping.
-- No arbitrary code execution — purely static file analysis. citespec-NFR-security
+- No arbitrary code execution — purely static file analysis.
 - Confidence score computed from match strength and file coverage.
 - Extensible indicator registry in config.py for new technologies.
-
-Author: Nada 
 """
 
 from __future__ import annotations
@@ -62,15 +59,6 @@ LANGUAGE_EXTENSIONS: dict[str, str] = {
 def detect_stack(repo_path: Path) -> StackDetection:
     """
     Analyze a cloned repository and detect its technology stack.
-
-    Args:
-        repo_path: Path to the cloned repository root.
-
-    Returns:
-        StackDetection model with detected technologies and confidence.
-
-    Raises:
-        ScannerError: If repo_path is invalid or unreadable.
     """
     if not repo_path.exists() or not repo_path.is_dir():
         raise ScannerError(f"Repository path does not exist or is not a directory: {repo_path}")
@@ -219,12 +207,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
 
 
 def get_language_breakdown(repo_path: Path) -> dict[str, int]:
-    """
-    Compute approximate LOC per language for repo_metadata.
-
-    Returns:
-        Dictionary mapping language name to line count.
-    """
+    """Compute approximate LOC per language for repo_metadata."""
     breakdown: dict[str, int] = {}
     for f in Path(repo_path).rglob("*"):
         if f.is_file():

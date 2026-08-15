@@ -5,7 +5,6 @@ from pydantic import BaseModel, EmailStr, Field
 from enum import Enum
 
 
-# Enums
 class UserRole(str, Enum):
     MEMBER = "member"
     ADMIN = "admin"
@@ -100,7 +99,6 @@ class ConfidenceLevel(str, Enum):
     LOW = "low"
 
 
-# User schemas
 class UserBase(BaseModel):
     email: EmailStr
     first_name: str
@@ -162,7 +160,6 @@ class UserStats(BaseModel):
     member_since: datetime
 
 
-# Project schemas
 class ProjectBase(BaseModel):
     repo_name: str
     github_url: str
@@ -192,7 +189,6 @@ class Project(ProjectBase):
         from_attributes = True
 
 
-# Analysis Run schemas
 class AnalysisRunBase(BaseModel):
     commit_sha: str
     commit_message: Optional[str] = None
@@ -223,7 +219,6 @@ class AnalysisRun(AnalysisRunBase):
         from_attributes = True
 
 
-# Agent Task schemas
 class AgentTaskBase(BaseModel):
     agent_name: AgentName
     celery_task_id: UUID
@@ -256,7 +251,6 @@ class AgentTask(AgentTaskBase):
         from_attributes = True
 
 
-# CodeSec Finding schemas
 class CodeSecFindingBase(BaseModel):
     scanner: ScannerType
     severity: Severity
@@ -282,7 +276,6 @@ class CodeSecFinding(CodeSecFindingBase):
         from_attributes = True
 
 
-# Infracost Estimate schemas
 class InfracostEstimateBase(BaseModel):
     resource_type: str
     resource_name: str
@@ -307,7 +300,6 @@ class InfracostEstimate(InfracostEstimateBase):
         from_attributes = True
 
 
-# Terraform Artifact schemas
 class TerraformArtifactBase(BaseModel):
     artifact_type: str
     file_path: str
@@ -330,7 +322,6 @@ class TerraformArtifact(TerraformArtifactBase):
         from_attributes = True
 
 
-# Deployment schemas
 class DeploymentBase(BaseModel):
     environment: Environment
     aws_region: str
@@ -364,7 +355,6 @@ class Deployment(DeploymentBase):
         from_attributes = True
 
 
-# Notification schemas
 class NotificationBase(BaseModel):
     type: NotificationType
     severity: NotificationSeverity
@@ -397,7 +387,6 @@ class Notification(NotificationBase):
         from_attributes = True
 
 
-# Cost Alert schemas
 class CostAlertBase(BaseModel):
     alert_type: CostAlertType
     threshold_usd: float
@@ -429,7 +418,6 @@ class CostAlert(CostAlertBase):
         from_attributes = True
 
 
-# RAG Document schemas
 class RAGDocumentBase(BaseModel):
     source_path: str
     source_type: RAGSourceType
@@ -460,7 +448,6 @@ class RAGDocument(RAGDocumentBase):
         from_attributes = True
 
 
-# Response schemas with relationships
 class AnalysisRunWithDetails(AnalysisRun):
     project: Optional[Project] = None
     agent_tasks: List[AgentTask] = []

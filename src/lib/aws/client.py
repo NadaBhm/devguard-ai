@@ -1,5 +1,3 @@
-""""skeleton for AWS client, needs more functionality for later"""
-
 import os
 
 import boto3

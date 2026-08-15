@@ -15,11 +15,9 @@ def list_alerts(
 ):
     """List the current user's cost alerts, most recent first.
 
-    Note: cost_alerts records an alert already triggered for a specific
-    run (it always carries run_id/actual_cost_usd) -- there is no
-    "create a budget rule in advance" concept in the current schema, so
-    there is deliberately no POST endpoint here yet. See docs/ for the
-    schema this would need if that's wanted later.
+    cost_alerts only records alerts already triggered for a run (it always
+    carries run_id/actual_cost_usd) -- there is no budget-rule concept in the
+    schema, so there is deliberately no POST endpoint.
     """
     query = db.query(models.CostAlert).filter(models.CostAlert.user_id == current_user.id)
     if resolved is not None:
@@ -51,7 +49,6 @@ def resolve_alert(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user),
 ):
-    """Mark a cost alert as resolved. Only the owning user may do this."""
     from datetime import datetime
 
     alert = (

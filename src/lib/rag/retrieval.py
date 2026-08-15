@@ -1,9 +1,3 @@
-"""
-Retrieval + LLM
-===============
-Semantic search + Gemini response generation.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -24,7 +18,6 @@ def similarity_search(
     top_k: int = 5,
     config: RAGConfig | None = None,
 ) -> list[SearchResult]:
-    """Search for relevant chunks."""
     config = config or get_rag_config()
     collection_name = f"{config.qdrant_collection}_{job_id}"
 
@@ -61,7 +54,6 @@ def retrieve_context(
     top_k: int = 5,
     config: RAGConfig | None = None,
 ) -> str:
-    """Format retrieved chunks for prompt."""
     results = similarity_search(query, job_id, top_k, config)
 
     if not results:
@@ -82,17 +74,7 @@ def ask_repo(
     top_k: int = 5,
     config: RAGConfig | None = None,
 ) -> str:
-    """
-    End-to-end RAG: retrieve context + query Gemini.
-
-    Args:
-        query: User question about the repo.
-        job_id: Job ID (links to Qdrant collection).
-        top_k: Number of chunks to retrieve.
-
-    Returns:
-        Gemini's answer based on repo context.
-    """
+    """End-to-end RAG: retrieve context and query Gemini."""
     context = retrieve_context(query, job_id, top_k, config)
 
     if not context:

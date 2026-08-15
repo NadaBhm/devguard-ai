@@ -45,7 +45,6 @@ class ConnectionManager:
             self.disconnect(ws, job_id)
 
     async def send_event(self, job_id: str, event_type: str, data: dict):
-        """Send an arbitrary typed live event (gate, results_ready, ...) to clients."""
         if job_id not in self.active_connections:
             return
         payload = {
@@ -63,11 +62,10 @@ class ConnectionManager:
             self.disconnect(ws, job_id)
 
     async def send_rag_answer(self, job_id: str, answer: str, sources):
-        """Send RAG answer. sources can be str or list."""
+        """Send a RAG answer; sources may be a str or list."""
         if job_id not in self.active_connections:
             return
 
-        # Normalize sources to list[str]
         if isinstance(sources, str):
             sources = [sources]
         elif not isinstance(sources, list):
@@ -94,11 +92,9 @@ manager = ConnectionManager()
 
 async def redis_progress_relay():
     """
-    Long-running background task (started at app startup).
-
-    Subscribes to the Redis progress channel pattern and forwards every
-    message to the WebSocket ConnectionManager, so progress published by
-    the API reaches connected clients.
+    Background task (started at app startup) that subscribes to the Redis
+    progress channel pattern and forwards every message to the WebSocket
+    ConnectionManager, so progress published by the API reaches clients.
     """
     from .config import settings
 
@@ -139,7 +135,6 @@ async def redis_progress_relay():
 
 
 def _authenticate(token: str | None):
-    """Resolve a ?token= query param to a user via the access-token JWT."""
     if not token:
         return None
     payload = auth.decode_token(token)
@@ -156,7 +151,6 @@ def _authenticate(token: str | None):
 
 
 def _owns_job(user, job_id: str) -> bool:
-    """True if the authenticated user triggered the run for ``job_id``."""
     db = SessionLocal()
     try:
         run = (
@@ -173,10 +167,8 @@ def _owns_job(user, job_id: str) -> bool:
 
 
 async def websocket_endpoint(websocket: WebSocket, job_id: str):
-    """WebSocket endpoint for real-time job progress + RAG chat.
-
-    Requires `?token=<JWT>` in the connection URL
-    """
+    """Real-time job progress + RAG chat. Requires ``?token=<JWT>`` in the
+    connection URL."""
     user = _authenticate(websocket.query_params.get("token"))
     if user is None:
         await websocket.close(code=4401, reason="Unauthorized")
@@ -197,7 +189,6 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                 from src.lib.rag.retrieval import ask_repo
                 result = ask_repo(query, job_id)
 
-                # Handle both return types
                 if isinstance(result, tuple):
                     answer, sources = result
                 else:

@@ -1,4 +1,3 @@
-"""Tests for CodeSec Agent."""
 import asyncio
 import subprocess
 from pathlib import Path
@@ -26,8 +25,6 @@ from codesec.models import (
 
 
 class TestCodeSecAgentInitialization:
-    """Test agent initialization."""
-
     def test_agent_default_init(self):
         agent = CodeSecAgent()
         assert agent.clone_dir.exists()
@@ -38,8 +35,6 @@ class TestCodeSecAgentInitialization:
 
 
 class TestValidateRepoURL:
-    """Test public GitHub/GitLab repository URL validation."""
-
     def test_valid_github_https_url(self):
         agent = CodeSecAgent()
         url = agent._validate_repo_url("https://github.com/owner/repo")
@@ -82,8 +77,6 @@ class TestValidateRepoURL:
 
 
 class TestCloneRepo:
-    """Test repository cloning."""
-
     @patch("codesec.agent.subprocess.run")
     def test_clone_success(self, mock_run, tmp_path: Path):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -112,8 +105,6 @@ class TestCloneRepo:
 
 
 class TestGetRepoMetadata:
-    """Test metadata extraction."""
-
     def test_metadata_from_repo(self, sample_python_repo: Path):
         agent = CodeSecAgent()
         metadata = agent._get_repo_metadata(sample_python_repo, "https://github.com/test/repo")
@@ -126,8 +117,6 @@ class TestGetRepoMetadata:
 
 
 class TestAnalyze:
-    """Test the main analysis function."""
-
     @patch("codesec.agent.run_sast")
     @patch("codesec.agent.run_secrets_scan")
     @patch("codesec.agent.run_dependency_scan")
@@ -215,8 +204,6 @@ class TestAnalyze:
 
 
 class TestAnalyzeSyncWrapper:
-    """Test synchronous wrapper."""
-
     @patch("codesec.agent.CodeSecAgent.analyze")
     def test_analyze_sync(self, mock_analyze, tmp_path: Path):
         mock_analyze.return_value = CodeSecResult(
@@ -236,8 +223,6 @@ class TestAnalyzeSyncWrapper:
 
 
 class TestCodeSecResultModel:
-    """Test CodeSecResult model."""
-
     def test_creation(self):
         result = CodeSecResult(
             job_id="550e8400-e29b-41d4-a716-446655440000",

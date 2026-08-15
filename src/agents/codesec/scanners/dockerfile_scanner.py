@@ -1,18 +1,16 @@
 
 """
 CodeSec Dockerfile Scanner
-===========================
 Checks Dockerfiles and docker-compose files for security best practices.
 
 Technology Decision (ADR):
 - Primary: Trivy config scan — comprehensive Dockerfile checks, OSS,
   maintained by Aqua Security, JSON output, integrates with our existing
-  Trivy dependency scanning. citeweb_search:5#3
+  Trivy dependency scanning.
 - Secondary: Hadolint — fast linting for Dockerfile best practices,
   but focused on style/efficiency rather than security. Used as supplement.
 - Not chosen: Checkov — powerful but heavier, more suited for IaC (Terraform,
   CloudFormation) than Dockerfile-specific checks.
-
 """
 
 from __future__ import annotations
@@ -153,10 +151,7 @@ def _run_hadolint(repo_path: Path) -> list[DockerfileFinding]:
 
 
 def _run_builtin_checks(repo_path: Path) -> list[DockerfileFinding]:
-    """
-    Built-in Dockerfile security checks when no external tools are available.
-    Covers critical security rules that every Dockerfile should pass.
-    """
+    """Built-in Dockerfile security checks when no external tools are available. Covers critical security rules that every Dockerfile should pass."""
     findings: list[DockerfileFinding] = []
     dockerfile_paths = find_files(repo_path, patterns=("Dockerfile*", "*.dockerfile"))
 
@@ -233,12 +228,6 @@ def run_dockerfile_scan(repo_path: Path) -> list[DockerfileFinding]:
 
     Tries Trivy config scan first, then Hadolint, then falls back to
     built-in regex-based checks.
-
-    Args:
-        repo_path: Path to the cloned repository.
-
-    Returns:
-        Combined list of DockerfileFinding objects.
     """
     all_findings: list[DockerfileFinding] = []
 

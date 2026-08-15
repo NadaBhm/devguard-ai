@@ -135,7 +135,6 @@ def build_architecture_svg(architecture: Optional[str], region: str = "") -> str
 # =============================================================================
 
 def build_template_context(state: OrchestratorState) -> dict[str, Any]:
-    """Flatten the orchestrator state into the variables the template expects."""
     codesec = state.get("codesec_result") or {}
     infracost = state.get("infracost_result") or {}
     deployops = state.get("deployops_result") or {}
@@ -263,7 +262,6 @@ def build_template_context(state: OrchestratorState) -> dict[str, Any]:
 # =============================================================================
 
 def render_html(state: OrchestratorState) -> str:
-    """Render the report to an HTML string."""
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
         # Autoescaping is NOT optional here: every string in this report -

@@ -103,7 +103,6 @@ def explain_architecture_decision(decision: DecisionResult) -> tuple[str, Enrich
 
 
 def summarize_cost_estimation(decision: DecisionResult, cost: Money) -> tuple[str, EnrichmentSource]:
-    """Summarize the already-computed monthly cost (module 4) in prose."""
     fallback = (
         f"Coût mensuel estimé pour {decision.compute_type} : {cost.amount} {cost.currency} "
         f"(fourchette {cost.range_min}-{cost.range_max} {cost.currency}, incertitude ±20%)."
@@ -123,7 +122,6 @@ def summarize_cost_estimation(decision: DecisionResult, cost: Money) -> tuple[st
 
 
 def explain_finops_choice(finops: FinOpsRecommendation) -> tuple[str, EnrichmentSource]:
-    """Explain the already-decided FinOps strategy (module 6) in prose."""
     discarded_names = ", ".join(option.name for option in finops.discarded)
     fallback = (
         f"Stratégie FinOps recommandée : {finops.recommended.name}. {finops.recommended.reason} "
@@ -147,15 +145,9 @@ def build_enrichment(
 ) -> Enrichment:
     """Assemble the full ``enrichment`` block from modules 2, 4 and 6.
 
-    Args:
-        decision: Module 2's output.
-        cost: Module 4's output.
-        finops: Module 6's output.
-
-    Returns:
-        An ``Enrichment`` whose ``enrichment_source`` is ``"gemini"`` only
-        if all three texts actually came from a real call — any single
-        fallback marks the whole block ``"fallback"``, never overclaiming.
+    ``enrichment_source`` is ``"gemini"`` only if all three texts actually
+    came from a real call — any single fallback marks the whole block
+    ``"fallback"``, never overclaiming.
     """
     architecture_explanation, arch_source = explain_architecture_decision(decision)
     cost_summary, cost_source = summarize_cost_estimation(decision, cost)

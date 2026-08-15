@@ -1,4 +1,3 @@
-"""Tests for RAG retrieval."""
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,8 +18,6 @@ def mock_config():
 
 
 class TestSimilaritySearch:
-    """Test semantic search."""
-
     @patch("lib.rag.retrieval.QdrantClient")
     @patch("lib.rag.retrieval.EmbeddingClient")
     def test_search_returns_results(self, mock_embedder_class, mock_client_class, mock_config):
@@ -43,8 +40,6 @@ class TestSimilaritySearch:
 
 
 class TestRetrieveContext:
-    """Test context formatting."""
-
     @patch("lib.rag.retrieval.similarity_search")
     def test_retrieve_formats_context(self, mock_search):
         mock_search.return_value = [
@@ -58,8 +53,6 @@ class TestRetrieveContext:
 
 
 class TestAskRepo:
-    """Test end-to-end ask_repo (retrieval + LLM)."""
-
     @patch("lib.rag.retrieval.GeminiClient")
     @patch("lib.rag.retrieval.retrieve_context")
     def test_ask_repo_with_context(self, mock_retrieve, mock_client_class):

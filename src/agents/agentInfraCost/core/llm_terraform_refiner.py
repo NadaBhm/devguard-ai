@@ -142,21 +142,14 @@ def _parse_llm_output(raw_text: str | None) -> _RefinedTerraform | None:
 
 
 def _valid_file(content: str) -> bool:
-    """A refined file must be non-empty; anything else is a refused edit."""
     return bool(content and content.strip())
 
 
 def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None) -> str:
-    """
-    Validate the Dockerfile against the repo context. If it references
-    dependency files (requirements.txt, pyproject.toml, package.json, etc.)
-    that don't exist in the repo context, rewrite to use explicit package
-    installs based on the detected stack.
-    """
+    """Rewrite dependency installs that reference files absent from the repo context."""
     if not dockerfile or not repo_context:
         return dockerfile
 
-    # Files that indicate dependency management - check if they exist in repo_context
     dep_files = {
         "requirements.txt": ("pip install", ["fastapi", "uvicorn"]),
         "pyproject.toml": ("pip install", ["fastapi", "uvicorn"]),
@@ -184,8 +177,6 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
             f" -r {fname}" in stripped or f" install {fname}" in stripped or f" install -r {fname}" in stripped
             for fname in missing_deps
         ):
-            # Replace with explicit install for the detected stack
-            # Detect stack from repo_context (simple heuristic)
             if "fastapi" in repo_context.lower() or "uvicorn" in repo_context.lower():
                 new_lines.append("RUN pip install --no-cache-dir uvicorn fastapi")
             elif "express" in repo_context.lower() or "node" in repo_context.lower():
@@ -277,7 +268,6 @@ def refine_terraform(
                     )
                 else:
                     refined_dockerfile = refined.dockerfile
-                    # Sanitize: remove references to missing dependency files
                     refined_dockerfile = _sanitize_dockerfile_dependencies(
                         refined_dockerfile, repo_context
                     )

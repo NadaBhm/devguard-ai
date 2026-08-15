@@ -88,11 +88,12 @@ def test_region_comparison_matches_region_comparator_directly() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_architecture_recommendation_mapping_covers_exactly_the_three_known_compute_types() -> None:
+def test_architecture_recommendation_mapping_covers_exactly_the_known_compute_types() -> None:
     """Proves the mapping table can't silently drift from decision_engine's
     ComputeType — every compute_type this agent can ever produce has an
     entry, and nothing extra is defined that could hide a typo."""
-    assert set(_ARCHITECTURE_RECOMMENDATION.keys()) == {"ecs", "lambda", "ec2"}
+    assert set(_ARCHITECTURE_RECOMMENDATION.keys()) == {"ecs", "lambda", "ec2", "s3"}
     assert _ARCHITECTURE_RECOMMENDATION["ecs"] == "ecs_fargate"
     assert _ARCHITECTURE_RECOMMENDATION["lambda"] == "lambda"
     assert _ARCHITECTURE_RECOMMENDATION["ec2"] == "ec2"
+    assert _ARCHITECTURE_RECOMMENDATION["s3"] == "s3"

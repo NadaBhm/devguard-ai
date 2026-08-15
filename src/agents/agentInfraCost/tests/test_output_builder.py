@@ -173,8 +173,8 @@ def test_output_is_json_serializable_with_correct_alias_keys() -> None:
 
     dumped = output.model_dump(by_alias=True)
 
-    assert set(dumped["aws_config"].keys()) == {"region", "estimated_monthly_cost", "ecs", "lambda", "ec2"}
-    assert set(dumped["deployment_config"].keys()) == {"ecs", "lambda", "ec2"}
+    assert set(dumped["aws_config"].keys()) == {"region", "estimated_monthly_cost", "ecs", "lambda", "ec2", "s3"}
+    assert set(dumped["deployment_config"].keys()) == {"ecs", "lambda", "ec2", "s3"}
 
 
 def test_region_and_environment_are_threaded_instead_of_hardcoded() -> None:

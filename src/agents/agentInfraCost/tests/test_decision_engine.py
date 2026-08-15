@@ -1,5 +1,3 @@
-"""Tests for core.decision_engine."""
-
 import copy
 import json
 from pathlib import Path
@@ -25,11 +23,6 @@ def _load_analysis(filename: str) -> RepoAnalysisInput:
 
 def _load_raw(filename: str) -> dict[str, Any]:
     return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
-
-
-# --------------------------------------------------------------------------
-# Nominal cases — the 4 fixtures, expecting different results per context
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -75,15 +68,10 @@ def test_sizing_keys_match_compute_type(
     assert set(result.sizing.keys()) == expected_keys
 
 
-def test_score_breakdown_has_all_three_compute_types() -> None:
+def test_score_breakdown_has_all_four_compute_types() -> None:
     result = decide_architecture(_load_analysis("sample_input.json"))
-    assert set(result.score_breakdown.keys()) == {"ecs", "lambda", "ec2"}
+    assert set(result.score_breakdown.keys()) == {"ecs", "lambda", "ec2", "s3"}
     assert all(isinstance(v, float) for v in result.score_breakdown.values())
-
-
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
 
 
 def test_large_uncontainerized_project_chooses_ec2() -> None:
@@ -152,11 +140,6 @@ def test_decide_architecture_does_not_mutate_input() -> None:
     assert analysis == snapshot
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
-
-
 def test_decision_result_rejects_invalid_compute_type() -> None:
     with pytest.raises(ValidationError):
         DecisionResult(
@@ -173,6 +156,31 @@ def test_decision_result_rejects_wrong_sizing_value_type() -> None:
             sizing={"memory_mb": ["not", "a", "number"]},  # type: ignore[dict-item]
             score_breakdown={"ecs": 0.0, "lambda": 0.0, "ec2": 0.0},
         )
+
+
+def test_static_site_chooses_s3() -> None:
+    """A bare HTML/CSS/JS site (no container, no database, no frameworks)
+    must deterministically resolve to s3, with empty sizing."""
+    raw = _load_raw("sample_input_variant_lambda_candidate.json")
+    raw["stack_detection"]["primary_language"] = "html"
+    raw["stack_detection"]["frameworks"] = []
+    raw["stack_detection"]["database"] = None
+    analysis = RepoAnalysisInput.model_validate(raw)
+    result = decide_architecture(analysis)
+    assert result.compute_type == "s3"
+    assert result.sizing == {}
+
+
+def test_static_site_candidate_with_database_stays_off_s3() -> None:
+    """A repo that looks like a static site but has a database is not static
+    — S3 must never win for anything with backend state."""
+    raw = _load_raw("sample_input_variant_lambda_candidate.json")
+    raw["stack_detection"]["primary_language"] = "html"
+    raw["stack_detection"]["frameworks"] = []
+    raw["stack_detection"]["database"] = "postgresql"
+    analysis = RepoAnalysisInput.model_validate(raw)
+    result = decide_architecture(analysis)
+    assert result.compute_type != "s3"
 
 
 def test_decide_architecture_is_deterministic() -> None:

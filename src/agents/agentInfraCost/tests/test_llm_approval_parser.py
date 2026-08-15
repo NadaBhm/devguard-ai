@@ -1,9 +1,6 @@
-"""Tests for core.llm_approval_parser.
-
-core.llm_provider.call_llm is always monkeypatched here — no test reaches
-OpenRouter for real. The focus is the safety contract: a deployment must
-never be "approved" as a result of a parsing failure or missing key —
-every failure mode must resolve to "unclear", never "approved".
+"""call_llm is always monkeypatched here — no test reaches OpenRouter for
+real. Safety contract: no parsing failure or missing key may ever resolve
+to "approved" — every failure mode must yield "unclear".
 """
 
 from __future__ import annotations
@@ -19,11 +16,6 @@ def _patch_call_llm(monkeypatch: pytest.MonkeyPatch, return_value) -> None:
     monkeypatch.setattr(
         "core.llm_approval_parser.call_llm", lambda *args, **kwargs: return_value
     )
-
-
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
 
 
 def test_clear_approval_without_region(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -61,12 +53,6 @@ def test_clear_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
     decision = parse_approval_response("no, too expensive")
 
     assert decision.status == "rejected"
-
-
-# --------------------------------------------------------------------------
-# Limit / edge cases — every one of these must resolve to "unclear", NEVER
-# "approved"
-# --------------------------------------------------------------------------
 
 
 def test_falls_back_to_unclear_when_call_llm_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,11 +106,6 @@ def test_falls_back_to_unclear_when_reasoning_field_is_missing(
     decision = parse_approval_response("yes")
 
     assert decision.status == "unclear"
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_falls_back_to_unclear_when_response_is_a_json_array(

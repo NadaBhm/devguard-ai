@@ -1,9 +1,6 @@
-"""Tests for core.llm_enrichment — fallback mode ONLY.
-
-Per the mission: no real GEMINI_API_KEY, no network call, ever, in this
-test file. Every test either unsets GEMINI_API_KEY (forcing the fallback
-path deterministically) or, where an API key is simulated, monkeypatches
-the Gemini client itself so nothing ever leaves the process.
+"""Fallback mode ONLY: no real GEMINI_API_KEY, no network call, ever. Tests
+either unset the key (forcing the fallback path deterministically) or
+monkeypatch the Gemini client itself so nothing leaves the process.
 """
 
 import pytest
@@ -34,14 +31,7 @@ _FINOPS = FinOpsRecommendation(
 
 @pytest.fixture(autouse=True)
 def _no_gemini_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test in this file runs with no API key unless it opts in
-    explicitly — the mission requires fallback-only testing here."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-
-
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
 
 
 def test_explain_architecture_decision_falls_back_without_key() -> None:
@@ -92,11 +82,6 @@ def test_build_enrichment_assembles_all_three_as_fallback() -> None:
     assert "spot" in enrichment.finops_justification
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
-
-
 def test_call_gemini_returns_none_without_key() -> None:
     assert _call_gemini("prompt", "system") is None
 
@@ -133,11 +118,6 @@ def test_enrichment_source_is_fallback_even_if_only_one_of_three_would_succeed(
     enrichment = build_enrichment(_DECISION, _COST, _FINOPS)
 
     assert enrichment.enrichment_source == "fallback"
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_malformed_score_breakdown_raises_not_silently_swallowed() -> None:

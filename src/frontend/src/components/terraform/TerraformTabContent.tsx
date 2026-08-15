@@ -46,9 +46,8 @@ export function TerraformTab({
   artifacts: TerraformArtifact[]
   editable?: boolean
 }) {
-  // Select by file_path, not id: the derived artifact rows get a fresh uuid on
-  // every results refetch, so an id-based selection would go stale and snap
-  // back to the first artifact. file_path is stable across refetches.
+  // Select by file_path, not id: derived artifact rows get a fresh uuid on every
+  // refetch, so an id-based selection would go stale. file_path is stable.
   const [selected, setSelected] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState("")

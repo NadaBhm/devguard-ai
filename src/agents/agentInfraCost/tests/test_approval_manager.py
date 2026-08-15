@@ -1,12 +1,6 @@
-"""Tests for core.approval_manager."""
-
 import pytest
 
 from core.approval_manager import ApprovalManager, InvalidApprovalTransitionError
-
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
 
 
 def test_new_manager_starts_pending() -> None:
@@ -36,11 +30,6 @@ def test_to_approval_reflects_current_state() -> None:
     assert approval.approved_by == "bob@example.com"
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
-
-
 def test_two_independent_jobs_do_not_share_state() -> None:
     job_a = ApprovalManager(job_id="job-a")
     job_b = ApprovalManager(job_id="job-b")
@@ -54,11 +43,6 @@ def test_to_approval_before_any_decision_has_no_approver() -> None:
     approval = manager.to_approval()
     assert approval.status == "pending"
     assert approval.approved_by is None
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_approve_twice_raises() -> None:
@@ -75,7 +59,6 @@ def test_reject_an_already_approved_job_raises() -> None:
     manager.approve(approved_by="alice@example.com")
     with pytest.raises(InvalidApprovalTransitionError):
         manager.reject()
-    # the earlier approval must not be silently overwritten
     assert manager.status == "approved"
 
 

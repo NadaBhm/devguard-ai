@@ -1,9 +1,7 @@
-"""Tests for core.llm_deployment_advisor.
-
-core.llm_provider.call_llm is always monkeypatched here — no test reaches
-OpenRouter for real. The focus is the validation/fallback contract: the LLM
-may only ever pick region/environment from the two closed lists, never an
-arbitrary value, and any failure falls back to "us-east-1"/"dev".
+"""call_llm is always monkeypatched here — no test reaches OpenRouter for
+real. Contract: the LLM may only pick region/environment from the two
+closed lists, never an arbitrary value, and any failure falls back to
+"us-east-1"/"dev".
 """
 
 from __future__ import annotations
@@ -32,16 +30,10 @@ def _patch_call_llm(monkeypatch: pytest.MonkeyPatch, return_value: Any) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_pinned_region(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The full-suite run loads .env (src.backend.config.load_dotenv), which
-    sets DEVGUARD_AWS_REGION=us-east-1 and makes decide_deployment_context
-    skip call_llm entirely. Clear it so the LLM path is exercised, except in
-    test_pinned_region_overrides_llm_choice which sets it explicitly."""
+    """The suite's load_dotenv sets DEVGUARD_AWS_REGION=us-east-1, which skips
+    call_llm entirely; clear it so the LLM path runs (except
+    test_pinned_region_overrides_llm_choice, which sets it back)."""
     monkeypatch.delenv("DEVGUARD_AWS_REGION", raising=False)
-
-
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
 
 
 def test_llm_choice_is_used_when_valid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,11 +115,6 @@ def test_source_code_path_passes_through_untouched(monkeypatch: pytest.MonkeyPat
     assert context.source_code_path == "/tmp/repo.zip"
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases -- every one of these must fall back to the defaults
-# --------------------------------------------------------------------------
-
-
 def test_falls_back_to_defaults_when_call_llm_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -190,11 +177,6 @@ def test_falls_back_when_reasoning_field_is_missing(monkeypatch: pytest.MonkeyPa
 
     assert context.region == "us-east-1"
     assert context.environment == "dev"
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_falls_back_when_response_is_a_json_array_not_an_object(

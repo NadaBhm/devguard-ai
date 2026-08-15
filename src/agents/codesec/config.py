@@ -336,6 +336,7 @@ DEFAULT_CLONE_DIR: Final[str] = os.getenv("CODESEC_CLONE_DIR", "/tmp/codesec-clo
 MAX_REPO_SIZE_MB: Final[int] = int(os.getenv("CODESEC_MAX_REPO_SIZE_MB", "500"))
 MAX_FILES_PER_REPO: Final[int] = int(os.getenv("CODESEC_MAX_FILES", "10000"))
 GITHUB_URL_PATTERN: Final[str] = r"^https?://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(/.*)?$"
+GITLAB_URL_PATTERN: Final[str] = r"^https?://gitlab\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(/.*)?$"
 
 
 def get_tool_config(tool_name: str) -> ToolConfig:

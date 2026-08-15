@@ -488,13 +488,21 @@ def translate_deployops_result(raw: dict[str, Any], job_id: str) -> dict[str, An
         "deployment_status": "success" if succeeded else "failed",
         "deployed_url": raw.get("deployed_url"),
         "health_check": {
-            # DeployOps runs its own health check internally and only tells us
-            # pass/fail via the overall status; it doesn't report latency or
-            # status code. Values are inferred, not measured.
-            "passed": succeeded,
-            "response_time_ms": 0,
-            "status_code": 200 if succeeded else 0,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            # Prefer explicit health_check details from DeployOps when they
+            # are provided (measured latency, status code, timestamp). If
+            # the agent only reports overall status, fall back to inferred
+            # defaults to keep the orchestrator shape stable.
+            **({
+                "passed": bool(raw.get("health_check", {}).get("passed")),
+                "response_time_ms": raw.get("health_check", {}).get("response_time_ms", 0),
+                "status_code": raw.get("health_check", {}).get("status_code", (200 if succeeded else 0)),
+                "checked_at": raw.get("health_check", {}).get("checked_at", datetime.now(timezone.utc).isoformat()),
+            } if isinstance(raw.get("health_check"), dict) else {
+                "passed": succeeded,
+                "response_time_ms": 0,
+                "status_code": 200 if succeeded else 0,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
         },
         "rollback_triggered": raw.get("error") == "health check failed",
         "rollback_reason": raw.get("error") if not succeeded else None,

@@ -8,12 +8,11 @@ from lib.rag.config import RAGConfig
 
 
 class TestGeminiClientFactory:
-    """Test factory pattern and caching."""
+    """Test factory pattern and config handling."""
 
     def setup_method(self):
         """Reset factory state before each test."""
         GeminiClientFactory._configured_key = None
-        GeminiClientFactory._models.clear()
 
     @patch("lib.rag.gemini_client.genai")
     def test_configure_called_once(self, mock_genai):
@@ -38,17 +37,20 @@ class TestGeminiClientFactory:
         mock_genai.configure.assert_called_with(api_key="key-2")
 
     @patch("lib.rag.gemini_client.genai")
-    def test_model_caching(self, mock_genai):
-        """Same model name should return cached instance."""
+    def test_model_recreated_per_call(self, mock_genai):
+        """The factory should create a fresh model instance for each call."""
         config = RAGConfig(gemini_api_key="key-1", gemini_model="gemini-1.5-flash")
-        mock_model = MagicMock()
-        mock_genai.GenerativeModel.return_value = mock_model
-        
+        mock_model_1 = MagicMock()
+        mock_model_2 = MagicMock()
+        mock_genai.GenerativeModel.side_effect = [mock_model_1, mock_model_2]
+
         m1 = GeminiClientFactory.create(config)
         m2 = GeminiClientFactory.create(config)
-        
-        assert m1 is m2
-        mock_genai.GenerativeModel.assert_called_once()
+
+        assert m1 is mock_model_1
+        assert m2 is mock_model_2
+        assert m1 is not m2
+        assert mock_genai.GenerativeModel.call_count == 2
 
     @patch("lib.rag.gemini_client.genai")
     def test_different_model_names(self, mock_genai):

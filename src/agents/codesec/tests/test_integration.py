@@ -223,8 +223,33 @@ class TestErrorHandling:
         assert result.status == "failed"
         assert result.error is not None
 
+    @patch("codesec.agent.CodeSecAgent._clone_repo")
+    @patch("codesec.agent.run_sast")
+    @patch("codesec.agent.run_secrets_scan")
+    @patch("codesec.agent.run_dependency_scan")
+    @patch("codesec.agent.run_dockerfile_scan")
+    @patch("codesec.agent.generate_sbom")
+    @patch("codesec.agent.detect_stack")
+    @patch("codesec.agent.calculate_score")
     @pytest.mark.asyncio
-    async def test_non_github_url(self):
+    async def test_gitlab_url_is_supported(
+        self, mock_score, mock_stack, mock_sbom, mock_docker,
+        mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
+    ):
+        clone_dir = tmp_path / "gitlab_repo"
+        clone_dir.mkdir()
+        mock_clone.return_value = clone_dir
+
+        mock_sast.return_value = []
+        mock_secrets.return_value = []
+        mock_deps.return_value = DependenciesResult(total_packages=1, vulnerable_packages=[])
+        mock_docker.return_value = []
+        mock_sbom.return_value = SBOM(serial_number="urn:uuid:test")
+        mock_stack.return_value = StackDetection(primary_language="python", confidence=0.9)
+        mock_score.return_value = SecurityScore(score=96, grade=Grade.A)
+
         agent = CodeSecAgent()
         result = await agent.analyze("https://gitlab.com/owner/repo")
-        assert result.status == "failed"
+
+        assert result.status in ["completed", "completed_with_errors"]
+        assert result.repo_url == "https://gitlab.com/owner/repo"

@@ -201,7 +201,13 @@ class TestGenerateReport:
         assert result["pdf_path"] is None
 
     def test_pdf_when_the_backend_supports_it(self, completed_state, tmp_path):
-        pytest.importorskip("weasyprint")
+        # WeasyPrint may raise ImportError or OSError if native libs (cairo,
+        # pango) are missing on the host. Treat either as a skip so CI can
+        # run on machines without the full PDF toolchain.
+        try:
+            pytest.importorskip("weasyprint")
+        except OSError as exc:  # missing native shared libs
+            pytest.skip(f"weasyprint not available: {exc}")
         result = generate_report(completed_state, output_dir=tmp_path)
         if "pdf" in result["formats_available"]:
             assert (tmp_path / f"report-{completed_state['job_id']}.pdf").exists()

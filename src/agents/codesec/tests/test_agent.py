@@ -37,42 +37,47 @@ class TestCodeSecAgentInitialization:
         assert agent.clone_dir == tmp_path
 
 
-class TestValidateGitHubURL:
-    """Test GitHub URL validation."""
+class TestValidateRepoURL:
+    """Test public GitHub/GitLab repository URL validation."""
 
-    def test_valid_https_url(self):
+    def test_valid_github_https_url(self):
         agent = CodeSecAgent()
-        url = agent._validate_github_url("https://github.com/owner/repo")
+        url = agent._validate_repo_url("https://github.com/owner/repo")
         assert url == "https://github.com/owner/repo"
+
+    def test_valid_gitlab_https_url(self):
+        agent = CodeSecAgent()
+        url = agent._validate_repo_url("https://gitlab.com/owner/repo")
+        assert url == "https://gitlab.com/owner/repo"
 
     def test_valid_url_with_git_suffix(self):
         agent = CodeSecAgent()
-        url = agent._validate_github_url("https://github.com/owner/repo.git")
+        url = agent._validate_repo_url("https://github.com/owner/repo.git")
         assert url == "https://github.com/owner/repo"
 
-    def test_invalid_url_not_github(self):
+    def test_invalid_url_not_github_or_gitlab(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url("https://gitlab.com/owner/repo")
+            agent._validate_repo_url("https://bitbucket.org/owner/repo")
 
     def test_invalid_url_malformed(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url("not-a-url")
+            agent._validate_repo_url("not-a-url")
 
     def test_invalid_url_empty(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url("")
+            agent._validate_repo_url("")
 
     def test_invalid_url_none(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url(None)
+            agent._validate_repo_url(None)
 
     def test_url_with_path(self):
         agent = CodeSecAgent()
-        url = agent._validate_github_url("https://github.com/owner/repo/tree/main")
+        url = agent._validate_repo_url("https://github.com/owner/repo/tree/main")
         assert url == "https://github.com/owner/repo/tree/main"
 
 
@@ -156,8 +161,8 @@ class TestAnalyze:
         assert result.repo_url == "https://github.com/owner/repo"
         assert result.security_score is not None
 
-    @patch("codesec.agent.CodeSecAgent._validate_github_url")
-    @pytest.mark.asyncio 
+    @patch("codesec.agent.CodeSecAgent._validate_repo_url")
+    @pytest.mark.asyncio
     async def test_analyze_invalid_url(self, mock_validate, tmp_path: Path):
         mock_validate.side_effect = ValueError("Invalid URL")
 
@@ -168,8 +173,37 @@ class TestAnalyze:
         assert result.status == "failed"
         assert result.error is not None
 
+    @patch("codesec.agent.run_sast")
+    @patch("codesec.agent.run_secrets_scan")
+    @patch("codesec.agent.run_dependency_scan")
+    @patch("codesec.agent.run_dockerfile_scan")
+    @patch("codesec.agent.generate_sbom")
+    @patch("codesec.agent.detect_stack")
+    @patch("codesec.agent.calculate_score")
+    @pytest.mark.asyncio
+    async def test_analyze_local_directory(self, mock_score, mock_stack, mock_sbom, mock_docker,
+                                        mock_deps, mock_secrets, mock_sast, tmp_path: Path):
+        project_dir = tmp_path / "uploaded_project"
+        project_dir.mkdir()
+        (project_dir / "README.md").write_text("# Local project")
+
+        mock_sast.return_value = []
+        mock_secrets.return_value = []
+        mock_deps.return_value = DependenciesResult()
+        mock_docker.return_value = []
+        mock_sbom.return_value = SBOM(serial_number="urn:uuid:test")
+        mock_stack.return_value = StackDetection(primary_language="python", confidence=0.9)
+        mock_score.return_value = SecurityScore(score=90, grade=Grade.A)
+
+        agent = CodeSecAgent()
+        result = await agent.analyze(str(project_dir))
+
+        assert isinstance(result, CodeSecResult)
+        assert result.status in ["completed", "completed_with_errors"]
+        assert result.repo_url == str(project_dir.resolve())
+
     @patch("codesec.agent.CodeSecAgent._clone_repo")
-    @pytest.mark.asyncio 
+    @pytest.mark.asyncio
     async def test_analyze_clone_failure(self, mock_clone, tmp_path: Path):
         mock_clone.side_effect = RuntimeError("Clone failed")
 

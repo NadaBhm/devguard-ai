@@ -6,23 +6,25 @@ RAG Configuration
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
-
-DEFAULT_QDRANT_URL: Final[str] = os.getenv("QDRANT_URL", "http://localhost:6333")
-DEFAULT_QDRANT_COLLECTION: Final[str] = os.getenv("QDRANT_COLLECTION", "devguard_repos")
+# Import-time-safe fallbacks. Environment overrides are read at call time in
+# get_rag_config() (never at import time) so that a later load_dotenv() cannot
+# silently change what an already-imported module reads as its defaults.
+DEFAULT_QDRANT_URL: Final[str] = "http://localhost:6333"
+DEFAULT_QDRANT_COLLECTION: Final[str] = "devguard_repos"
 
 # Hugging Face embeddings (local, free)
-DEFAULT_HF_MODEL: Final[str] = os.getenv("HF_MODEL", "BAAI/bge-large-en-v1.5")
-DEFAULT_EMBEDDING_DIM: Final[int] = int(os.getenv("EMBEDDING_DIM", "1024"))  # FIX: bge-large = 1024
+DEFAULT_HF_MODEL: Final[str] = "BAAI/bge-large-en-v1.5"
+DEFAULT_EMBEDDING_DIM: Final[int] = 1024  # FIX: bge-large = 1024
 
 # Gemini LLM (free tier)
-DEFAULT_GEMINI_MODEL: Final[str] = os.getenv("GEMINI_MODEL", "gemini-flash-latest")  # FIX: alias stable
+DEFAULT_GEMINI_MODEL: Final[str] = "gemini-flash-latest"  # FIX: alias stable
 
 # Chunking
-DEFAULT_CHUNK_SIZE: Final[int] = int(os.getenv("CHUNK_SIZE", "1000"))
-DEFAULT_CHUNK_OVERLAP: Final[int] = int(os.getenv("CHUNK_OVERLAP", "200"))
+DEFAULT_CHUNK_SIZE: Final[int] = 1000
+DEFAULT_CHUNK_OVERLAP: Final[int] = 200
 
 
 @dataclass(frozen=True)
@@ -31,15 +33,15 @@ class RAGConfig:
 
     qdrant_url: str = DEFAULT_QDRANT_URL
     qdrant_collection: str = DEFAULT_QDRANT_COLLECTION
-    
+
     # Hugging Face embeddings
     hf_model: str = DEFAULT_HF_MODEL
     embedding_dim: int = DEFAULT_EMBEDDING_DIM
-    
+
     # Gemini LLM
-    gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
+    gemini_api_key: str | None = field(default=None)
     gemini_model: str = DEFAULT_GEMINI_MODEL
-    
+
     # Chunking
     chunk_size: int = DEFAULT_CHUNK_SIZE
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP

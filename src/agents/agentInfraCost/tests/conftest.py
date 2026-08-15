@@ -38,3 +38,6 @@ _OPTIONAL_CREDENTIAL_ENV_VARS = (
 def _no_real_credentials_leak_into_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in _OPTIONAL_CREDENTIAL_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+    # Unit tests exercise the real scoring logic; the ECS force (default on
+    # for the real pipeline, since DeployOps is ECS-only) is disabled here.
+    monkeypatch.setenv("DEVGUARD_FORCE_COMPUTE_ECS", "0")

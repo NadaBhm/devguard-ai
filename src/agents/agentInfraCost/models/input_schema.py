@@ -75,3 +75,20 @@ class RepoAnalysisInput(BaseModel):
     repo_metadata: RepoMetadata
     stack_detection: StackDetection
     security_score: Optional[SecurityScore] = None
+    account_id: Optional[str] = None
+    """AWS account ID, resolved by the orchestrator's adapter layer via STS
+    before this pipeline runs (agentInfraCost's sys.path isolation means it
+    cannot import src.lib.aws itself). Used to build the fully-qualified
+    ECR image URI in the generated Terraform, instead of a bare
+    "name:tag" that Docker/ECS would otherwise resolve against Docker Hub."""
+    user_feedback: Optional[str] = None
+    """Free-form user request from the orchestrator's Gate 2 ("regenerate with
+    changes"). When present, the pipeline's LLM advisors and the Terraform
+    refiner regenerate the artifacts honoring it. Never validated against a
+    fixed vocabulary — it is passed through to the LLM as-is."""
+    repo_context: str | None = None
+    """Digest of infrastructure-relevant facts the OpenRouter LLM extracted
+    from the whole repository (computed by ``core.repo_ingestor`` when Gate 2
+    requests regeneration, see the ``repo_path`` the adapter threads through).
+    Fed to the LLM advisors and the Terraform refiner so the regeneration
+    LLM can see the actual code, not just stack-detection metadata."""

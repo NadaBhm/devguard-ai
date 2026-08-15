@@ -27,6 +27,10 @@ from typing import Literal, Optional, TypedDict
 # state said 1.0.5 while the graph said 1.0.7).
 GRAPH_VERSION = "1.3.1"
 
+# Max feedback-driven regeneration rounds at Gate 2 before the user is forced
+# to approve/reject. Guards against runaway LLM loops (and cost).
+MAX_INFRACOST_ITERATIONS = 3
+
 
 # =============================================================================
 # SECTION 1: STATE DEFINITIONS
@@ -136,12 +140,21 @@ class HumanGate(TypedDict):
     comment: Optional[str]
     approved_at: Optional[str]
     approved_by: Optional[str]
+    requested_changes: Optional[str]  # user feedback prompt for regeneration
 
 
 class HumanGates(TypedDict):
     """All human approval gates."""
     gate_1_pre_infracost: HumanGate
     gate_2_pre_deployops: HumanGate
+
+
+class InfracostIteration(TypedDict):
+    """One feedback-driven regeneration round of the InfraCost agent."""
+    iteration: int
+    prompt: str
+    result: dict
+    requested_at: str
 
 
 class ErrorEntry(TypedDict):
@@ -208,6 +221,8 @@ class OrchestratorState(TypedDict):
     error_log: list[ErrorEntry]
     orchestrator_metadata: OrchestratorMetadata
     final_report: Optional[FinalReport]
+    infracost_feedback: Optional[str]
+    infracost_iterations: list[InfracostIteration]
 
 
 # =============================================================================
@@ -235,6 +250,7 @@ def create_initial_state(repo_url: str, job_id: str | None = None) -> Orchestrat
                 "comment": None,
                 "approved_at": None,
                 "approved_by": None,
+                "requested_changes": None,
             },
             "gate_2_pre_deployops": {
                 "required": True,
@@ -242,6 +258,7 @@ def create_initial_state(repo_url: str, job_id: str | None = None) -> Orchestrat
                 "comment": None,
                 "approved_at": None,
                 "approved_by": None,
+                "requested_changes": None,
             },
         },
         "error_log": [],
@@ -254,4 +271,6 @@ def create_initial_state(repo_url: str, job_id: str | None = None) -> Orchestrat
             "chat_session_id": None,
         },
         "final_report": None,
+        "infracost_feedback": None,
+        "infracost_iterations": [],
     }

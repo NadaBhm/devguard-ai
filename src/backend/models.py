@@ -1,11 +1,19 @@
 from datetime import datetime
 from enum import Enum as PyEnum
-from typing import Optional
 from uuid import uuid4
 
 from sqlalchemy import (
-    Column, String, Boolean, DateTime, Text, Integer, ForeignKey, Enum, CheckConstraint, Index, Numeric,
     JSON,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -117,8 +125,9 @@ class User(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
     email = Column(String, unique=True, nullable=False, index=True)
+    username = Column(String(50), unique=True, nullable=True, index=True)
     hashed_password = Column(String, nullable=False)  # FIX: renamed from 'password'
-    is_verified = Column(Boolean, nullable=False, default=False)
+    is_verified = Column(Boolean, nullable=False, default=True)
     first_name = Column(String, nullable=False)
     last_name = Column(String, nullable=False)
     role = Column(String(50), nullable=False, default=UserRole.MEMBER.value)
@@ -275,6 +284,8 @@ class TerraformArtifact(Base):
     file_path = Column(Text, nullable=False)
     content = Column(Text, nullable=False)
     checksum = Column(String, nullable=True)
+    edited_by = Column(String, nullable=True)
+    edited_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     # Relationships
@@ -282,7 +293,7 @@ class TerraformArtifact(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "artifact_type IN ('terraform', 'dockerfile', 'docker-compose', 'cloudformation', 'helm', 'kubernetes', 'ansible', 'pulumi', 'bicep')",
+            "artifact_type IN ('terraform', 'dockerfile', 'docker-compose', 'docker-image', 'cloudformation', 'helm', 'kubernetes', 'ansible', 'pulumi', 'bicep')",
             name="ck_terraform_artifacts_artifact_type"
         ),
         Index("idx_terraform_artifacts_run_id", "run_id"),

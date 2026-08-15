@@ -1,18 +1,22 @@
-import asyncio
-import websockets
 import json
+import os
 
-async def test():
-    uri = "ws://localhost:8000/ws/jobs/test-123"
-    async with websockets.connect(uri) as ws:
-        # Send a RAG query
-        await ws.send(json.dumps({
-            "action": "rag_query",
-            "query": "What framework does this use?"
-        }))
-        
-        # Receive answer
-        response = await ws.recv()
-        print("Response:", json.loads(response))
+import pytest
+import websockets
 
-asyncio.run(test())
+# The WS endpoint requires a valid access-token JWT in the connection URL:
+#   ws://localhost:8000/ws/jobs/{id}?token=<access_token>
+# This test needs a running server plus a token. Provided  via: WS_TEST_TOKEN=<token> pytest src/backend/tests/test_ws.py
+TOKEN = os.environ.get("WS_TEST_TOKEN")
+
+
+@pytest.mark.skipif(not TOKEN, reason="WS_TEST_TOKEN required (login against a live server first)")
+async def test_ws_requires_token_and_pings():
+    uri = f"ws://localhost:8000/ws/jobs/test-123?token={TOKEN}"
+    try:
+        async with websockets.connect(uri) as ws:
+            await ws.send(json.dumps({"action": "ping"}))
+            payload = json.loads(await ws.recv())
+            assert payload["type"] == "pong"
+    except OSError:
+        pytest.skip("live server not reachable at localhost:8000")

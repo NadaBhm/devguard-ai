@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Final, Literal
 
 from pydantic import BaseModel, ValidationError
@@ -69,13 +70,24 @@ class _LlmDeploymentChoice(BaseModel):
 
 
 def _build_prompt(analysis: RepoAnalysisInput) -> str:
-    return (
+    prompt = (
         "Signaux du dépôt :\n"
         f"- nom du dépôt : {analysis.repo_metadata.name}\n"
         f"- branche : {analysis.repo_metadata.branch}\n"
         f"- taille du projet (lignes de code) : {analysis.repo_metadata.loc}\n\n"
         "Quelle région AWS et quel environnement de déploiement recommandes-tu ?"
     )
+    if analysis.user_feedback:
+        prompt += (
+            "\n\nContrainte supplémentaire de l'utilisateur (prioritaire) :\n"
+            f"{analysis.user_feedback}"
+        )
+    if analysis.repo_context:
+        prompt += (
+            "\n\n=== CONTEXTE DU DÉPÔT (faits extraits par le LLM) ===\n"
+            f"{analysis.repo_context}"
+        )
+    return prompt
 
 
 def _parse_llm_choice(raw_text: str) -> _LlmDeploymentChoice | None:
@@ -112,15 +124,26 @@ def decide_deployment_context(
     region: AwsRegion = _DEFAULT_REGION
     environment: DeploymentEnvironment = _DEFAULT_ENVIRONMENT
 
-    raw_text = call_llm(prompt=_build_prompt(analysis), system_instruction=_SYSTEM_INSTRUCTION)
-    if raw_text is not None:
-        choice = _parse_llm_choice(raw_text)
-        if choice is not None:
-            region, environment = choice.region, choice.environment
-            logger.info(
-                "LLM chose region=%s environment=%s: %s",
-                region, environment, choice.reasoning,
-            )
+    # Deterministic override: the target AWS account lives in exactly one
+    # region. InfraCost cannot see the account's real VPC/subnets, so an LLM
+    # picking "eu-west-1" while the standing resources are all in us-east-1
+    # produces a payload DeployOps cannot apply (VPC id doesn't exist there).
+    # When the operator pins DEVGUARD_AWS_REGION, that value always wins over
+    # the LLM's guess.
+    pinned_region = os.getenv("DEVGUARD_AWS_REGION")
+    if pinned_region:
+        region = pinned_region
+        logger.info("Region pinned by DEVGUARD_AWS_REGION=%s (LLM choice skipped)", pinned_region)
+    else:
+        raw_text = call_llm(prompt=_build_prompt(analysis), system_instruction=_SYSTEM_INSTRUCTION)
+        if raw_text is not None:
+            choice = _parse_llm_choice(raw_text)
+            if choice is not None:
+                region, environment = choice.region, choice.environment
+                logger.info(
+                    "LLM chose region=%s environment=%s: %s",
+                    region, environment, choice.reasoning,
+                )
 
     return TerraformContext(
         job_id=job_id,

@@ -48,6 +48,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -76,6 +78,16 @@ def use_real_infracost() -> bool:
 
 def use_real_deployops() -> bool:
     return _flag("DEVGUARD_REAL_DEPLOYOPS")
+
+
+def report_mode() -> str:
+    """``real`` / ``mixed`` / ``mock`` — whether live agents actually ran.
+
+    Used for the honesty badge on the report and the UI: a run that mixes
+    fabricated and real agent output must say so rather than look real.
+    """
+    flags = (use_real_codesec(), use_real_infracost(), use_real_deployops())
+    return "real" if all(flags) else ("mixed" if any(flags) else "mock")
 
 
 # =============================================================================
@@ -245,9 +257,22 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
         _sys.path[:] = original_path
 
 
-async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[str, Any]:
+async def call_infracost(
+    codesec_result: dict[str, Any],
+    job_id: str,
+    *,
+    feedback: str | None = None,
+    previous_result: dict[str, Any] | None = None,
+    iteration_number: int | None = None,
+) -> dict[str, Any]:
     """
     Run InfraCost on CodeSec's output and return the orchestrator-shaped result.
+
+    feedback: optional free-form user prompt from Gate 2 ("regenerate with
+        changes"). When present, the InfraCost pipeline regenerates its
+        artifacts (architecture + Terraform) honoring it.
+    previous_result: the last InfraCost result, so mock mode can produce a
+        visibly different output each regeneration round.
 
     Real contract (src/agents/agentInfraCost/core/):
         ctx = run_pipeline_with_context(codesec_result)   # SYNC
@@ -260,13 +285,120 @@ async def call_infracost(codesec_result: dict[str, Any], job_id: str) -> dict[st
     if not use_real_infracost():
         from .nodes import build_mock_infracost_result
         logger.info("[%s] InfraCost: MOCK mode (set DEVGUARD_REAL_INFRACOST=1 for real)", job_id)
-        return build_mock_infracost_result()
+        return _mock_infracost_with_feedback(job_id, feedback, previous_result)
 
-    logger.info("[%s] InfraCost: REAL agent", job_id)
-    result = await asyncio.get_event_loop().run_in_executor(
-        None, _run_infracost_pipeline, codesec_result
-    )
+    logger.info("[%s] InfraCost: REAL agent%s", job_id, " (regenerating from feedback)" if feedback else "")
+    raw_input = dict(codesec_result)
+    # InfraCost's pipeline runs with sys.path swapped to its own package dir
+    # (see _run_infracost_pipeline), so it cannot import src.lib.aws itself.
+    # Resolve the AWS account ID here, where src/ is on the normal path, and
+    # thread it through raw_input so the generated Terraform can build a
+    # fully-qualified ECR image URI instead of a bare "name:tag" (which
+    # Docker/ECS would otherwise resolve against Docker Hub and fail to pull).
+    try:
+        from src.lib.aws.client import AWSClient  # lazy: mirrors other real-agent imports
+        raw_input["account_id"] = AWSClient().get_account_id()
+    except Exception:
+        logger.warning("[%s] Could not resolve AWS account ID for ECR image URI; "
+                        "Terraform will be generated with a bare image name.", job_id)
+
+    repo_path: str | None = None
+    if feedback:
+        # InfraCost's RepoAnalysisInput carries this optional field; threading
+        # it through the raw dict lets the pipeline's LLM advisors and the
+        # new Terraform refiner act on the user's request.
+        raw_input["user_feedback"] = feedback
+        if iteration_number is not None:
+            # 1-based regeneration round; the pipeline uses it to gate the
+            # hidden first-regen auto-fix (correct container port / health
+            # check to match the repo) to exactly one run.
+            raw_input["regen_iteration"] = iteration_number
+        # CodeSec deletes its clone the moment analysis finishes, so at
+        # Gate 2 we re-clone the repo and let the pipeline digest the whole
+        # codebase for the OpenRouter LLM (see core.repo_ingestor). Fail-soft:
+        # if the clone fails, the regeneration proceeds exactly as before,
+        # without repo context.
+        try:
+            from src.lib.repo import clone_repo  # lazy: shared clone helper
+            repo_path = tempfile.mkdtemp(prefix=f"devguard-repo-{job_id[:8]}-")
+            clone_repo(codesec_result.get("repo_url", ""), repo_path)
+            raw_input["repo_path"] = repo_path
+        except Exception as exc:
+            logger.warning(
+                "[%s] Could not re-clone repo for Gate-2 regeneration; "
+                "regenerating without repo context: %s", job_id, exc,
+            )
+            if repo_path:
+                shutil.rmtree(repo_path, ignore_errors=True)
+                repo_path = None
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _run_infracost_pipeline, raw_input
+        )
+    finally:
+        if repo_path:
+            shutil.rmtree(repo_path, ignore_errors=True)
     return normalize_infracost_result(result)
+
+
+def _mock_infracost_with_feedback(
+    job_id: str,
+    feedback: str | None,
+    previous_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Deterministic mock response to a Gate-2 regeneration prompt.
+
+    Without an OPENROUTER_API_KEY / real InfraCost, this lets the feedback
+    loop be exercised end-to-end: each round produces a visibly different
+    result derived from the previous one plus the prompt, so tests and demo
+    runs can confirm the loop actually loops without burning real LLM calls.
+    """
+    from .nodes import build_mock_infracost_result
+
+    result = dict(previous_result or build_mock_infracost_result())
+    if not feedback:
+        return result
+
+    cost = dict(result.get("cost_estimate") or {})
+    baseline = float(cost.get("monthly_cost_usd", 145.32))
+
+    lowered = any(k in feedback.lower() for k in ("cheap", "cheaper", "less", "lower", "reduce", "minimize"))
+    raised = any(k in feedback.lower() for k in ("more", "bigger", "scale", "increase", "high", "larger"))
+    if lowered:
+        baseline = round(baseline * 0.85, 2)
+    elif raised:
+        baseline = round(baseline * 1.15, 2)
+
+    cost = dict(cost)
+    cost["monthly_cost_usd"] = baseline
+    result["cost_estimate"] = cost
+    result["justification"] = (
+        f"Regenerated ({len(result.get('breakdown_rounds', [])) + 1}) after feedback: "
+        f"{feedback}. {result.get('justification', '')}"
+    ).strip()
+    rounds = list(result.get("breakdown_rounds") or [])
+    rounds.append({"prompt": feedback, "monthly_cost_usd": baseline})
+    result["breakdown_rounds"] = rounds
+
+    # Make the loop's effect unmistakable: flip the architecture on an
+    # explicit request, otherwise keep it stable.
+    if any(k in feedback.lower() for k in ("lambda", "serverless", "function")):
+        result["architecture_recommendation"] = "lambda"
+    elif any(k in feedback.lower() for k in ("ec2", "vm", "instance")):
+        result["architecture_recommendation"] = "ec2"
+    elif "ecs" in feedback.lower() or "fargate" in feedback.lower():
+        result["architecture_recommendation"] = "ecs_fargate"
+
+    return result
+
+
+def _money_amount(value: Any) -> Any:
+    """The scalar inside a Money dump ({amount,...}) — or the scalar itself."""
+    if isinstance(value, dict):
+        return value.get("amount")
+    return value
 
 
 def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -278,10 +410,16 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
     (output.aws_config.estimated_monthly_cost.model_dump() ->
     {amount, currency, range_min, range_max}) rather than the schema's
     documented {monthly_cost_usd, currency, breakdown, range_min, range_max}.
-    Caught by test_schema_conformance.py, which is exactly what that test
-    suite is for. Idempotent: already-normalized input (monthly_cost_usd
-    present) passes through unchanged, so this is safe to call even if
-    Karim fixes this upstream later.
+    The nested arrays have the same problem: load_scenarios/region_comparison
+    carry Money objects under ``estimated_monthly_cost`` (not the documented
+    ``estimated_monthly_cost_usd`` / ``monthly_cost_usd``) and optimizations
+    use the FinOps ``name``/``reason``/``projected_monthly_savings`` (not the
+    documented ``strategy``/``description``/``projected_savings_usd``), so the
+    report's cost tables render blank for real runs. Caught by
+    test_schema_conformance.py, which is exactly what that suite is for.
+    Idempotent: already-normalized input (the documented field names present)
+    passes through unchanged, so this is safe to call even if Karim fixes
+    this upstream later.
     """
     result = dict(result)
     cost = dict(result.get("cost_estimate") or {})
@@ -294,6 +432,53 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
             "range_max": cost.get("range_max"),
         }
         result["cost_estimate"] = cost
+
+    # load_scenarios: Money dict -> estimated_monthly_cost_usd, and derive the
+    # documented scaling_assumptions prose from the agent's sizing dict.
+    scenarios = []
+    for item in result.get("load_scenarios") or []:
+        item = dict(item)
+        if "estimated_monthly_cost_usd" not in item:
+            amount = _money_amount(item.get("estimated_monthly_cost"))
+            if amount is not None:
+                item["estimated_monthly_cost_usd"] = amount
+        if not item.get("scaling_assumptions") and isinstance(item.get("sizing"), dict):
+            item["scaling_assumptions"] = ", ".join(
+                f"{key}={value}" for key, value in item["sizing"].items()
+            )
+        scenarios.append(item)
+    if scenarios:
+        result["load_scenarios"] = scenarios
+
+    # optimizations: FinOps naming -> documented naming.
+    opts = []
+    for item in result.get("optimizations") or []:
+        item = dict(item)
+        if (
+            "projected_savings_usd" not in item
+            and item.get("projected_monthly_savings") is not None
+        ):
+            item["projected_savings_usd"] = item["projected_monthly_savings"]
+        if not item.get("description") and item.get("reason"):
+            item["description"] = item["reason"]
+        if not item.get("strategy") and item.get("name"):
+            item["strategy"] = item["name"]
+        opts.append(item)
+    if opts:
+        result["optimizations"] = opts
+
+    # region_comparison: Money dict -> documented monthly_cost_usd.
+    regions = []
+    for item in result.get("region_comparison") or []:
+        item = dict(item)
+        if "monthly_cost_usd" not in item:
+            amount = _money_amount(item.get("estimated_monthly_cost"))
+            if amount is not None:
+                item["monthly_cost_usd"] = amount
+        regions.append(item)
+    if regions:
+        result["region_comparison"] = regions
+
     return result
 
 
@@ -327,6 +512,7 @@ def translate_infracost_to_deploy_payload(
     deploy_inputs: dict[str, Any],
     *,
     approved_by: str,
+    repo_url: str | None = None,
 ) -> dict[str, Any]:
     """
     Build a DeployOps-compatible payload from InfraCost's raw output.
@@ -337,6 +523,10 @@ def translate_infracost_to_deploy_payload(
             _run_infracost_pipeline() - compute_type / artifacts / aws_config
             / deployment_config, model_dump(by_alias=True).
         approved_by: whoever approved human gate 2.
+        repo_url: source repository URL, forwarded so DeployOps can clone the
+            code into its build workspace. Without it DeployOps would try to
+            build an image from an empty context (only Dockerfile + terraform),
+            which fails for any real repo (e.g. `npm ci` finds no package.json).
 
     Raises:
         ValueError: if the compute type is one DeployOps can't deploy, or if
@@ -428,7 +618,7 @@ def translate_infracost_to_deploy_payload(
             "approved_by": approved_by,
             "approved_at": datetime.now(timezone.utc).isoformat(),
         },
-        "metadata": {},
+        "metadata": {"repo_url": repo_url} if repo_url else {},
     }
 
     if not payload["aws_config"]["ecs_cluster"] or not payload["aws_config"]["service_name"]:
@@ -483,6 +673,7 @@ def translate_deployops_result(raw: dict[str, Any], job_id: str) -> dict[str, An
             return entry.get("value") or ""
         return entry or ""
 
+    hc = raw.get("health_check") or {}
     return {
         "job_id": raw.get("job_id") or job_id,
         "deployment_status": "success" if succeeded else "failed",

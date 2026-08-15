@@ -1,0 +1,21 @@
+# Build context is the repo root (backend + frontend images).
+# Keep Docker uploads lean and avoid shipping local state into images.
+.git
+.github
+.venv
+**/__pycache__
+**/*.pyc
+**/node_modules
+**/dist
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+*.sqlite3
+*.db
+reports/
+.pytest_cache
+.devcontainer
+*.log
+.env
+.env.*
+!.env.example

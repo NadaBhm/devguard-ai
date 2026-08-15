@@ -15,6 +15,7 @@ Lancer avec: pytest depuis la racine du repo.
 import pytest
 
 from src.agents.orchestrator.agent_adapters import (
+    call_infracost,
     normalize_infracost_result,
     run_sync,
     translate_deployops_result,
@@ -219,6 +220,19 @@ class TestInfraCostToDeployPayload:
         )
         assert payload["job_id"] == "job-abc"
 
+    def test_repo_url_is_forwarded_when_given(self, deploy_inputs):
+        payload = translate_infracost_to_deploy_payload(
+            "job-abc", deploy_inputs, approved_by="x",
+            repo_url="https://github.com/owner/repo",
+        )
+        assert payload["metadata"]["repo_url"] == "https://github.com/owner/repo"
+
+    def test_repo_url_omitted_when_not_given(self, deploy_inputs):
+        payload = translate_infracost_to_deploy_payload(
+            "job-abc", deploy_inputs, approved_by="x"
+        )
+        assert payload["metadata"] == {}
+
 
 class TestTranslationFailsLoudly:
     """Every one of these would otherwise be a silent no-op deep inside AWS."""
@@ -311,3 +325,140 @@ class TestRunSyncBridge:
             raise ValueError("agent exploded")
         with pytest.raises(ValueError, match="agent exploded"):
             run_sync(boom())
+
+
+class TestCallInfraCostRepoClone:
+    """Gate-2 regeneration: the real InfraCost path re-clones the analyzed
+    repo so the pipeline can digest the whole codebase (CodeSec deletes its
+    clone the moment analysis finishes)."""
+
+    @pytest.fixture(autouse=True)
+    def _real_infracost(self, monkeypatch):
+        monkeypatch.setenv("DEVGUARD_REAL_INFRACOST", "1")
+        monkeypatch.delenv("DEVGUARD_REAL_AGENTS", raising=False)
+
+    def _minimal_codesec_result(self):
+        return {
+            "job_id": "job-1",
+            "status": "completed",
+            "repo_url": "https://github.com/owner/repo",
+            "repo_metadata": {"commit_sha": "abc123"},
+            "stack_detection": {
+                "primary_language": "python",
+                "confidence": 0.9,
+                "container": {"detected": True},
+            },
+        }
+
+    async def test_clones_repo_and_passes_repo_path_on_feedback(self, monkeypatch):
+        captured = {}
+
+        def _fake_clone(repo_url, target_dir, **_kwargs):
+            captured["url"] = repo_url
+            captured["target"] = target_dir
+            from pathlib import Path
+            Path(target_dir).mkdir(parents=True, exist_ok=True)
+
+        def _fake_pipeline(raw_input):
+            captured["repo_path"] = raw_input.get("repo_path")
+            captured["feedback"] = raw_input.get("user_feedback")
+            return {"cost_estimate": {"monthly_cost_usd": 10.0, "currency": "USD"}}
+
+        monkeypatch.setattr("src.lib.repo.clone_repo", _fake_clone)
+        monkeypatch.setattr(
+            "src.agents.orchestrator.agent_adapters._run_infracost_pipeline",
+            _fake_pipeline,
+        )
+
+        result = await call_infracost(
+            self._minimal_codesec_result(), "job-1", feedback="make it cheaper"
+        )
+
+        assert captured["url"] == "https://github.com/owner/repo"
+        assert captured["feedback"] == "make it cheaper"
+        assert captured["repo_path"] is not None
+        assert result["cost_estimate"]["monthly_cost_usd"] == 10.0
+
+    async def test_does_not_clone_without_feedback(self, monkeypatch):
+        def _boom(*args, **_kwargs):
+            raise AssertionError("clone_repo must not be called without feedback")
+
+        captured = {}
+
+        def _fake_pipeline(raw_input):
+            captured["repo_path"] = raw_input.get("repo_path")
+            return {"cost_estimate": {"monthly_cost_usd": 10.0, "currency": "USD"}}
+
+        monkeypatch.setattr("src.lib.repo.clone_repo", _boom)
+        monkeypatch.setattr(
+            "src.agents.orchestrator.agent_adapters._run_infracost_pipeline",
+            _fake_pipeline,
+        )
+
+        await call_infracost(self._minimal_codesec_result(), "job-1")
+
+        assert captured["repo_path"] is None
+
+    async def test_clone_failure_is_fail_soft(self, monkeypatch):
+        """A failed re-clone must not take the regeneration down: the
+        pipeline runs without repo context."""
+        captured = {}
+
+        def _fake_clone(*_args, **_kwargs):
+            raise RuntimeError("git exploded")
+
+        def _fake_pipeline(raw_input):
+            captured["repo_path"] = raw_input.get("repo_path")
+            return {"cost_estimate": {"monthly_cost_usd": 10.0, "currency": "USD"}}
+
+        monkeypatch.setattr("src.lib.repo.clone_repo", _fake_clone)
+        monkeypatch.setattr(
+            "src.agents.orchestrator.agent_adapters._run_infracost_pipeline",
+            _fake_pipeline,
+        )
+
+        result = await call_infracost(
+            self._minimal_codesec_result(), "job-1", feedback="cheaper"
+        )
+
+        assert captured["repo_path"] is None
+        assert result["cost_estimate"]["monthly_cost_usd"] == 10.0
+
+    async def test_iteration_number_is_threaded_into_raw_input(self, monkeypatch):
+        """The first-regen hidden fix lives in the pipeline; the adapter must
+        forward the 1-based regen round so the pipeline can gate it."""
+        captured = {}
+
+        def _fake_pipeline(raw_input):
+            captured["regen_iteration"] = raw_input.get("regen_iteration")
+            return {"cost_estimate": {"monthly_cost_usd": 10.0, "currency": "USD"}}
+
+        monkeypatch.setattr(
+            "src.agents.orchestrator.agent_adapters._run_infracost_pipeline",
+            _fake_pipeline,
+        )
+
+        await call_infracost(
+            self._minimal_codesec_result(),
+            "job-1",
+            feedback="bigger",
+            iteration_number=1,
+        )
+
+        assert captured["regen_iteration"] == 1
+
+    async def test_iteration_number_not_set_without_value(self, monkeypatch):
+        captured = {}
+
+        def _fake_pipeline(raw_input):
+            captured["regen_iteration"] = raw_input.get("regen_iteration")
+            return {"cost_estimate": {"monthly_cost_usd": 10.0, "currency": "USD"}}
+
+        monkeypatch.setattr(
+            "src.agents.orchestrator.agent_adapters._run_infracost_pipeline",
+            _fake_pipeline,
+        )
+
+        await call_infracost(self._minimal_codesec_result(), "job-1", feedback="bigger")
+
+        assert captured["regen_iteration"] is None

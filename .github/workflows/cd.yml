@@ -64,7 +64,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: src/frontend
+          context: .
           file: infrastructure/Dockerfile.frontend.prod
           push: true
           tags: |

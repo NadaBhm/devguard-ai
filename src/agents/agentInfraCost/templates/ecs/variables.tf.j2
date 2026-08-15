@@ -10,6 +10,10 @@ variable "environment" {
   default     = "{{ environment }}"
 }
 
+# These are supplied by the pipeline from standing sandbox resources via the
+# DEVGUARD_VPC_ID / DEVGUARD_SUBNET_IDS environment variables (merged into
+# terraform.tfvars.json by DeployOps), or set manually before `terraform apply`.
+
 variable "vpc_id" {
   description = "ID of an existing VPC to deploy the load balancer and ECS tasks into"
   type        = string
@@ -23,10 +27,11 @@ variable "subnet_ids" {
 
 # A "{{ database }}" database was detected in this repo. This module does
 # NOT create one (a real database has a real recurring cost, and picking its
-# size/engine version is a separate decision) -- fill these in with a real,
-# already-existing database's connection details before running
-# `terraform apply`. For production use, prefer AWS Secrets Manager over
-# passing db_password as a plain Terraform variable.
+# size/engine version is a separate decision). The pipeline supplies these
+# from a standing sandbox database via DEVGUARD_DB_* environment variables
+# (DeployOps merges them into terraform.tfvars.json); a deployer can also set
+# them manually before `terraform apply`. For production use, prefer AWS
+# Secrets Manager over passing db_password as a plain Terraform variable.
 
 variable "db_host" {
   description = "Hostname of an existing {{ database }} database"

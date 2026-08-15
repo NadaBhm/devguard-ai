@@ -87,7 +87,9 @@ class TerraformRunner:
     
     def plan(self) -> Optional[Dict]:
         def _plan():
-            result = self._run(["plan", "-json"])
+            # -input=false: never prompt for required variables in the
+            # automated pipeline; fail fast with a clear error instead.
+            result = self._run(["plan", "-input=false", "-json"])
             if result.returncode != 0:
                 raise RuntimeError(f"plan failed: {result.stderr}")
             # finding the change_summary object which indicates success
@@ -110,7 +112,8 @@ class TerraformRunner:
     
     def apply(self, auto_approve: bool = True) -> bool:
         def _apply():
-            cmd = ["apply"]
+            # -input=false: never prompt for required variables mid-apply.
+            cmd = ["apply", "-input=false"]
             if auto_approve:
                 cmd.append("-auto-approve")
             result = self._run(cmd)

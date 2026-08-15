@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { tokenStore } from "../api/tokenStore"
 
 export interface ProgressEvent {
   type: "progress"
@@ -44,7 +45,8 @@ export type ConnectionStatus = "connecting" | "open" | "closed"
 
 function wsUrl(jobId: string): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
-  return `${proto}//${window.location.host}/ws/jobs/${jobId}`
+  const token = tokenStore.access ?? ""
+  return `${proto}//${window.location.host}/ws/jobs/${jobId}?token=${encodeURIComponent(token)}`
 }
 
 export function useWebSocket(jobId: string | undefined) {
@@ -107,10 +109,11 @@ export function useWebSocket(jobId: string | undefined) {
         }
       }
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         socketRef.current = null
         if (closedByCleanup || !id) return
         setStatus("closed")
+        if (event.code === 4401) return
         const delay = Math.min(1000 * 2 ** attempt, 15000)
         attempt += 1
         timerRef.current = window.setTimeout(connect, delay)

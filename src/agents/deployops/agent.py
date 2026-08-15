@@ -3,6 +3,7 @@ DeployOps Agent
 Receives artifacts and deploys to AWS.
 """
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +34,39 @@ from src.agents.deployops.models import (
 )
 
 logging.basicConfig(level=logging.INFO)
+
+# Standing-sandbox resources that generated Terraform modules may require
+# (agentInfraCost templates/ecs/variables.tf.j2 declares vpc_id/subnet_ids and
+# db_* as required variables with no defaults). Configure once in the
+# environment; DeployOps injects them into terraform.tfvars.json so
+# `terraform plan` never blocks waiting for interactive input.
+_ENV_TF_VARS = (
+    ("DEVGUARD_VPC_ID", "vpc_id"),
+    ("DEVGUARD_SUBNET_IDS", "subnet_ids"),
+    ("DEVGUARD_DB_HOST", "db_host"),
+    ("DEVGUARD_DB_PORT", "db_port"),
+    ("DEVGUARD_DB_NAME", "db_name"),
+    ("DEVGUARD_DB_USER", "db_user"),
+    ("DEVGUARD_DB_PASSWORD", "db_password"),
+)
+
+
+def _terraform_env_vars() -> Dict[str, Any]:
+    """Map DEVGUARD_* environment settings onto Terraform variable names."""
+    tf_vars: Dict[str, Any] = {}
+    for env_name, tf_name in _ENV_TF_VARS:
+        value = os.getenv(env_name)
+        if not value:
+            continue
+        if tf_name == "subnet_ids":
+            value = [s.strip() for s in value.split(",") if s.strip()]
+        elif tf_name == "db_port":
+            try:
+                value = int(value)
+            except ValueError:
+                continue
+        tf_vars[tf_name] = value
+    return tf_vars
 
 
 class DeployOpsAgent:
@@ -76,6 +111,23 @@ class DeployOpsAgent:
         # was ephemeral by accident, not by choice.
         workspace_dir = self._workspace_dir(job_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        # Real source for the docker build. InfraCost's payload only carries
+        # Dockerfile + terraform; without the repo checkout the build context
+        # has no package.json/app code and any real image build fails (e.g.
+        # `npm ci` -> "npm ci can only install packages when your package.json
+        # and package-lock.json ... are in sync"). Clone the source into the
+        # workspace when the payload gives us a URL, as the mock/sandbox
+        # environments do via _write_artifacts' context copy.
+        repo_url = (deploy_payload.metadata or {}).get("repo_url")
+        if repo_url:
+            from src.lib.repo import clone_repo
+            try:
+                clone_repo(repo_url, workspace_dir)
+                self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
+            except Exception as exc:  # noqa: BLE001 - surface as failed deploy
+                self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
+                return {"status": "failed", "job_id": job_id, "error": f"source clone failed: {exc}"}
 
         # Write Terraform artifacts to workspace
         await self._write_artifacts(deploy_payload.artifacts, workspace_dir)
@@ -373,6 +425,51 @@ class DeployOpsAgent:
             self.logger.error(f"Versioned rollback failed: {exc}")
             return {"status": "failed", "error": str(exc)}
 
+    @xray_recorder.capture("list_revisions")  # type: ignore[reportCallIssue]
+    async def list_revisions(
+        self,
+        app_name: str,
+        environment: str,
+        service_name: str,
+        region: str | None = None,
+    ) -> Dict[str, Any]:
+        """List every deployable ECS task-definition revision for a service.
+
+        Used to power the "roll back to a specific version" picker in the UI.
+        Returns revisions newest-first, tagging the currently-active one so the
+        frontend can flag it.
+        """
+        aws = AWSClient(region=region)
+        cluster = f"{app_name}-cluster"
+        service = f"{app_name}-{environment}-{service_name}"
+        try:
+            desc = aws.ecs().describe_services(cluster=cluster, services=[service])
+            if not desc.get("services"):
+                return {"status": "failed", "error": "Service not found"}
+            current_arn = desc["services"][0].get("taskDefinition")
+            current_task = (current_arn or "").rsplit("/", 1)[-1]
+            family = current_task.rsplit(":", 1)[0] if ":" in current_task else current_task
+
+            revisions = aws.ecs().list_task_definitions(
+                familyPrefix=family,
+                status="ACTIVE",
+                sort="DESC",
+            ).get("taskDefinitionArns", [])
+
+            versions = []
+            for arn in revisions:
+                short = arn.rsplit("/", 1)[-1]
+                versions.append({
+                    "task_definition_arn": arn,
+                    "family": short.rsplit(":", 1)[0],
+                    "revision": int(short.rsplit(":", 1)[-1]) if ":" in short else None,
+                    "is_current": arn == current_arn,
+                })
+            return {"status": "success", "service": service, "versions": versions}
+        except Exception as exc:
+            self.logger.error(f"List revisions failed: {exc}")
+            return {"status": "failed", "error": str(exc)}
+
 
 
 
@@ -520,10 +617,13 @@ class DeployOpsAgent:
             if variables_file.exists():
                 variables_file.unlink()
         
-        # Write terraform variables if provided
-        if artifacts.terraform.variables:
+        # Write terraform variables if provided, merged with standing-sandbox
+        # VPC/database values from the environment.
+        tf_vars = dict(artifacts.terraform.variables or {})
+        tf_vars.update(_terraform_env_vars())
+        if tf_vars:
             vars_path = tf_dir / "terraform.tfvars.json"
-            vars_path.write_text(json.dumps(artifacts.terraform.variables, indent=2))
+            vars_path.write_text(json.dumps(tf_vars, indent=2))
             self.logger.info(f"Wrote variables to {vars_path}")
         
         # Write Dockerfiles to their build contexts. Source files are already
@@ -558,6 +658,27 @@ class DeployOpsAgent:
                     self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
+    async def _run_docker_cmd(self, cmd: list[str], timeout: float = 300.0) -> tuple[int, str, str]:
+        """Run a docker command with a temporary DOCKER_CONFIG to avoid macOS credential helper hangs."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text('{"credsStore": ""}')
+            env = os.environ.copy()
+            env["DOCKER_CONFIG"] = tmpdir
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                return -1, "", f"timed out after {timeout}s"
+            return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+
     @xray_recorder.capture("_build_and_push_image")  # type: ignore[reportCallIssue]
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
         """Build Docker image and push to ECR"""
@@ -580,22 +701,19 @@ class DeployOpsAgent:
         except ecr_client.exceptions.RepositoryAlreadyExistsException:
             pass
 
-        # Use ECR authorization token instead of relying on AWS CLI env
+# Use ECR authorization token instead of relying on AWS CLI env
         auth_response = ecr_client.get_authorization_token()
         auth_data = auth_response["authorizationData"][0]
         token = auth_data["authorizationToken"]
         proxy_endpoint = auth_data["proxyEndpoint"]
+        decoded_token = base64.b64decode(token).decode("utf-8")
+        password = decoded_token.split(":", 1)[1]
 
-        login_cmd = ["docker", "login", "--username", "AWS", "--password-stdin", proxy_endpoint]
-        process = await asyncio.create_subprocess_exec(
-            *login_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate(input=token.encode())
-        if process.returncode != 0:
-            self.logger.error(f"ECR login failed: {stderr.decode('utf-8', errors='replace')}")
+        # ECR login with temporary DOCKER_CONFIG to avoid macOS credential helper hangs
+        login_cmd = ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint]
+        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint], timeout=60.0)
+        if returncode != 0:
+            self.logger.error(f"ECR login failed: {stderr}")
             return None
 
         # ECR repository URI
@@ -603,29 +721,18 @@ class DeployOpsAgent:
         image_uri = f"{ecr_repo}:{image_tag}"
 
         # Build Docker image with platform for Fargate compatibility
-        # Build context is relative to workspace
         build_context = self._workspace_dir(job_id) / docker_image.context
         build_cmd = ["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)]
-        result = await asyncio.create_subprocess_exec(
-            *build_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.logger.error(f"Docker build failed: {stderr.decode('utf-8', errors='replace')}")
+        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)], timeout=600.0)
+        if returncode != 0:
+            self.logger.error(f"Docker build failed: {stderr}")
             return None
 
         # Push to ECR
         push_cmd = ["docker", "push", image_uri]
-        result = await asyncio.create_subprocess_exec(
-            *push_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.logger.error(f"Docker push failed: {stderr.decode('utf-8', errors='replace')}")
+        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "push", image_uri], timeout=300.0)
+        if returncode != 0:
+            self.logger.error(f"Docker push failed: {stderr}")
             return None
 
         self.logger.info(f"Image pushed: {image_uri}")
@@ -793,6 +900,7 @@ class DeployOpsAgent:
                 "deploy_approved": status == "approved",
                 "approved_by": approval.get("approved_by"),
             },
+            "metadata": payload.get("metadata", {}) or {},
         }
 
     def sanitize_and_validate(self, payload: Dict[str, Any]) -> Dict[str, Any]:         
@@ -873,6 +981,13 @@ class DeployOpsAgent:
                 raise ValueError("docker_image.tag is required and must be a string")
             if not docker_image.get("platform") or not isinstance(docker_image.get("platform"), str):
                 raise ValueError("docker_image.platform is required and must be a string")
+            if not re.match(r'^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$', docker_image["tag"]):
+                raise ValueError("docker_image.tag contains invalid characters")
+            context_path = Path(docker_image["context"])
+            if context_path.is_absolute() or ".." in context_path.parts:
+                raise ValueError(
+                    "docker_image.context must be a safe relative path inside the workspace"
+                )
         
         # 3. AWS Config
         aws_config = payload["aws_config"]
@@ -975,7 +1090,8 @@ class DeployOpsAgent:
             "approval": {
                 "deploy_approved": deploy_approved,
                 "approved_by": approved_by
-            }
+            },
+            "metadata": payload.get("metadata", {}) or {}
         }
         
         self.logger.info(f"Payload validated and sanitized for job {job_id}")

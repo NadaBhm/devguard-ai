@@ -1,15 +1,17 @@
 import asyncio
 import json
 import logging
-from typing import Dict, Set
 
 from fastapi import WebSocket, WebSocketDisconnect
+
+from . import auth, crud, models
+from .database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Dict[str, Set[WebSocket]] = {}
+        self.active_connections: dict[str, set[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, job_id: str):
         await websocket.accept()
@@ -64,13 +66,13 @@ class ConnectionManager:
         """Send RAG answer. sources can be str or list."""
         if job_id not in self.active_connections:
             return
-        
+
         # Normalize sources to list[str]
         if isinstance(sources, str):
             sources = [sources]
         elif not isinstance(sources, list):
             sources = []
-            
+
         payload = {
             "type": "rag_answer",
             "job_id": job_id,
@@ -136,8 +138,52 @@ async def redis_progress_relay():
             await asyncio.sleep(3)
 
 
+def _authenticate(token: str | None):
+    """Resolve a ?token= query param to a user via the access-token JWT."""
+    if not token:
+        return None
+    payload = auth.decode_token(token)
+    if not payload or payload.get("type") == "refresh":
+        return None
+    email = payload.get("sub")
+    if not email:
+        return None
+    db = SessionLocal()
+    try:
+        return crud.get_user_by_email(db, email=email)
+    finally:
+        db.close()
+
+
+def _owns_job(user, job_id: str) -> bool:
+    """True if the authenticated user triggered the run for ``job_id``."""
+    db = SessionLocal()
+    try:
+        run = (
+            db.query(models.AnalysisRun)
+            .filter(
+                models.AnalysisRun.id == job_id,
+                models.AnalysisRun.triggered_by == user.id,
+            )
+            .first()
+        )
+        return run is not None
+    finally:
+        db.close()
+
+
 async def websocket_endpoint(websocket: WebSocket, job_id: str):
-    """WebSocket endpoint for real-time job progress + RAG chat."""
+    """WebSocket endpoint for real-time job progress + RAG chat.
+
+    Requires `?token=<JWT>` in the connection URL
+    """
+    user = _authenticate(websocket.query_params.get("token"))
+    if user is None:
+        await websocket.close(code=4401, reason="Unauthorized")
+        return
+    if not _owns_job(user, job_id):
+        await websocket.close(code=4403, reason="Forbidden")
+        return
     await manager.connect(websocket, job_id)
     try:
         while True:
@@ -150,14 +196,14 @@ async def websocket_endpoint(websocket: WebSocket, job_id: str):
                 query = message.get("query", "")
                 from src.lib.rag.retrieval import ask_repo
                 result = ask_repo(query, job_id)
-                
+
                 # Handle both return types
                 if isinstance(result, tuple):
                     answer, sources = result
                 else:
                     answer = result
                     sources = []
-                    
+
                 await manager.send_rag_answer(job_id, answer, sources)
 
             elif action == "ping":

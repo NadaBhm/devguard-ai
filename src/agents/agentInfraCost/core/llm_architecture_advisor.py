@@ -38,7 +38,13 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     "données, de frameworks web, et sa taille en lignes de code). Choisis "
     "EXACTEMENT un type de compute parmi 'ecs', 'lambda' ou 'ec2' — aucune autre "
     "valeur n'est acceptée. Réponds uniquement avec un JSON de la forme "
-    '{"compute_type": "...", "reasoning": "..."}, sans texte autour.'
+    '{"compute_type": "...", "reasoning": "..."}, sans texte autour.\n'
+    "\n"
+    "RÈGLE ABSOLUE : Si le contexte inclut une 'Contrainte supplémentaire de l'utilisateur' "
+    "(user feedback), cette contrainte EST PRIORITAIRE sur ton analyse structurelle. "
+    "Si l'utilisateur demande explicitement 'ecs', 'lambda' ou 'ec2', TU DOIS "
+    "respecter ce choix même s'il contredit ton analyse structurelle. La demande "
+    "utilisateur EST UN ORDRE, pas une suggestion."
 )
 
 
@@ -54,7 +60,7 @@ class _LlmArchitectureChoice(BaseModel):
 
 def _build_prompt(analysis: RepoAnalysisInput) -> str:
     stack = analysis.stack_detection
-    return (
+    prompt = (
         "Signaux du dépôt :\n"
         f"- conteneur détecté : {stack.container.detected}\n"
         f"- docker-compose détecté : {stack.container.compose_detected}\n"
@@ -63,6 +69,18 @@ def _build_prompt(analysis: RepoAnalysisInput) -> str:
         f"- taille du projet (lignes de code) : {analysis.repo_metadata.loc}\n\n"
         "Quel type de compute recommandes-tu ?"
     )
+    if analysis.user_feedback:
+        prompt += (
+            "\n\nContrainte supplémentaire de l'utilisateur (prioritaire sur tout "
+            "le reste) :\n"
+            f"{analysis.user_feedback}"
+        )
+    if analysis.repo_context:
+        prompt += (
+            "\n\n=== CONTEXTE DU DÉPÔT (faits extraits par le LLM) ===\n"
+            f"{analysis.repo_context}"
+        )
+    return prompt
 
 
 def _parse_llm_choice(raw_text: str) -> _LlmArchitectureChoice | None:

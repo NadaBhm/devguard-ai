@@ -1,11 +1,12 @@
-import { useMemo } from "react"
+import { useEffect, useMemo } from "react"
 import { useParams, useSearchParams } from "react-router-dom"
-import { useQuery } from "@tanstack/react-query"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { jobsApi } from "../api/jobs"
 import { useWebSocket } from "../hooks/useWebSocket"
 import { Spinner } from "../components/ui/Button"
 import { Card } from "../components/ui/Card"
 import { RunStatusBadge } from "../components/jobs/RunStatusBadge"
+import { ModeBadge } from "../components/jobs/ModeBadge"
 import { RunTabs, type RunTab } from "../components/jobs/RunTabs"
 import { ProgressTimeline } from "../components/jobs/ProgressTimeline"
 import { GateApproval } from "../components/jobs/GateApproval"
@@ -16,7 +17,10 @@ import { DeployTab } from "../components/deploy/DeployTabContent"
 import { formatCurrency, formatDate, formatDuration, shortId } from "../lib/format"
 import type { GateContext, JobDetail, JobState, RunState } from "../types/jobs"
 
-const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "terraform", "deploy"]
+const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "artifacts", "deploy"]
+
+// Legacy tab aliases: pre-rename URLs used ?tab=terraform.
+const LEGACY_TAB_ALIASES: Record<string, RunTab> = { terraform: "artifacts" }
 
 interface InterruptInfo {
   gate: string
@@ -66,20 +70,34 @@ export function RunDetailPage() {
   const { jobId } = useParams<{ jobId: string }>()
   const [params] = useSearchParams()
   const rawTab = params.get("tab") as RunTab | null
-  const activeTab = rawTab && VALID_TABS.includes(rawTab) ? rawTab : "overview"
+  const mappedTab = rawTab ? (LEGACY_TAB_ALIASES[rawTab] ?? rawTab) : null
+  const activeTab = mappedTab && VALID_TABS.includes(mappedTab) ? mappedTab : "overview"
 
   const jobQuery = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => jobsApi.get(jobId!),
     enabled: !!jobId,
+    refetchInterval: 2500,
   })
   const resultsQuery = useQuery({
     queryKey: ["job-results", jobId],
     queryFn: () => jobsApi.results(jobId!),
     enabled: !!jobId,
+    refetchInterval: 2500,
   })
 
   const ws = useWebSocket(jobId)
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    for (const e of ws.events) {
+      if (e.type === "results_ready") {
+        void queryClient.invalidateQueries({ queryKey: ["job-results", jobId] })
+      } else if (e.type === "gate") {
+        void queryClient.invalidateQueries({ queryKey: ["job", jobId] })
+      }
+    }
+  }, [ws.events, jobId, queryClient])
 
   const job: JobDetail | undefined = jobQuery.data
   const results = resultsQuery.data
@@ -94,6 +112,9 @@ export function RunDetailPage() {
     () => ws.events.findLast((e) => e.type === "progress"),
     [ws.events],
   )
+
+  const activePhase =
+    lastProgress?.type === "progress" && ws.status === "open" ? lastProgress.phase : undefined
 
   const pending = useMemo(() => pendingGate(state), [state])
   const interrupt = useMemo(() => interruptInfo(state), [state])
@@ -135,6 +156,7 @@ export function RunDetailPage() {
               {repo ?? "Analysis run"}
             </h1>
             <RunStatusBadge status={job.status} orchestratorStatus={orchestratorStatus} />
+            <ModeBadge mode={job.mode} />
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12.5px] text-faint">
             <span>Started {formatDate(job.started_at)}</span>
@@ -166,6 +188,7 @@ export function RunDetailPage() {
             <ProgressTimeline
               status={orchestratorStatus as RunState}
               nodesExecuted={state?.orchestrator_metadata?.nodes_executed ?? []}
+              activePhase={activePhase}
             />
           </Card>
 
@@ -247,19 +270,23 @@ export function RunDetailPage() {
           <InfraCostTab
             estimates={results?.infracost_estimates ?? []}
             infracost={state?.infracost_result as JobState["infracost_result"]}
+            iterations={state?.infracost_iterations}
           />
         </div>
       )}
 
-      {activeTab === "terraform" && (
+      {activeTab === "artifacts" && (
         <div className="overflow-hidden rounded-lg border border-border bg-surface">
-          <TerraformTab artifacts={results?.terraform_artifacts ?? []} />
+          <TerraformTab
+            artifacts={results?.terraform_artifacts ?? []}
+            editable={gateName === "gate_2_pre_deployops"}
+          />
         </div>
       )}
 
       {activeTab === "deploy" && (
         <div className="overflow-hidden rounded-lg border border-border bg-surface">
-          <DeployTab deployments={results?.deployments ?? []} />
+          <DeployTab deployments={results?.deployments ?? []} jobId={jobId} />
         </div>
       )}
     </div>

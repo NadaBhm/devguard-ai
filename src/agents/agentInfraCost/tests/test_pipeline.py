@@ -4,10 +4,21 @@ import json
 from pathlib import Path
 
 import pytest
-
+from core.decision_engine import DecisionResult
 from core.input_validator import LowConfidenceError
-from core.pipeline import PipelineStageError, run_pipeline, run_pipeline_with_context
-from models.output_schema import Ec2InfraCostOutput, EcsInfraCostOutput, LambdaInfraCostOutput
+from core.pipeline import (
+    PipelineStageError,
+    _recompute_decision_from_refined,
+    _sizing_from_refined_terraform,
+    run_pipeline,
+    run_pipeline_with_context,
+)
+from models.output_schema import (
+    Ec2InfraCostOutput,
+    EcsInfraCostOutput,
+    LambdaInfraCostOutput,
+    TerraformFiles,
+)
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -128,3 +139,311 @@ def test_ec2_synthetic_large_project_end_to_end() -> None:
     output = run_pipeline(raw)
 
     assert isinstance(output, Ec2InfraCostOutput)
+
+
+# --------------------------------------------------------------------------
+# Gate-2 regeneration: whole-repo context
+# --------------------------------------------------------------------------
+
+
+def test_gate2_repo_digest_is_computed_and_reaches_architecture_advisor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When Gate 2 requests regeneration, the pipeline digests the re-cloned
+    repo and feeds the result into the OpenRouter architecture prompt."""
+    raw = _load_raw("sample_input.json")
+    raw["user_feedback"] = "make it cheaper"
+    raw["repo_path"] = str(tmp_path)
+
+    captured: dict = {}
+
+    def _fake_ingest(repo_path, job_id, *, commit_sha=None):
+        captured["path"] = str(repo_path)
+        return "port 8000, health check /health, FastAPI + Postgres"
+
+    def _fake_arch_llm(*args, **kwargs):
+        captured["prompt"] = kwargs.get("prompt", args[0] if args else None)
+        return json.dumps({"compute_type": "ecs", "reasoning": "repo facts say so"})
+
+    monkeypatch.setattr("core.pipeline.ingest_repo", _fake_ingest)
+    monkeypatch.setattr("core.llm_architecture_advisor.call_llm", _fake_arch_llm)
+
+    run_pipeline(raw)
+
+    assert captured["path"] == str(tmp_path)
+    assert "=== CONTEXTE DU DÉPÔT" in captured["prompt"]
+    assert "port 8000" in captured["prompt"]
+
+
+def test_gate2_without_repo_path_never_digests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No re-cloned repo path, no digest call — regression runs untouched."""
+    raw = _load_raw("sample_input.json")
+    raw["user_feedback"] = "cheaper please"
+
+    called = {"n": 0}
+
+    def _fake_ingest(*args, **kwargs):
+        called["n"] += 1
+        return "never"
+
+    monkeypatch.setattr("core.pipeline.ingest_repo", _fake_ingest)
+
+    run_pipeline(raw)
+
+    assert called["n"] == 0
+
+
+# --------------------------------------------------------------------------
+# Cost follows the refiner's actual sizing (option 1)
+# --------------------------------------------------------------------------
+
+
+class TestSizingFromRefinedTerraform:
+    def test_ecs_parses_cpu_and_memory(self) -> None:
+        main_tf = (
+            'resource "aws_ecs_task_definition" "this" {\n'
+            '  cpu   = "512"\n'
+            '  memory = "1024"\n'
+            '}\n'
+        )
+        assert _sizing_from_refined_terraform(main_tf, "", "ecs") == {
+            "task_cpu": 512,
+            "task_memory": 1024,
+        }
+
+    def test_ecs_resolves_var_references_from_variables_tf(self) -> None:
+        """The refiner renders sizing as `cpu = var.task_cpu` with the real
+        value as a `default` in variables.tf — the cost must follow it."""
+        main_tf = (
+            'resource "aws_ecs_task_definition" "this" {\n'
+            "  cpu   = var.task_cpu\n"
+            "  memory = var.task_memory\n"
+            "}\n"
+        )
+        variables_tf = (
+            'variable "task_cpu" {\n  type = string\n  default = "4096"\n}\n'
+            'variable "task_memory" {\n  type = string\n  default = "8192"\n}\n'
+        )
+        assert _sizing_from_refined_terraform(main_tf, variables_tf, "ecs") == {
+            "task_cpu": 4096,
+            "task_memory": 8192,
+        }
+
+    def test_ecs_parses_desired_count(self) -> None:
+        main_tf = (
+            'resource "aws_ecs_task_definition" "t" {\n'
+            '  cpu   = "1024"\n'
+            '  memory = "2048"\n'
+            "}\n"
+            'resource "aws_ecs_service" "s" {\n'
+            "  desired_count = 3\n"
+            "}\n"
+        )
+        assert _sizing_from_refined_terraform(main_tf, "", "ecs") == {
+            "task_cpu": 1024,
+            "task_memory": 2048,
+            "desired_count": 3,
+        }
+
+    def test_ec2_parses_instance_type(self) -> None:
+        main_tf = 'resource "aws_instance" "this" {\n  instance_type = "t3.small"\n}\n'
+        assert _sizing_from_refined_terraform(main_tf, "", "ec2") == {"instance_type": "t3.small"}
+
+    def test_lambda_parses_memory_mb(self) -> None:
+        main_tf = 'resource "aws_lambda_function" "this" {\n  memory_mb = 256\n}\n'
+        assert _sizing_from_refined_terraform(main_tf, "", "lambda") == {"memory_mb": 256}
+
+    def test_unreadable_returns_none(self) -> None:
+        assert _sizing_from_refined_terraform("resource {} broken", "", "ecs") is None
+        assert _sizing_from_refined_terraform("", "", "ecs") is None
+        assert _sizing_from_refined_terraform("resource {} broken", "", "ec2") is None
+
+
+class TestRecomputeDecisionFromRefined:
+    def test_rebuilds_ecs_sizing(self) -> None:
+        decision = _ecs_decision(task_cpu=1024, task_memory=2048)
+        main_tf = 'resource "aws_ecs_task_definition" "t" {\n  cpu = "512"\n  memory = "1024"\n}\n'
+
+        updated = _recompute_decision_from_refined(decision, _tf(main_tf))
+
+        assert updated.sizing == {"task_cpu": 512, "task_memory": 1024}
+        assert updated.compute_type == "ecs"
+
+    def test_rebuilds_sizing_from_var_references(self) -> None:
+        decision = _ecs_decision(task_cpu=1024, task_memory=2048)
+        main_tf = (
+            'resource "aws_ecs_task_definition" "t" {\n'
+            "  cpu   = var.task_cpu\n"
+            "  memory = var.task_memory\n"
+            "}\n"
+            'resource "aws_ecs_service" "s" {\n'
+            "  desired_count = var.desired_count\n"
+            "}\n"
+        )
+        variables_tf = (
+            'variable "task_cpu" {\n  default = "4096"\n}\n'
+            'variable "task_memory" {\n  default = "8192"\n}\n'
+            'variable "desired_count" {\n  default = 3\n}\n'
+        )
+
+        updated = _recompute_decision_from_refined(
+            decision, TerraformFiles(main_tf=main_tf, variables_tf=variables_tf, outputs_tf="")
+        )
+
+        assert updated.sizing == {
+            "task_cpu": 4096,
+            "task_memory": 8192,
+            "desired_count": 3,
+        }
+
+    def test_unreadable_keeps_original_decision(self) -> None:
+        decision = _ecs_decision(task_cpu=1024, task_memory=2048)
+
+        updated = _recompute_decision_from_refined(decision, _tf("resource {} broken"))
+
+        assert updated is decision
+        assert updated.sizing == {"task_cpu": 1024, "task_memory": 2048}
+
+
+def test_cost_reflects_refined_sizing_after_regen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After Gate-2 regeneration, the reported cost comes from the refiner's
+    actual main.tf sizing, not the pre-regen decision."""
+    raw = _load_raw("sample_input.json")
+    raw["user_feedback"] = "utilise 512MB et 0.5 vCPU pour réduire le coût"
+
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+        refined_main = (
+            'resource "aws_ecs_task_definition" "t" {\n'
+            '  cpu = "512"\n'
+            '  memory = "1024"\n'
+            "}\n"
+        )
+        return TerraformFiles(
+            main_tf=refined_main,
+            variables_tf=terraform_files.variables_tf,
+            outputs_tf=terraform_files.outputs_tf,
+        ), dockerfile
+
+    monkeypatch.setattr("core.pipeline.refine_terraform", _fake_refiner)
+
+    context = run_pipeline_with_context(raw)
+
+    assert context.decision.sizing == {"task_cpu": 512, "task_memory": 1024}
+    assert context.finops.recommended is not None
+    assert context.output.aws_config.estimated_monthly_cost.amount > 0
+
+
+def test_cost_rises_with_var_referenced_sizing_and_desired_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduces the real Gate-2 output: sizing rendered as var references
+    with defaults in variables.tf plus desired_count > 1 — the reported cost
+    must rise, not stay frozen at the pre-regen $28.83."""
+    raw = _load_raw("sample_input.json")
+    raw["user_feedback"] = "make it more expensive, i have a very big userbase"
+
+    baseline = run_pipeline_with_context(_load_raw("sample_input.json"))
+    baseline_cost = baseline.output.aws_config.estimated_monthly_cost.amount
+
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+        refined_main = (
+            'resource "aws_ecs_task_definition" "t" {\n'
+            "  cpu   = var.task_cpu\n"
+            "  memory = var.task_memory\n"
+            "}\n"
+            'resource "aws_ecs_service" "s" {\n'
+            "  desired_count = var.desired_count\n"
+            "}\n"
+        )
+        refined_variables = (
+            'variable "task_cpu" {\n  type = string\n  default = "4096"\n}\n'
+            'variable "task_memory" {\n  type = string\n  default = "8192"\n}\n'
+            'variable "desired_count" {\n  type = number\n  default = 3\n}\n'
+        )
+        return TerraformFiles(
+            main_tf=refined_main,
+            variables_tf=refined_variables,
+            outputs_tf=terraform_files.outputs_tf,
+        ), dockerfile
+
+    monkeypatch.setattr("core.pipeline.refine_terraform", _fake_refiner)
+
+    context = run_pipeline_with_context(raw)
+
+    assert context.decision.sizing == {
+        "task_cpu": 4096,
+        "task_memory": 8192,
+        "desired_count": 3,
+    }
+    cost = context.output.aws_config.estimated_monthly_cost.amount
+    assert cost > baseline_cost, f"cost {cost} should exceed baseline {baseline_cost}"
+
+
+def test_hidden_first_regen_fix_appended_only_on_first_regen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repo-conformance fix (real container port / health check) is a
+    hidden suffix to the user's feedback on the FIRST Gate-2 regen only.
+    Later regens must pass exactly what the user typed."""
+    from core.pipeline import _HIDDEN_FIRST_REGEN_FIX
+
+    seen: list[str] = []
+
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+        seen.append(feedback)
+        return terraform_files, dockerfile
+
+    monkeypatch.setattr("core.pipeline.refine_terraform", _fake_refiner)
+
+    raw_first = _load_raw("sample_input.json")
+    raw_first["user_feedback"] = "add a honeypot vm"
+    raw_first["regen_iteration"] = 1
+    run_pipeline_with_context(raw_first)
+
+    raw_second = _load_raw("sample_input.json")
+    raw_second["user_feedback"] = "add a honeypot vm"
+    raw_second["regen_iteration"] = 2
+    run_pipeline_with_context(raw_second)
+
+    assert len(seen) == 2
+    assert _HIDDEN_FIRST_REGEN_FIX in seen[0]
+    assert seen[0].startswith("add a honeypot vm")
+    assert seen[1] == "add a honeypot vm"
+    assert _HIDDEN_FIRST_REGEN_FIX not in seen[1]
+
+
+def test_hidden_fix_not_applied_without_regen_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No regen_iteration (e.g. a directly-driven pipeline run) means no
+    hidden suffix — feedback goes through verbatim."""
+    from core.pipeline import _HIDDEN_FIRST_REGEN_FIX
+
+    seen: list[str] = []
+
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+        seen.append(feedback)
+        return terraform_files, dockerfile
+
+    monkeypatch.setattr("core.pipeline.refine_terraform", _fake_refiner)
+
+    raw = _load_raw("sample_input.json")
+    raw["user_feedback"] = "use two AZs"
+    run_pipeline_with_context(raw)
+
+    assert seen == ["use two AZs"]
+    assert _HIDDEN_FIRST_REGEN_FIX not in seen[0]
+
+
+def _ecs_decision(task_cpu: int, task_memory: int) -> DecisionResult:
+    return DecisionResult(
+        compute_type="ecs",
+        sizing={"task_cpu": task_cpu, "task_memory": task_memory},
+        score_breakdown={"ecs": 3.0, "lambda": 0.0, "ec2": 0.0},
+    )
+
+
+def _tf(main_tf: str) -> TerraformFiles:
+    return TerraformFiles(main_tf=main_tf, variables_tf="", outputs_tf="")

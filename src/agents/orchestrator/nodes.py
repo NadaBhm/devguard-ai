@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from .state import OrchestratorState
+from .state import MAX_INFRACOST_ITERATIONS, OrchestratorState
 
 logger = logging.getLogger(__name__)
 
@@ -509,8 +509,18 @@ def route_after_infracost(state: OrchestratorState) -> str:
 def route_after_gate_2(state: OrchestratorState) -> str:
     if state.get("status") in ("failed", "rejected"):
         return "end"
-    if state["human_gates"]["gate_2_pre_deployops"]["approved"]:
+    gate = state["human_gates"]["gate_2_pre_deployops"]
+    if gate["approved"]:
         return "deployops_agent"
+    # User requested regeneration at Gate 2: loop back to InfraCost with the
+    # prompt in state.infracost_feedback, until the iteration cap is hit.
+    if gate.get("requested_changes") or state.get("infracost_feedback"):
+        if len(state.get("infracost_iterations", [])) < MAX_INFRACOST_ITERATIONS:
+            return "infracost_agent"
+        logger.warning(
+            "[%s] Gate 2 regeneration cap reached (%d); halting.",
+            state["job_id"], MAX_INFRACOST_ITERATIONS,
+        )
     return "end"
 
 
@@ -578,7 +588,34 @@ def infracost_agent_impl(state: OrchestratorState) -> OrchestratorState:
     state["orchestrator_metadata"]["nodes_executed"].append("infracost_agent")
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    state["infracost_result"] = run_sync(call_infracost(state["codesec_result"] or {}, job_id))
+    feedback = state.get("infracost_feedback")
+    previous_result = state.get("infracost_result")
+    # 1-based regeneration round. 1 == the first Gate-2 regen, which is the
+    # only round that gets the hidden "match the real server port / health
+    # check" auto-fix (see pipeline's _HIDDEN_FIRST_REGEN_FIX). Later rounds
+    # deliberately skip it: the user's own prompts own the artifacts by then.
+    iteration_number = len(state.get("infracost_iterations") or []) + 1
+
+    state["infracost_result"] = run_sync(
+        call_infracost(
+            state["codesec_result"] or {},
+            job_id,
+            feedback=feedback,
+            previous_result=previous_result,
+            iteration_number=iteration_number,
+        )
+    )
+
+    if feedback:
+        iterations = list(state.get("infracost_iterations") or [])
+        iterations.append({
+            "iteration": len(iterations) + 1,
+            "prompt": feedback,
+            "result": state["infracost_result"],
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        })
+        state["infracost_iterations"] = iterations
+        state["infracost_feedback"] = None  # consumed; gate 2 may set it again
 
     cost = state["infracost_result"].get("cost_estimate", {}).get("monthly_cost_usd", 0)
     logger.info(f"[{job_id}] InfraCost complete. Est. cost: ${cost}/mo")
@@ -623,7 +660,7 @@ def deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
                 "DEVGUARD_REAL_INFRACOST=1 as well, or turn DeployOps back to mock."
             )
         deploy_payload = translate_infracost_to_deploy_payload(
-            job_id, raw_output, approved_by=approved_by
+            job_id, raw_output, approved_by=approved_by, repo_url=state.get("repo_url")
         )
 
     state["deployops_result"] = run_sync(call_deployops(deploy_payload, job_id))

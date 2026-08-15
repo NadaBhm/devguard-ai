@@ -59,6 +59,9 @@ jobs:
       - name: Type check (mypy)
         run: mypy src/
 
+      - name: Set JWT secret (fail-fast requires non-empty)
+        run: echo "SECRET_KEY=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
       - name: Run tests (pytest)
         run: pytest --continue-on-collection-errors --disable-warnings -q
 

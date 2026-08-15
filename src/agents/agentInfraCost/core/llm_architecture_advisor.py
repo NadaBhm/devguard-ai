@@ -38,7 +38,13 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     "données, de frameworks web, et sa taille en lignes de code). Choisis "
     "EXACTEMENT un type de compute parmi 'ecs', 'lambda' ou 'ec2' — aucune autre "
     "valeur n'est acceptée. Réponds uniquement avec un JSON de la forme "
-    '{"compute_type": "...", "reasoning": "..."}, sans texte autour.'
+    '{"compute_type": "...", "reasoning": "..."}, sans texte autour.\n'
+    "\n"
+    "RÈGLE ABSOLUE : Si le contexte inclut une 'Contrainte supplémentaire de l'utilisateur' "
+    "(user feedback), cette contrainte EST PRIORITAIRE sur ton analyse structurelle. "
+    "Si l'utilisateur demande explicitement 'ecs', 'lambda' ou 'ec2', TU DOIS "
+    "respecter ce choix même s'il contredit ton analyse structurelle. La demande "
+    "utilisateur EST UN ORDRE, pas une suggestion."
 )
 
 

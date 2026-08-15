@@ -34,11 +34,10 @@ import logging
 import time
 from typing import Final
 
-from pydantic import BaseModel, ValidationError
-
 from core.constants import REFINER_MAX_ATTEMPTS, REFINER_RETRY_DELAY_SECONDS
 from core.llm_provider import call_llm
 from models.output_schema import TerraformFiles
+from pydantic import BaseModel, ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     "associé, et une demande de modification de l'utilisateur. Réécris "
     "UNIQUEMENT les fichiers concernés pour satisfaire la demande, en gardant "
     "tout le reste strictement identique. Réponds uniquement avec un JSON de "
-    "la forme "
+    'la forme '
     '{"main_tf": "...", "variables_tf": "...", "outputs_tf": "...", '
     '"dockerfile": "..." | null}, sans texte autour. Chaque valeur doit être '
     "le contenu complet du fichier, échappé dans la chaîne JSON. Si le "
@@ -60,7 +59,23 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     "décidées, sauf si la demande le dit explicitement. Le "
     "'=== CONTEXTE DU DÉPÔT ===' est un résumé de faits extraits du code du "
     "dépôt, donné uniquement pour information : il n'autorise jamais à créer "
-    "des fichiers supplémentaires ni à sortir des trois fichiers fournis."
+    "des fichiers supplémentaires ni à sortir des trois fichiers fournis.\n"
+    "\n"
+    "RÈGLE CRITIQUE POUR LE DOCKERFILE : Si tu génères ou modifies le Dockerfile, "
+    "tu DOIS uniquement référencer des fichiers de dépendances (requirements.txt, "
+    "pyproject.toml, package.json, Cargo.toml, go.mod, pom.xml, build.gradle, etc.) "
+    "qui EXISTENT RÉELLEMENT dans le '=== CONTEXTE DU DÉPÔT ==='. Si le dépôt n'a "
+    "pas de requirements.txt ni pyproject.toml, n'utilise JAMAIS `pip install -r "
+    "requirements.txt` — installe plutôt les packages détectés explicitement "
+    "(ex: `pip install fastapi uvicorn` pour un projet FastAPI). Même chose pour "
+    "npm/yarn/cargo/maven/gradle : n'invoque un gestionnaire de paquets qu'avec "
+    "un fichier manifeste qui existe dans le contexte.\n"
+    "\n"
+    "IMPORTANT : Si la demande de l'utilisateur concerne le conteneur, le Dockerfile, "
+    "l'image, le port, le healthcheck, ou la commande de démarrage — TU DOIS RENVOYER "
+    "UN DOCKERFILE COMPLET ET FONCTIONNEL dans le champ 'dockerfile' du JSON. Ne renvoie "
+    "JAMAIS null pour le dockerfile quand le feedback cible le conteneur. Un Dockerfile "
+    "incomplet (ex: seulement FROM/COPY sans CMD ni dépendances) sera rejeté."
 )
 
 
@@ -84,9 +99,8 @@ def _build_prompt(
     feedback: str,
     repo_context: str | None = None,
 ) -> str:
-    docker_block = (
-        "=== Dockerfile ===\n" f"{dockerfile}\n\n" if dockerfile else "=== Dockerfile ===\n(aucun Dockerfile fourni)\n\n"
-    )
+    no_docker = "=== Dockerfile ===\n(aucun Dockerfile fourni)\n\n"
+    docker_block = f"=== Dockerfile ===\n{dockerfile}\n\n" if dockerfile else no_docker
     repo_block = (
         "=== CONTEXTE DU DÉPÔT ===\n" f"{repo_context}\n\n" if repo_context else ""
     )
@@ -130,6 +144,61 @@ def _parse_llm_output(raw_text: str | None) -> _RefinedTerraform | None:
 def _valid_file(content: str) -> bool:
     """A refined file must be non-empty; anything else is a refused edit."""
     return bool(content and content.strip())
+
+
+def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None) -> str:
+    """
+    Validate the Dockerfile against the repo context. If it references
+    dependency files (requirements.txt, pyproject.toml, package.json, etc.)
+    that don't exist in the repo context, rewrite to use explicit package
+    installs based on the detected stack.
+    """
+    if not dockerfile or not repo_context:
+        return dockerfile
+
+    # Files that indicate dependency management - check if they exist in repo_context
+    dep_files = {
+        "requirements.txt": ("pip install", ["fastapi", "uvicorn"]),
+        "pyproject.toml": ("pip install", ["fastapi", "uvicorn"]),
+        "package.json": ("npm install", []),
+        "Cargo.toml": ("cargo build", []),
+        "go.mod": ("go build", []),
+        "pom.xml": ("mvn package", []),
+        "build.gradle": ("./gradlew build", []),
+    }
+
+    missing_deps = []
+    for fname in dep_files:
+        if fname not in repo_context:
+            missing_deps.append(fname)
+
+    if not missing_deps:
+        return dockerfile
+
+    lines = dockerfile.splitlines()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip RUN lines that install from missing dependency files
+        if stripped.startswith("RUN") and any(
+            f" -r {fname}" in stripped or f" install {fname}" in stripped or f" install -r {fname}" in stripped
+            for fname in missing_deps
+        ):
+            # Replace with explicit install for the detected stack
+            # Detect stack from repo_context (simple heuristic)
+            if "fastapi" in repo_context.lower() or "uvicorn" in repo_context.lower():
+                new_lines.append("RUN pip install --no-cache-dir uvicorn fastapi")
+            elif "express" in repo_context.lower() or "node" in repo_context.lower():
+                new_lines.append("RUN npm ci --omit=dev")
+            else:
+                new_lines.append(line)  # keep original if unsure
+            continue
+        # Skip COPY lines for missing dependency files
+        if stripped.startswith("COPY") and any(f" {fname} " in stripped or stripped.endswith(f" {fname}") for fname in missing_deps):
+            continue
+        new_lines.append(line)
+
+    return "\n".join(new_lines)
 
 
 # Feedback only rewrites the Dockerfile when it explicitly targets container
@@ -208,6 +277,10 @@ def refine_terraform(
                     )
                 else:
                     refined_dockerfile = refined.dockerfile
+                    # Sanitize: remove references to missing dependency files
+                    refined_dockerfile = _sanitize_dockerfile_dependencies(
+                        refined_dockerfile, repo_context
+                    )
             elif dockerfile is not None:
                 logger.info(
                     "Feedback doesn't target the Dockerfile; keeping the repo's "

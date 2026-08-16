@@ -1,20 +1,20 @@
 """Phase B (post-mission extension): LLM-driven architecture decision.
 
 Asks an LLM (via ``core.llm_provider``, OpenRouter) to pick ``compute_type``
-from the three supported values, given the same structural repo-analysis
+from the four supported values, given the same structural repo-analysis
 signals ``decision_engine.py``'s scoring already uses. The LLM decides WHICH
-of ecs/lambda/ec2 fits best and explains why in plain language; it never
+of ecs/lambda/ec2/s3 fits best and explains why in plain language; it never
 invents sizing values — those still come from ``decision_engine``'s existing,
 tested sizing tiers (``compute_sizing``), so nothing free-form ever reaches
 Terraform generation. This is the validation layer against unrestricted
 generation: the LLM's usable surface is exactly one ``Literal`` field out of
-three known values, enforced by ``_LlmArchitectureChoice``.
+four known values, enforced by ``_LlmArchitectureChoice``.
 
 Falls back to ``decide_architecture()``'s deterministic scoring —
 automatically, silently, with identical downstream behaviour — whenever
 ``OPENROUTER_API_KEY`` is unset, the call fails or times out, the response
 isn't valid JSON, or the LLM names a ``compute_type`` outside
-{ecs, lambda, ec2}. ``decision_source`` always records which path actually
+{ecs, lambda, ec2, s3}. ``decision_source`` always records which path actually
 produced the result, so nothing is hidden from the rest of the pipeline.
 """
 
@@ -36,13 +36,15 @@ _SYSTEM_INSTRUCTION: Final[str] = (
     "Tu es un architecte cloud AWS. On te donne des signaux structurels sur un "
     "dépôt de code (présence d'un conteneur, d'un docker-compose, d'une base de "
     "données, de frameworks web, et sa taille en lignes de code). Choisis "
-    "EXACTEMENT un type de compute parmi 'ecs', 'lambda' ou 'ec2' — aucune autre "
-    "valeur n'est acceptée. Réponds uniquement avec un JSON de la forme "
+    "EXACTEMENT un type de compute parmi 'ecs', 'lambda', 'ec2' ou 's3' — aucune "
+    "autre valeur n'est acceptée. Si le dépôt est un site statique nu (HTML/CSS/JS "
+    "sans conteneur, sans base de données et sans framework backend), choisis 's3'. "
+    "Réponds uniquement avec un JSON de la forme "
     '{"compute_type": "...", "reasoning": "..."}, sans texte autour.\n'
     "\n"
     "RÈGLE ABSOLUE : Si le contexte inclut une 'Contrainte supplémentaire de l'utilisateur' "
     "(user feedback), cette contrainte EST PRIORITAIRE sur ton analyse structurelle. "
-    "Si l'utilisateur demande explicitement 'ecs', 'lambda' ou 'ec2', TU DOIS "
+    "Si l'utilisateur demande explicitement 'ecs', 'lambda', 'ec2' ou 's3', TU DOIS "
     "respecter ce choix même s'il contredit ton analyse structurelle. La demande "
     "utilisateur EST UN ORDRE, pas une suggestion."
 )
@@ -50,7 +52,7 @@ _SYSTEM_INSTRUCTION: Final[str] = (
 
 class _LlmArchitectureChoice(BaseModel):
     """Strict shape the LLM's raw JSON response must match. Anything else —
-    malformed JSON, a missing field, a compute_type outside the three known
+    malformed JSON, a missing field, a compute_type outside the four known
     values — fails validation and triggers the deterministic fallback.
     """
 

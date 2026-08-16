@@ -1,19 +1,5 @@
 """
-Tests unitaires pour l'orchestrateur - Sprint 1
-Place dans: src/agents/orchestrator/tests/test_graph.py
-
-NOTE (v1.0.6): mis a jour suite au decoupage de graph.py en
-state.py / error_handlers.py / human_gates.py / nodes.py / graph.py.
-Les fonctions ont perdu leur underscore initial (ex: _mock_codesec_agent_impl
--> mock_codesec_agent_impl) et vivent maintenant dans nodes.py /
-error_handlers.py / human_gates.py au lieu de graph.py.
-
-Ce fichier utilise des imports relatifs de package (src.agents.orchestrator.*)
-plutot que le hack sys.path + "from graph import ..." de la version
-originale, car graph.py fait maintenant des imports relatifs
-(from .state import ...) qui exigent d'etre charge comme membre d'un
-package, pas comme script autonome.
-Lancer avec: pytest depuis la racine du repo (pas depuis tests/).
+Tests for the orchestrator graph (Sprint 1).
 """
 
 import pytest
@@ -35,13 +21,8 @@ from src.agents.orchestrator.nodes import (
 from src.agents.orchestrator.error_handlers import safe_node_wrapper
 
 
-# =============================================================================
-# FIXTURES
-# =============================================================================
-
 @pytest.fixture
 def initial_state():
-    """Etat initial pour les tests."""
     return create_initial_state("https://github.com/test/repo")
 
 
@@ -50,10 +31,8 @@ def initial_state():
 # =============================================================================
 
 class TestInitialState:
-    """Tests pour create_initial_state."""
-
     def test_job_id_generated(self, initial_state):
-        assert len(initial_state["job_id"]) == 36  # UUID v4
+        assert len(initial_state["job_id"]) == 36
 
     def test_status_pending(self, initial_state):
         assert initial_state["status"] == "pending"
@@ -70,13 +49,7 @@ class TestInitialState:
         assert gate1["approved"] is None
 
 
-# =============================================================================
-# TESTS: MOCK AGENTS (Nodes individuels)
-# =============================================================================
-
 class TestMockCodeSecAgent:
-    """Tests pour mock_codesec_agent_impl."""
-
     def test_returns_codesec_result(self, initial_state):
         result = mock_codesec_agent_impl(initial_state)
         assert result["codesec_result"] is not None
@@ -108,7 +81,7 @@ class TestMockCodeSecAgent:
     def test_phases_is_list(self, initial_state):
         result = mock_codesec_agent_impl(initial_state)
         assert isinstance(result["codesec_result"]["phases"], list)
-        assert len(result["codesec_result"]["phases"]) == 8  # 8 phases
+        assert len(result["codesec_result"]["phases"]) == 8
 
     def test_metadata_updated(self, initial_state):
         result = mock_codesec_agent_impl(initial_state)
@@ -116,8 +89,6 @@ class TestMockCodeSecAgent:
 
 
 class TestMockInfraCostAgent:
-    """Tests pour mock_infracost_agent_impl."""
-
     def test_returns_infracost_result(self, initial_state):
         initial_state = mock_codesec_agent_impl(initial_state)
         result = mock_infracost_agent_impl(initial_state)
@@ -156,7 +127,7 @@ class TestMockInfraCostAgent:
 
 
 class TestMockDeployOpsAgent:
-    """Tests pour mock_deployops_agent_impl - ALIGNED avec deployops-mock-schema.json."""
+    pass
 
     def test_returns_deployops_result(self, initial_state):
         initial_state = mock_codesec_agent_impl(initial_state)
@@ -165,21 +136,18 @@ class TestMockDeployOpsAgent:
         assert result["deployops_result"] is not None
 
     def test_job_id_matches(self, initial_state):
-        """REQUIS par deployops-mock-schema.json: job_id doit matcher."""
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         result = mock_deployops_agent_impl(initial_state)
         assert result["deployops_result"]["job_id"] == initial_state["job_id"]
 
     def test_deployment_status_enum(self, initial_state):
-        """REQUIS: deployment_status doit etre success/failed/rolled_back."""
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         result = mock_deployops_agent_impl(initial_state)
         assert result["deployops_result"]["deployment_status"] in ["success", "failed", "rolled_back"]
 
     def test_deployed_url_present(self, initial_state):
-        """REQUIS: deployed_url doit exister."""
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         result = mock_deployops_agent_impl(initial_state)
@@ -187,7 +155,6 @@ class TestMockDeployOpsAgent:
         assert result["deployops_result"]["deployed_url"].startswith("https://")
 
     def test_health_check_required_fields(self, initial_state):
-        """REQUIS: health_check avec passed, response_time_ms, status_code."""
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         result = mock_deployops_agent_impl(initial_state)
@@ -200,14 +167,12 @@ class TestMockDeployOpsAgent:
         assert isinstance(hc["status_code"], int)
 
     def test_rollback_triggered_present(self, initial_state):
-        """REQUIS: rollback_triggered booleen."""
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         result = mock_deployops_agent_impl(initial_state)
         assert isinstance(result["deployops_result"]["rollback_triggered"], bool)
 
     def test_terraform_outputs_required(self, initial_state):
-        """REQUIS: terraform_outputs avec ecs_cluster_name, service_name, alb_dns."""
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         result = mock_deployops_agent_impl(initial_state)
@@ -245,8 +210,6 @@ class TestMockDeployOpsAgent:
 
 
 class TestHealthCheck:
-    """Tests pour health_check_impl."""
-
     def test_passed_health_check(self, initial_state):
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
@@ -258,7 +221,6 @@ class TestHealthCheck:
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         initial_state = mock_deployops_agent_impl(initial_state)
-        # Simuler un health check failed
         initial_state["deployops_result"]["health_check"]["passed"] = False
         result = health_check_impl(initial_state)
         assert result["status"] == "rolled_back"
@@ -267,8 +229,6 @@ class TestHealthCheck:
 
 
 class TestGenerateReport:
-    """Tests pour generate_report_impl."""
-
     def test_report_generated(self, initial_state):
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
@@ -300,12 +260,9 @@ class TestGenerateReport:
         assert "pipeline_duration_seconds" in summary
 
     def test_report_format(self, initial_state):
-        """
-        Since T-3.12 the node actually renders files, so "format" reports what
-        was produced: "pdf" when WeasyPrint's native libs are available,
-        "html" otherwise (and "json" if rendering failed entirely). Asserting
-        a hard "html" here would fail on machines that CAN make a PDF.
-        """
+        """Format reports what was produced: pdf when WeasyPrint libs available,
+        html otherwise (json if rendering failed). Hard-coded html would fail
+        on machines that CAN make a PDF."""
         initial_state = mock_codesec_agent_impl(initial_state)
         initial_state = mock_infracost_agent_impl(initial_state)
         initial_state = mock_deployops_agent_impl(initial_state)
@@ -314,13 +271,7 @@ class TestGenerateReport:
         assert result["final_report"]["format"] in ("pdf", "html")
 
 
-# =============================================================================
-# TESTS: ROUTING FUNCTIONS
-# =============================================================================
-
 class TestRouting:
-    """Tests pour les fonctions de routing conditionnel."""
-
     def test_route_after_codesec_success(self, initial_state):
         initial_state = mock_codesec_agent_impl(initial_state)
         assert route_after_codesec(initial_state) == "human_gate_1"
@@ -369,13 +320,7 @@ class TestRouting:
         assert route_after_health_check(initial_state) == "end"
 
 
-# =============================================================================
-# TESTS: SAFE NODE WRAPPER
-# =============================================================================
-
 class TestSafeNodeWrapper:
-    """Tests pour safe_node_wrapper."""
-
     def test_catches_exception(self, initial_state):
         def failing_node(state):
             raise ValueError("Test error")
@@ -399,10 +344,7 @@ class TestSafeNodeWrapper:
 
 
 class TestSafeNodeWrapperWithInterrupt:
-    """Test que GraphInterrupt n'est PAS attrape par le wrapper."""
-
     def test_graph_interrupt_is_re_raised(self, initial_state):
-        """Verifier que GraphInterrupt passe a travers le wrapper."""
         from langgraph.errors import GraphInterrupt
         from langgraph.types import Interrupt
 
@@ -411,16 +353,13 @@ class TestSafeNodeWrapperWithInterrupt:
             # of Interrupt objects), not a bare `value` kwarg.
             raise GraphInterrupt(interrupts=[Interrupt(value={"test": "interrupt"})])
 
-        # GraphInterrupt doit etre re-levee, pas attrapee
         with pytest.raises(GraphInterrupt):
             safe_node_wrapper(node_with_interrupt, "interrupt_node", initial_state)
 
-        # Le status ne doit PAS etre "failed"
         assert initial_state["status"] != "failed"
         assert len(initial_state["error_log"]) == 0
 
     def test_real_exception_is_caught(self, initial_state):
-        """Verifier que les vraies exceptions sont toujours attrapees."""
         def node_with_error(state):
             raise ValueError("Real error")
 

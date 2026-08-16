@@ -48,16 +48,12 @@ _MIN_REPLICAS_FOR_SAFE_SPOT: Final[int] = 2
 
 
 class OptimizationOption(BaseModel):
-    """One considered strategy — recommended or discarded, always with a reason."""
-
     name: str
     reason: str
     projected_monthly_savings: float | None = None
 
 
 class FinOpsRecommendation(BaseModel):
-    """The chosen strategy, what was ruled out and why, and the signals used."""
-
     recommended: OptimizationOption
     discarded: list[OptimizationOption]
     context: dict[str, Any]

@@ -53,7 +53,6 @@ _IGNORE_DIRS: Final[frozenset[str]] = frozenset({
     ".terraform", "coverage", ".next",
 })
 
-#: File suffixes that count as readable source/config text.
 _TEXT_SUFFIXES: Final[frozenset[str]] = frozenset({
     ".py", ".pyi", ".js", ".jsx", ".mjs", ".ts", ".tsx", ".go", ".java",
     ".rb", ".rs", ".php", ".sh", ".bash", ".zsh", ".sql", ".tf", ".tfvars",
@@ -84,7 +83,6 @@ _NAME_PATTERNS: Final[tuple[str, ...]] = (
     "webpack.config.*", "alembic.ini", "setup.py", "setup.cfg",
 )
 
-#: Per-chunk facts from the digest pass.
 _DIGEST_HEADER: Final[str] = "Faits extraits du dépôt (pertinents pour l'infrastructure) :"
 
 _SYSTEM_INSTRUCTION: Final[str] = (
@@ -107,11 +105,6 @@ def clear_digest_cache() -> None:
 
 
 _digest_cache: dict[str, str] = {}
-
-
-# =============================================================================
-# Reading the repository
-# =============================================================================
 
 
 def _ignore_part(parts: tuple[str, ...]) -> bool:
@@ -184,11 +177,6 @@ def read_all_text_files(repo_path: Path) -> list[dict[str, str]]:
     return files
 
 
-# =============================================================================
-# Chunking
-# =============================================================================
-
-
 def _file_block(path: str, content: str, *, part: str | None = None) -> str:
     label = f"{path} (partie {part})" if part else path
     return f"=== {label} ===\n{content}"
@@ -232,11 +220,6 @@ def chunk_files(files: list[dict[str, str]], chunk_bytes: int = REPO_CHUNK_BYTES
 
     _flush()
     return chunks
-
-
-# =============================================================================
-# Map-reduce digest
-# =============================================================================
 
 
 def _extract_facts(chunk: str) -> list[str]:

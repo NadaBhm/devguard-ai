@@ -1,33 +1,22 @@
 #!/usr/bin/env python3
 """
 CodeSec Agent — Quick Demo
-==========================
-This file lives at src/agents/codesec_demo.py.
 
-1. Change REPO_URL / USE_SAMPLE_REPO below (see CONFIG section)
+1. Change REPO_URL / USE_SAMPLE_REPO in the config values below.
 2. Run:  python src/agents/codesec_demo.py
 
-This uses ONLY built-in scanners (no semgrep/trivy/gitleaks needed).
-For real repos (USE_SAMPLE_REPO = False), git must be installed.
+Uses ONLY built-in scanners (no semgrep/trivy/gitleaks needed). For real
+repos (USE_SAMPLE_REPO = False), git must be installed.
 """
 
-# ===================================================================
-# 1. CONFIG — Change this to any public GitHub URL
-# ===================================================================
-REPO_URL = "https://github.com/Oussama928/Card-Learning-App.git"   # <-- CHANGE HERE
-USE_SAMPLE_REPO = False                                  # <-- Set False to clone real repo
-
-# ===================================================================
-# 2. Setup
-# ===================================================================
+REPO_URL = "https://github.com/Oussama928/Card-Learning-App.git"
+USE_SAMPLE_REPO = False
 import sys, os, tempfile, shutil, re, types
 from pathlib import Path
 
-# This demo file sits at <project>/src/agents/codesec_demo.py.
-# `src` is the directory that exposes the `agents` package, so it must be
-# on sys.path.  PROJECT_ROOT is the repo root (two levels above `src`).
-SRC_DIR = Path(__file__).resolve().parent.parent        # .../src
-PROJECT_ROOT = SRC_DIR.parent                            # .../project-root
+# `src` must be on sys.path for the `agents` package to be importable.
+SRC_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = SRC_DIR.parent
 sys.path.insert(0, str(SRC_DIR))
 
 
@@ -41,9 +30,7 @@ from agents.codesec.scanners.secrets import _run_regex_fallback
 import agents.codesec.agent as agent_mod
 from agents.codesec.agent import CodeSecAgent
 
-# ===================================================================
-# 3. Patch scanners to builtin-only (no external tools)
-# ===================================================================
+# Patch scanners to builtin-only (no external tools)
 
 def _demo_sast(repo_path):
     findings = []
@@ -93,7 +80,6 @@ def _demo_deps(repo_path):
     return DependenciesResult(total_packages=total, direct=direct, transitive=transitive, vulnerable_packages=vulns)
 
 
-# Apply patches
 sast.run_sast = _demo_sast
 agent_mod.run_sast = _demo_sast
 dependencies.run_dependency_scan = _demo_deps
@@ -103,14 +89,10 @@ agent_mod.run_dockerfile_scan = lambda p: _run_builtin_checks(Path(p))
 sbom.generate_sbom = lambda p: _generate_fallback_sbom(Path(p))
 agent_mod.generate_sbom = lambda p: _generate_fallback_sbom(Path(p))
 
-# Builtin-only secrets detection: skip gitleaks (not needed for the demo) and
-# go straight to the regex fallback so no external tools are invoked.
+# Builtin-only secrets: skip gitleaks and use regex fallback so no external tools are invoked.
 secrets.run_secrets_scan = _run_regex_fallback
 agent_mod.run_secrets_scan = _run_regex_fallback
 
-# ===================================================================
-# 4. Sample repo (used when USE_SAMPLE_REPO = True)
-# ===================================================================
 def _make_sample_repo(base_dir: Path) -> Path:
     repo = base_dir / "sample_vuln_repo"
     if repo.exists(): shutil.rmtree(repo)
@@ -159,9 +141,6 @@ def _make_sample_repo(base_dir: Path) -> Path:
     return repo
 
 
-# ===================================================================
-# 5. Run
-# ===================================================================
 if __name__ == "__main__":
     try:
         import nest_asyncio  # type: ignore
@@ -179,7 +158,6 @@ if __name__ == "__main__":
             CodeSecAgent._clone_repo = lambda self, repo_url, job_id: repo_path
             CodeSecAgent._validate_github_url = lambda self, url: (url or "")
         else:
-            # Real clone — git must be installed
             CodeSecAgent._validate_github_url = lambda self, url: (url or "")
 
         agent = CodeSecAgent(clone_dir=str(Path(tmpdir) / "clones"))
@@ -195,7 +173,6 @@ if __name__ == "__main__":
         CodeSecAgent._clone_repo = _orig_clone
         CodeSecAgent._validate_github_url = _orig_validate
 
-        # Pretty output
         print("\n" + "=" * 70)
         print("   RESULT")
         print("=" * 70)
@@ -249,7 +226,6 @@ if __name__ == "__main__":
             for i, r in enumerate(result.security_score.recommendations[:5], 1):
                 print(f"  {i}. {r}")
 
-        # Save JSON
         out = PROJECT_ROOT / "codesec_result.json"
         out.write_text(result.model_dump_json(indent=2), encoding="utf-8")
         print(f"\nJSON saved: {out}")

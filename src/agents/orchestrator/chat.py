@@ -61,7 +61,6 @@ logger = logging.getLogger(__name__)
 # call, and US-2.2.5 budgets the whole round-trip at under 2 seconds.
 MAX_HISTORY_MESSAGES = 10
 
-# Chunks pulled from Qdrant per question.
 DEFAULT_TOP_K = 5
 
 
@@ -114,7 +113,6 @@ class ConversationMemory:
             del self.messages[:overflow]
 
     def as_prompt_block(self) -> str:
-        """Render the history for inclusion in a prompt."""
         if not self.messages:
             return ""
         lines = [
@@ -124,7 +122,6 @@ class ConversationMemory:
         return "\n".join(lines)
 
     def to_list(self) -> list[dict[str, str]]:
-        """Serializable history, for the API / dashboard."""
         return [m.to_dict() for m in self.messages]
 
     def clear(self) -> None:
@@ -133,16 +130,14 @@ class ConversationMemory:
 
 # Process-local store, keyed by job_id.
 #
-# Same lifetime and same caveat as the graph's MemorySaver: it lives in the
-# FastAPI process and is lost on restart. That's acceptable for Sprint 3 and
-# consistent with how job checkpoints already behave.
+# Same lifetime and caveat as the graph's checkpointer: it lives in the
+# FastAPI process and is lost on restart. Acceptable for Sprint 3.
 # TODO Sprint 5: persist alongside job state in PostgreSQL, in the same move
 # that swaps MemorySaver for PostgresSaver.
 _conversations: dict[str, ConversationMemory] = {}
 
 
 def get_conversation(job_id: str) -> ConversationMemory:
-    """Return (creating if needed) the conversation memory for a job."""
     if job_id not in _conversations:
         _conversations[job_id] = ConversationMemory(job_id=job_id)
     return _conversations[job_id]
@@ -273,7 +268,6 @@ def build_prompt(
     repo_context: str,
     history: str,
 ) -> str:
-    """Assemble the four blocks into the final prompt sent to the LLM."""
     sections = [_SYSTEM_PREAMBLE]
 
     if job_context:
@@ -369,7 +363,6 @@ def _retrieve_repo_context(job_id: str, question: str, top_k: int) -> str:
 
 
 def _generate(prompt: str, *, job_id: str) -> str:
-    """Send the assembled prompt to the LLM."""
     if not use_real_rag():
         return _mock_answer(prompt)
 

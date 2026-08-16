@@ -1,7 +1,6 @@
 
 """
 CodeSec SBOM Generator
-=========================
 Generates Software Bill of Materials in CycloneDX format from package files.
 
 US-1.1.6: As a compliance officer, I want an SBOM so that I can track dependencies.
@@ -14,7 +13,6 @@ Technology Decision (ADR):
   when cyclonedx-py is unavailable or for non-Python repos.
 - Not chosen: Syft — excellent but focused on container images rather than
   source manifest files.
-
 """
 
 from __future__ import annotations
@@ -284,12 +282,6 @@ def generate_sbom(repo_path: Path) -> SBOM:
     Generate SBOM for a repository.
 
     Tries cyclonedx-py first, then Trivy, then falls back to manifest parsing.
-
-    Args:
-        repo_path: Path to the cloned repository.
-
-    Returns:
-        SBOM model with component inventory.
     """
     # Try cyclonedx-py
     try:

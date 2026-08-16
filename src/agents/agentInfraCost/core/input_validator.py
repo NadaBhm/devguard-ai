@@ -37,27 +37,25 @@ _OPTIONAL_FIELD_PATHS: Final[tuple[tuple[str, ...], ...]] = (
 
 
 class InputValidationError(Exception):
-    """Base class for every fail-fast rejection of Agent 1's payload."""
-
     def __init__(self, message: str, *, job_id: str | None = None) -> None:
         self.job_id = job_id
         super().__init__(message)
 
 
 class InvalidStatusError(InputValidationError):
-    """``status`` is not ``"completed"``."""
+    pass
 
 
 class MissingStackDetectionError(InputValidationError):
-    """``stack_detection`` is absent from the payload."""
+    pass
 
 
 class LowConfidenceError(InputValidationError):
-    """``stack_detection.confidence`` is below ``MIN_CONFIDENCE``."""
+    pass
 
 
 class MalformedInputError(InputValidationError):
-    """The payload does not match the expected structural schema."""
+    pass
 
 
 def _field_present(raw: dict[str, Any], path: tuple[str, ...]) -> bool:
@@ -71,7 +69,6 @@ def _field_present(raw: dict[str, Any], path: tuple[str, ...]) -> bool:
 
 
 def _warn_missing_optional_fields(raw: dict[str, Any], job_id: str) -> None:
-    """Log a warning for each optional field missing from the raw payload."""
     for path in _OPTIONAL_FIELD_PATHS:
         if not _field_present(raw, path):
             logger.warning(

@@ -1,31 +1,14 @@
 """
-CodeSec Agent — Main Orchestrator
-====================================
-Coordinates all security scanners in parallel where possible, aggregates results,
-and produces the final CodeSecResult JSON matching the mockup schema exactly.
+CodeSec Agent — Main Orchestrator.
+Coordinates all security scanners in parallel and produces the final
+CodeSecResult JSON.
 
-US-1.1.1: Submit GitHub URL → clone → analyze within 5 seconds initiation.
-US-1.1.2: Stack detection with >=80% accuracy.
-US-1.1.3: SAST for OWASP Top 10 with severity classification.
-US-1.1.4: Secrets detection with >80% recall.
-US-1.1.5: Security score 0-100 with grade A-F.
-US-1.1.6: SBOM generation in CycloneDX/SPDX format.
-
-Design Decisions:
-- Parallel execution: stack_detection runs first (needed for metadata), then
-  sast, secrets, dependencies, dockerfile, and sbom run in parallel via asyncio.
-- Sandboxed: Only reads files, never executes arbitrary code from the repo.
-- Public repos only: Validates GitHub URL format, rejects private repos.
-- Phase tracking: Each scanner reports its phase status for real-time progress.
-
-Integration Contracts:
-- InfraCost: Consumes stack_detection output (primary_language, frameworks,
-  database, container.detected) to recommend AWS services.
-- Orchestrator: Triggers via CodeSecAgent.analyze(repo_url) and receives
-  CodeSecResult as the return value (LangGraph node contract).
-- RAG: Embeds README.md, docs/, and key code snippets for chat context.
-
-Author: Nada 
+Design decisions:
+- stack_detection runs first (metadata needed downstream); sast, secrets,
+  dependencies, dockerfile, and sbom run in parallel via asyncio.
+- Sandboxed: reads files only, never executes repo code.
+- Public GitHub/GitLab URLs only; local folder paths also supported.
+- Each scanner reports its phase status for real-time progress.
 """
 
 from __future__ import annotations
@@ -45,6 +28,7 @@ from urllib.parse import urlparse
 from .config import (
     DEFAULT_CLONE_DIR,
     GITHUB_URL_PATTERN,
+    GITLAB_URL_PATTERN,
     MAX_FILES_PER_REPO,
     MAX_REPO_SIZE_MB,
     TOOLS,
@@ -125,29 +109,11 @@ class CodeSecAgent:
     """
 
     def __init__(self, clone_dir: str | None = None) -> None:
-        """
-        Initialize the CodeSec agent.
-
-        Args:
-            clone_dir: Directory to clone repositories into. Defaults to
-                       /tmp/codesec-clones or env CODESEC_CLONE_DIR.
-        """
         self.clone_dir = Path(clone_dir or DEFAULT_CLONE_DIR)
         self.clone_dir.mkdir(parents=True, exist_ok=True)
 
-    def _validate_github_url(self, url: str | None) -> str:
-        """
-        Validate that the provided URL is a public GitHub repository URL.
-
-        Args:
-            url: Repository URL string.
-
-        Returns:
-            Cleaned URL string.
-
-        Raises:
-            ValueError: If URL is invalid, not GitHub, or appears to be private.
-        """
+    def _validate_repo_url(self, url: str | None) -> str:
+        """Validate that the URL is a public GitHub or GitLab repository URL."""
         if url is None:
             raise ValueError("URL cannot be None")
 
@@ -155,18 +121,19 @@ class CodeSecAgent:
             raise ValueError("URL must be a valid HTTP/HTTPS URL")
 
         parsed = urlparse(url)
-        if parsed.netloc.lower() != "github.com":
-            raise ValueError("Only public GitHub repositories are supported")
+        host = parsed.netloc.lower()
 
-        if not re.match(GITHUB_URL_PATTERN, url, re.IGNORECASE):
-            raise ValueError("Invalid GitHub repository URL format")
+        if host not in ("github.com", "gitlab.com"):
+            raise ValueError("Only public GitHub or GitLab repositories are supported")
 
-        # Reject obvious private repo indicators
+        pattern = GITHUB_URL_PATTERN if host == "github.com" else GITLAB_URL_PATTERN
+        if not re.match(pattern, url, re.IGNORECASE):
+            raise ValueError("Invalid repository URL format for host: %s" % host)
+
         path_parts = parsed.path.strip("/").split("/")
         if len(path_parts) < 2:
-            raise ValueError("GitHub URL must contain owner and repository name")
+            raise ValueError("Repository URL must contain owner and repository name")
 
-        # Clean URL: remove trailing slash, .git, and fragment
         cleaned = url.rstrip("/").removesuffix(".git")
         if "?" in cleaned:
             cleaned = cleaned.split("?")[0]
@@ -174,23 +141,10 @@ class CodeSecAgent:
         return cleaned
 
     def _clone_repo(self, repo_url: str, job_id: str) -> Path:
-        """
-        Clone a public GitHub repository to the local filesystem.
-
-        Args:
-            repo_url: Validated GitHub URL.
-            job_id: Unique job identifier for directory naming.
-
-        Returns:
-            Path to the cloned repository root.
-
-        Raises:
-            RuntimeError: If cloning fails.
-        """
+        """Clone a repository to the local filesystem."""
         repo_name = repo_url.rstrip("/").split("/")[-1]
         target_dir = self.clone_dir / f"{job_id}_{repo_name}"
 
-        # Remove existing directory if present
         if target_dir.exists():
             shutil.rmtree(target_dir)
 
@@ -199,7 +153,7 @@ class CodeSecAgent:
         cmd = [
             "git",
             "clone",
-            "--depth=1",  # Shallow clone for speed
+            "--depth=1",
             "--single-branch",
             "--branch=main",
             repo_url,
@@ -232,7 +186,6 @@ class CodeSecAgent:
         except FileNotFoundError:
             raise RuntimeError("Git is not installed or not in PATH")
 
-        # Validate size constraints
         total_size = sum(f.stat().st_size for f in target_dir.rglob("*") if f.is_file())
         total_size_mb = total_size / (1024 * 1024)
         if total_size_mb > MAX_REPO_SIZE_MB:
@@ -254,7 +207,6 @@ class CodeSecAgent:
         lang_breakdown = get_language_breakdown(repo_path)
         total_loc = sum(lang_breakdown.values())
 
-        # Try to get current commit SHA
         commit_sha = None
         try:
             result = subprocess.run(
@@ -268,7 +220,6 @@ class CodeSecAgent:
         except Exception:
             pass
 
-        # Try to get current branch
         branch = "main"
         try:
             result = subprocess.run(
@@ -294,17 +245,7 @@ class CodeSecAgent:
     async def _run_scanners(
         self, repo_path: Path, stack_result: StackDetection, _add_phase
     ) -> dict[str, Any]:
-        """
-        Run all scanners in parallel with real per-scanner timing.
-
-        Args:
-            repo_path: Path to cloned repository.
-            stack_result: Pre-computed stack detection result.
-            _add_phase: Callback to record phase timestamps.
-
-        Returns:
-            Dictionary of scanner results.
-        """
+        """Run all scanners in parallel with per-scanner timing."""
         loop = asyncio.get_event_loop()
 
         async def _run(name: str, func, *args):
@@ -344,14 +285,7 @@ class CodeSecAgent:
 
     async def analyze(self, repo_url: str, job_id: str | None = None) -> CodeSecResult:
         """
-        Run the complete CodeSec analysis pipeline on a public GitHub repository.
-
-        Args:
-            repo_url: Public GitHub repository URL.
-            job_id: Optional job identifier. If not provided, one is generated.
-
-        Returns:
-            CodeSecResult containing all scan results, scores, and metadata.
+        Run the complete CodeSec analysis pipeline.
 
         Raises:
             ValueError: If URL is invalid.
@@ -366,34 +300,47 @@ class CodeSecAgent:
         def _add_phase(name: str, status: PhaseStatus, started: datetime | None = None, completed: datetime | None = None, err: str | None = None) -> None:
             phases.append(PhaseInfo(name=name, status=status, started_at=started, completed_at=completed, error_message=err))
 
-        try:
-            # Validate URL
-            validated_url = self._validate_github_url(repo_url)
-        except ValueError as exc:
-            _add_phase("validation", PhaseStatus.FAILED, err=str(exc))
-            return CodeSecResult(
-                job_id=job_id,
-                status="failed",
-                error=str(exc),
-                repo_url=repo_url,
-                repo_metadata=RepoMetadata(name="", total_files=0, loc=0),
-                phases=phases,
-                stack_detection=StackDetection(primary_language="unknown", confidence=0.0),
-                security_score=SecurityScore(score=0, grade=Grade.F),
-            )
+        # Support local folder paths (uploaded project) or remote Git URLs
+        repo_path: Path | None = None
+        validated_url: str | None = None
+
+        if repo_url:
+            candidate = Path(repo_url)
+            if candidate.exists() and candidate.is_dir():
+                repo_path = candidate.resolve()
+                validated_url = str(repo_path)
+            else:
+                try:
+                    validated_url = self._validate_repo_url(repo_url)
+                except ValueError as exc:
+                    _add_phase("validation", PhaseStatus.FAILED, err=str(exc))
+                    return CodeSecResult(
+                        job_id=job_id,
+                        status="failed",
+                        error=str(exc),
+                        repo_url=repo_url,
+                        repo_metadata=RepoMetadata(name="", total_files=0, loc=0),
+                        phases=phases,
+                        stack_detection=StackDetection(primary_language="unknown", confidence=0.0),
+                        security_score=SecurityScore(score=0, grade=Grade.F),
+                    )
 
         _add_phase("validation", PhaseStatus.COMPLETED)
 
-        # Clone repository
         clone_start = datetime.now(timezone.utc)
         _add_phase("clone", PhaseStatus.RUNNING, started=clone_start)
         try:
-            repo_path = self._clone_repo(validated_url, job_id)
-            try:
-                from lib.rag.ingestion import ingest_repo
-                ingest_repo(repo_path, job_id=job_id)
-            except Exception as exc:
-                logger.warning("RAG ingestion failed (non-critical): %s", exc)
+            if repo_path is None:
+                repo_path = self._clone_repo(validated_url or "", job_id)
+            else:
+                # Local path: run RAG ingestion if available
+                try:
+                    from lib.rag.ingestion import ingest_repo
+
+                    ingest_repo(repo_path, job_id=job_id)
+                except Exception as exc:
+                    logger.warning("RAG ingestion failed (non-critical): %s", exc)
+
             clone_end = datetime.now(timezone.utc)
             _add_phase("clone", PhaseStatus.COMPLETED, started=clone_start, completed=clone_end)
         except RuntimeError as exc:
@@ -403,17 +350,17 @@ class CodeSecAgent:
                 job_id=job_id,
                 status="failed",
                 error=str(exc),
-                repo_url=validated_url,
+                repo_url=validated_url or repo_url,
                 repo_metadata=RepoMetadata(name="", total_files=0, loc=0),
                 phases=phases,
                 stack_detection=StackDetection(primary_language="unknown", confidence=0.0),
                 security_score=SecurityScore(score=0, grade=Grade.F),
             )
 
-        # Get metadata
+        validated_url = validated_url or (str(repo_path) if repo_path is not None else repo_url)
         repo_metadata = self._get_repo_metadata(repo_path, validated_url)
 
-        # Run stack detection (ONCE — result passed to _run_scanners)
+        # Stack detection runs once, before the parallel scanners
         stack_start = datetime.now(timezone.utc)
         _add_phase("stack_detection", PhaseStatus.RUNNING, started=stack_start)
         try:
@@ -425,7 +372,6 @@ class CodeSecAgent:
             _add_phase("stack_detection", PhaseStatus.FAILED, started=stack_start, completed=stack_end, err=str(exc))
             stack_result = StackDetection(primary_language="unknown", confidence=0.0)
 
-        # Run remaining scanners in parallel with individual timing
         try:
             results = await self._run_scanners(repo_path, stack_result, _add_phase)
         except Exception as exc:
@@ -440,7 +386,6 @@ class CodeSecAgent:
             error_message = str(exc)
 
         if results["dependencies"].vulnerable_packages:
-            # Map: name of the package (lowercase) → VulnerablePackage
             vuln_map = {
                 v.package.lower(): v 
                 for v in results["dependencies"].vulnerable_packages
@@ -451,8 +396,7 @@ class CodeSecAgent:
                     if cve and cve not in comp.cve_ids:
                         comp.cve_ids.append(cve)
 
-        # Pre-flight tool check: mark scanners whose tools are missing as
-        # SKIPPED so the failure is loud, not a silent empty result.
+        # Mark scanners with missing tools as SKIPPED so failure is loud, not a silent empty result.
         def _tool_installed(name: str) -> bool:
             tool = TOOLS.get(name)
             return bool(tool and tool.enabled and shutil.which(tool.executable))
@@ -474,7 +418,6 @@ class CodeSecAgent:
             for name in missing:
                 _add_phase(name, PhaseStatus.SKIPPED, err="tool not installed")
 
-        # Calculate security score
         score_start = datetime.now(timezone.utc)
         _add_phase("scoring", PhaseStatus.RUNNING, started=score_start)
         try:
@@ -495,7 +438,6 @@ class CodeSecAgent:
             security_score = SecurityScore(score=0, grade=Grade.F)
             error_message = error_message or str(exc)
 
-        # Build summary
         summary = Summary(
             files_scanned=repo_metadata.total_files,
             sast_findings_count=len(results["sast"]),
@@ -509,14 +451,11 @@ class CodeSecAgent:
             total_info=security_score.severity_counts.info,
         )
 
-        # Set SBOM download URL
         results["sbom"].download_url = f"/api/jobs/{job_id}/sbom/download"
 
-        # Capture Dockerfile content for downstream agents (InfraCost /
-        # DeployOps need it to build the image; the clone is removed below).
+        # Capture Dockerfile for downstream agents (the clone is removed below)
         dockerfile_content = _capture_dockerfile_content(repo_path, stack_result)
 
-        # Cleanup clone directory
         try:
             shutil.rmtree(repo_path, ignore_errors=True)
         except Exception:

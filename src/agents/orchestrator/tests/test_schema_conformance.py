@@ -1,6 +1,5 @@
 """
 Schema conformance tests
-Place dans: src/agents/orchestrator/tests/test_schema_conformance.py
 
 docs/api-contracts/orchestrator-input-schema.json is the contract three
 people code against (backend persistence, dashboard rendering, this
@@ -12,8 +11,6 @@ final report telling stakeholders the deployment costs $0/month.
 
 These tests run real orchestrator output against the schema so drift fails
 in CI instead of in the demo.
-
-Lancer avec: pytest depuis la racine du repo.
 """
 
 import json

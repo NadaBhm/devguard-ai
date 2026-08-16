@@ -106,7 +106,6 @@ def test_tenant_isolation_blocks_cross_user_access(_clean_db, auth_headers):
     assert r.status_code == 200, r.text
     intruder = {"Authorization": f"Bearer {r.json()['access_token']}"}
 
-    # User A (auth_headers) owns this job.
     r = client.post(
         "/api/jobs/",
         headers=auth_headers,
@@ -115,7 +114,6 @@ def test_tenant_isolation_blocks_cross_user_access(_clean_db, auth_headers):
     assert r.status_code in (200, 201)
     job_id = r.json()["job_id"]
 
-    # User B cannot read, approve, or fetch results for A's job.
     assert client.get(f"/api/jobs/{job_id}", headers=intruder).status_code == 404
     assert (
         client.post(
@@ -127,13 +125,11 @@ def test_tenant_isolation_blocks_cross_user_access(_clean_db, auth_headers):
     )
     assert client.get(f"/api/jobs/{job_id}/results", headers=intruder).status_code == 404
 
-    # User B's listings never surface A's job or its deployment.
     listed = client.get("/api/jobs/", headers=intruder).json()["jobs"]
     assert all(j["job_id"] != job_id for j in listed)
     deploys = client.get("/api/deployments/", headers=intruder).json()["deployments"]
     assert all(d["run_id"] != job_id for d in deploys)
 
-    # The owner still sees it.
     assert client.get(f"/api/jobs/{job_id}", headers=auth_headers).status_code == 200
 
 
@@ -178,7 +174,6 @@ def test_results_endpoint_returns_normalized_tables(_clean_db, auth_headers):
     assert data["job_id"] == job_id
     assert len(data["agent_tasks"]) == 3
     assert len(data["deployments"]) == 1
-    # Every row has its uuid PK rendered as a string and the money as numbers.
     for row in data["infracost_estimates"]:
         assert "monthly_cost_usd" in row
     assert client.get("/api/jobs/does-not-exist/results", headers=headers).status_code == 404

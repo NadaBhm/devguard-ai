@@ -1,5 +1,3 @@
-"""Tests for core.input_validator."""
-
 import copy
 import json
 import logging
@@ -29,11 +27,6 @@ def _load_fixture(filename: str) -> dict[str, Any]:
     return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("filename,expected_job_id", VALID_FIXTURES)
 def test_valid_fixtures_are_accepted(filename: str, expected_job_id: str) -> None:
     raw = _load_fixture(filename)
@@ -48,11 +41,6 @@ def test_confidence_exactly_at_threshold_is_accepted() -> None:
     raw["stack_detection"]["confidence"] = 0.5
     parsed = validate_input(raw)
     assert parsed.stack_detection.confidence == 0.5
-
-
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
 
 
 def test_missing_optional_field_logs_warning_but_continues(
@@ -76,18 +64,13 @@ def test_explicit_null_optional_field_does_not_warn(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     raw = _load_fixture("sample_input_variant_lambda_candidate.json")
-    assert raw["stack_detection"]["database"] is None  # already explicit null
+    assert raw["stack_detection"]["database"] is None
 
     with caplog.at_level(logging.WARNING, logger="core.input_validator"):
         validate_input(raw)
 
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert not any("database" in w for w in warnings)
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_low_confidence_is_rejected() -> None:

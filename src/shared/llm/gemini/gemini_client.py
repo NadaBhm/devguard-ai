@@ -11,10 +11,10 @@ from google.generativeai.types import GenerationConfig, HarmCategory, HarmBlockT
 
 class GeminiModel(str, Enum):
     """Gemini models."""
-    FLASH = "gemini-2.5-flash"          
-    PRO = "gemini-2.5-pro"               
-    PRO_LATEST = "gemini-2.5-pro"       
-    ULTRA = "gemini-2.5-pro"          
+    FLASH = "gemini-2.5-flash"
+    PRO = "gemini-2.5-pro"
+    PRO_LATEST = "gemini-2.5-pro"
+    ULTRA = "gemini-2.5-pro"
 
 @dataclass
 class GeminiResponse:
@@ -29,19 +29,19 @@ class GeminiResponse:
 
 class GeminiClient:
     """Shared Gemini client for DevGuard AI agents."""
-    
+
     DEFAULT_TEMPERATURE = 0.3
     DEFAULT_MAX_TOKENS = 4096
     DEFAULT_TOP_P = 0.95
     DEFAULT_TOP_K = 40
-    
+
     SAFETY_SETTINGS = {
         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
     }
-    
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -54,21 +54,20 @@ class GeminiClient:
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
             raise ValueError("Gemini API key required.")
-        
+
         genai.configure(api_key=self.api_key)
         self.model_name = model
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.top_p = top_p
         self.top_k = top_k
-        
+
         self._model = genai.GenerativeModel(
             model_name=self.model_name,
             safety_settings=self.SAFETY_SETTINGS,
         )
-    
+
     def _build_generation_config(self, **overrides) -> GenerationConfig:
-        """Build generation config."""
         return GenerationConfig(
             temperature=overrides.get("temperature", self.temperature),
             max_output_tokens=overrides.get("max_output_tokens", self.max_output_tokens),
@@ -77,7 +76,7 @@ class GeminiClient:
             response_mime_type=overrides.get("response_mime_type", "text/plain"),
             response_schema=overrides.get("response_schema"),
         )
-    
+
     async def generate(
         self,
         prompt: str,
@@ -90,7 +89,7 @@ class GeminiClient:
             temperature=temperature or self.temperature,
             max_output_tokens=max_tokens or self.max_output_tokens,
         )
-        
+
         if system_instruction:
             content = [
                 {"role": "user", "parts": [system_instruction]},
@@ -108,9 +107,9 @@ class GeminiClient:
                 prompt,
                 generation_config=config,
             )
-        
+
         return self._parse_response(response)
-    
+
     async def generate_structured(
         self,
         prompt: str,
@@ -119,18 +118,18 @@ class GeminiClient:
     ) -> GeminiResponse:
         """Generate structured JSON output."""
         schema = self._normalize_schema_types(schema)
-        
+
         config = self._build_generation_config(
             response_mime_type="application/json",
             response_schema=schema,
         )
-        
+
         enhanced_prompt = (
             f"{prompt}\n\n"
             "Respond ONLY with valid JSON matching the specified schema. "
             "No markdown, no explanations, no code blocks."
         )
-        
+
         if system_instruction:
             content = [
                 {"role": "user", "parts": [system_instruction]},
@@ -148,9 +147,9 @@ class GeminiClient:
                 enhanced_prompt,
                 generation_config=config,
             )
-        
+
         parsed = self._parse_response(response)
-        
+
         try:
             parsed.structured_output = json.loads(parsed.text)
         except json.JSONDecodeError as e:
@@ -163,14 +162,14 @@ class GeminiClient:
                     raise ValueError(f"Failed to parse structured output: {e}\nRaw: {parsed.text[:500]}")
             else:
                 raise ValueError(f"Failed to parse structured output: {e}\nRaw: {parsed.text[:500]}")
-        
+
         return parsed
-    
+
     def _normalize_schema_types(self, schema: dict) -> dict:
         """Normalize schema type strings to uppercase."""
         if not isinstance(schema, dict):
             return schema
-        
+
         normalized = {}
         for key, value in schema.items():
             if key == "type" and isinstance(value, str):
@@ -193,9 +192,9 @@ class GeminiClient:
                 ]
             else:
                 normalized[key] = value
-        
+
         return normalized
-    
+
     async def generate_stream(
         self,
         prompt: str,
@@ -203,7 +202,7 @@ class GeminiClient:
     ) -> AsyncGenerator[str, None]:
         """Stream text chunks."""
         config = self._build_generation_config()
-        
+
         if system_instruction:
             content = [
                 {"role": "user", "parts": [system_instruction]},
@@ -223,11 +222,11 @@ class GeminiClient:
                 generation_config=config,
                 stream=True,
             )
-        
+
         for chunk in response:
             if chunk.text:
                 yield chunk.text
-    
+
     def start_chat(self, system_instruction: Optional[str] = None) -> genai.ChatSession:
         """Start a new chat session."""
         model = self._model
@@ -236,7 +235,7 @@ class GeminiClient:
             chat.send_message(f"[SYSTEM INSTRUCTION: {system_instruction}]")
             return chat
         return model.start_chat(history=[])
-    
+
     async def chat_message(
         self,
         chat_session: genai.ChatSession,
@@ -249,17 +248,17 @@ class GeminiClient:
             generation_config=self._build_generation_config(),
         )
         return self._parse_response(response)
-    
+
     def _parse_response(self, raw_response: Any) -> GeminiResponse:
         """Parse raw Gemini response."""
         usage = getattr(raw_response, "usage_metadata", None)
         tokens_input = getattr(usage, "prompt_token_count", 0) if usage else 0
         tokens_output = getattr(usage, "candidates_token_count", 0) if usage else 0
-        
+
         finish_reason = "STOP"
         if raw_response.candidates:
             finish_reason = str(raw_response.candidates[0].finish_reason)
-        
+
         text = ""
         try:
             text = raw_response.text
@@ -268,7 +267,7 @@ class GeminiClient:
                 text = str(raw_response.candidates[0].content.parts)
             else:
                 text = "[Response blocked or empty]"
-        
+
         return GeminiResponse(
             text=text,
             raw_response=raw_response,
@@ -277,7 +276,7 @@ class GeminiClient:
             model_used=self.model_name,
             finish_reason=finish_reason,
         )
-    
+
     async def embed(self, text: str) -> list[float]:
         """Generate embeddings."""
         embedding_model = "models/embedding-001"
@@ -288,9 +287,9 @@ class GeminiClient:
             task_type="retrieval_document",
         )
         return result["embedding"]
-    
+
     # --- Agent convenience methods ---
-    
+
     async def analyze_code(self, code: str, language: str) -> GeminiResponse:
         """CodeSec agent: Analyze code for vulnerabilities."""
         system = (
@@ -299,7 +298,7 @@ class GeminiClient:
         )
         prompt = f"Language: {language}\n\nCode:\n```\n{code}\n```\n\nProvide findings in structured format."
         return await self.generate(prompt, system_instruction=system)
-    
+
     async def generate_terraform(
         self,
         stack_info: dict,
@@ -323,7 +322,7 @@ class GeminiClient:
             f"Stack details: {json.dumps(stack_info, indent=2)}"
         )
         return await self.generate_structured(prompt, schema, system_instruction=system)
-    
+
     async def estimate_cost(
         self,
         terraform_code: str,
@@ -354,7 +353,7 @@ class GeminiClient:
             f"Use AWS pricing knowledge (not actual API call).\n\n```hcl\n{terraform_code}\n```"
         )
         return await self.generate_structured(prompt, schema)
-    
+
     async def orchestrate_chat(
         self,
         user_message: str,
@@ -367,20 +366,20 @@ class GeminiClient:
             "repository analysis, security findings, infrastructure choices, and costs. "
             "Be concise, technical but accessible. Use job context."
         )
-        
+
         context_str = json.dumps(job_context, indent=2)
         history_str = "\n".join([
             f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
             for msg in chat_history[-5:]
         ])
-        
+
         prompt = (
             f"Current job context:\n{context_str}\n\n"
             f"Chat history:\n{history_str}\n\n"
             f"User: {user_message}\n\n"
             f"Respond helpfully using the job context."
         )
-        
+
         return await self.generate(prompt, system_instruction=system)
 
 _gemini_client: Optional[GeminiClient] = None

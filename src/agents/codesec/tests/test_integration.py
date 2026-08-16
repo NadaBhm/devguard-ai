@@ -1,4 +1,3 @@
-"""Integration tests for CodeSec Agent end-to-end workflows."""
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -23,8 +22,6 @@ from codesec.models import (
 
 
 class TestEndToEndAnalysis:
-    """Test complete analysis workflow."""
-
     @patch("codesec.agent.CodeSecAgent._clone_repo")
     @patch("codesec.agent.run_sast")
     @patch("codesec.agent.run_secrets_scan")
@@ -38,7 +35,6 @@ class TestEndToEndAnalysis:
         self, mock_score, mock_stack, mock_sbom, mock_docker,
         mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
     ):
-        """Test complete analysis pipeline from URL to result."""
         clone_dir = tmp_path / "cloned"
         clone_dir.mkdir()
         (clone_dir / "README.md").write_text("# Test")
@@ -95,7 +91,6 @@ class TestEndToEndAnalysis:
         self, mock_score, mock_stack, mock_sbom, mock_docker,
         mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
     ):
-        """Test analysis of a perfect repo with no issues."""
         clone_dir = tmp_path / "cloned"
         clone_dir.mkdir()
         mock_clone.return_value = clone_dir
@@ -127,7 +122,6 @@ class TestEndToEndAnalysis:
         self, mock_score, mock_stack, mock_sbom, mock_docker,
         mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
     ):
-        """Test analysis of a high-risk repo."""
         clone_dir = tmp_path / "cloned"
         clone_dir.mkdir()
         mock_clone.return_value = clone_dir
@@ -161,10 +155,7 @@ class TestEndToEndAnalysis:
 
 
 class TestResultSerialization:
-    """Test result serialization."""
-
     def test_result_json_serialization(self):
-        """Test that results can be serialized to JSON."""
         result = CodeSecResult(
             job_id="test-job",
             status="completed",
@@ -182,7 +173,6 @@ class TestResultSerialization:
         assert parsed["status"] == "completed"
 
     def test_result_dict_conversion(self):
-        """Test that results can be converted to dict."""
         result = CodeSecResult(
             job_id="test-job",
             status="completed",
@@ -198,10 +188,7 @@ class TestResultSerialization:
 
 
 class TestCleanup:
-    """Test cleanup after analysis."""
-
     def test_temp_directory_cleanup(self, tmp_path: Path):
-        """Test that temporary clone directory is cleaned up."""
         temp_dir = tmp_path / "temp_clone"
         temp_dir.mkdir()
         (temp_dir / "file.txt").write_text("test")
@@ -214,8 +201,6 @@ class TestCleanup:
 
 
 class TestErrorHandling:
-    """Test error handling scenarios."""
-
     @pytest.mark.asyncio
     async def test_invalid_url(self):
         agent = CodeSecAgent()
@@ -223,8 +208,33 @@ class TestErrorHandling:
         assert result.status == "failed"
         assert result.error is not None
 
+    @patch("codesec.agent.CodeSecAgent._clone_repo")
+    @patch("codesec.agent.run_sast")
+    @patch("codesec.agent.run_secrets_scan")
+    @patch("codesec.agent.run_dependency_scan")
+    @patch("codesec.agent.run_dockerfile_scan")
+    @patch("codesec.agent.generate_sbom")
+    @patch("codesec.agent.detect_stack")
+    @patch("codesec.agent.calculate_score")
     @pytest.mark.asyncio
-    async def test_non_github_url(self):
+    async def test_gitlab_url_is_supported(
+        self, mock_score, mock_stack, mock_sbom, mock_docker,
+        mock_deps, mock_secrets, mock_sast, mock_clone, tmp_path: Path
+    ):
+        clone_dir = tmp_path / "gitlab_repo"
+        clone_dir.mkdir()
+        mock_clone.return_value = clone_dir
+
+        mock_sast.return_value = []
+        mock_secrets.return_value = []
+        mock_deps.return_value = DependenciesResult(total_packages=1, vulnerable_packages=[])
+        mock_docker.return_value = []
+        mock_sbom.return_value = SBOM(serial_number="urn:uuid:test")
+        mock_stack.return_value = StackDetection(primary_language="python", confidence=0.9)
+        mock_score.return_value = SecurityScore(score=96, grade=Grade.A)
+
         agent = CodeSecAgent()
         result = await agent.analyze("https://gitlab.com/owner/repo")
-        assert result.status == "failed"
+
+        assert result.status in ["completed", "completed_with_errors"]
+        assert result.repo_url == "https://gitlab.com/owner/repo"

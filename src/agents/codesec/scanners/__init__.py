@@ -1,6 +1,5 @@
 """
 CodeSec Scanners Package
-=========================
 Contains all security scanning modules for the CodeSec agent.
 Each scanner returns a standardized internal result that agent.py aggregates
 into the final CodeSecResult schema.
@@ -38,7 +37,7 @@ def run_subprocess(
     Execute a subprocess command safely with timeout and error handling.
 
     Security: Never passes shell=True. All arguments are passed as a list
-    to prevent shell injection. citespec-NFR-security
+    to prevent shell injection.
     """
     logger.debug("Running command: %s (cwd=%s, timeout=%d)", " ".join(cmd), cwd, timeout)
     try:
@@ -66,10 +65,7 @@ class ScannerError(Exception):
 
 
 def find_files(repo_path: Path, patterns: tuple[str, ...], exclude: tuple[str, ...] = ()) -> list[Path]:
-    """
-    Recursively find files in repo_path matching any of the given patterns,
-    excluding paths that match any exclude pattern.
-    """
+    """Recursively find files in repo_path matching any of the given patterns, excluding paths that match any exclude pattern."""
     matched: list[Path] = []
     for root, _dirs, files in os.walk(repo_path):
         root_path = Path(root)
@@ -90,7 +86,7 @@ def find_files(repo_path: Path, patterns: tuple[str, ...], exclude: tuple[str, .
 def read_file_safe(file_path: Path, max_size_mb: int = 10) -> str | None:
     """
     Safely read a file with size limits. Returns None if unreadable.
-    Prevents memory exhaustion from huge files. citespec-NFR-security
+    Prevents memory exhaustion from huge files.
     """
     try:
         size = file_path.stat().st_size

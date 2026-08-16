@@ -1,5 +1,3 @@
-"""Tests for core.finops_optimizer."""
-
 import json
 from pathlib import Path
 
@@ -18,19 +16,13 @@ def _load_analysis(filename: str) -> RepoAnalysisInput:
     return RepoAnalysisInput.model_validate(raw)
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "filename",
     ["sample_input.json", "sample_input_variant_node_ecs.json"],
 )
 def test_ecs_with_compose_and_scaling_recommends_spot(filename: str) -> None:
-    """Both fixtures have compose_detected=true, but they DO scale
-    horizontally (module 5 grows task_count with load) — so Spot is safe,
-    despite sharing no framework name in common (FastAPI vs Express)."""
+    """Both fixtures have compose_detected=true but DO scale horizontally
+    (module 5 grows task_count with load) — so Spot is safe."""
     analysis = _load_analysis(filename)
     decision = decide_architecture(analysis)
     rec = optimize_finops(analysis, decision)
@@ -62,11 +54,6 @@ def test_lambda_recommends_reserved_concurrency() -> None:
     assert rec.discarded[0].name == "no_concurrency_limit"
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "compose_detected,horizontal_scaling,expected_safe",
     [
@@ -83,11 +70,9 @@ def test_is_spot_safe_truth_table(
 
 
 def test_spot_forbidden_when_only_one_replica_at_lowest_traffic() -> None:
-    """A task sized just large enough to still "scale" between 1K and 100K
-    users (so the old rule alone would allow it), but running a single
-    replica at the lowest traffic level — exposed exactly when traffic is
-    quiet. compose_detected is False here, proving this is a genuinely new
-    protection, not a restatement of the mission's compose+no-scaling rule."""
+    """Single replica at the lowest traffic level, despite sizing that
+    "scales" between 1K-100K users. compose_detected=False proves this is a
+    genuinely new protection, not the mission's compose+no-scaling rule."""
     raw = json.loads((FIXTURES_DIR / "sample_input.json").read_text(encoding="utf-8"))
     raw["stack_detection"]["container"]["compose_detected"] = False
     analysis = RepoAnalysisInput.model_validate(raw)
@@ -99,7 +84,7 @@ def test_spot_forbidden_when_only_one_replica_at_lowest_traffic() -> None:
 
     rec = optimize_finops(analysis, decision)
 
-    assert rec.context["horizontal_scaling_detected"] is True  # old rule alone would allow spot
+    assert rec.context["horizontal_scaling_detected"] is True
     assert rec.context["has_redundancy_at_low_traffic"] is False
     assert rec.recommended.name != "spot"
     spot_discarded = next(d for d in rec.discarded if d.name == "spot")
@@ -107,7 +92,7 @@ def test_spot_forbidden_when_only_one_replica_at_lowest_traffic() -> None:
 
 
 def test_ecs_forbids_spot_when_compose_and_no_scaling(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The mission's one hard rule, forced deterministically: compose_detected
+    """The mission's hard rule, forced deterministically: compose_detected
     stays true (from the fixture) but scaling is monkeypatched to false."""
     monkeypatch.setattr(finops_optimizer, "_detects_horizontal_scaling", lambda decision: False)
     analysis = _load_analysis("sample_input.json")
@@ -126,9 +111,9 @@ def test_ecs_forbids_spot_when_compose_and_no_scaling(monkeypatch: pytest.Monkey
 def test_ec2_forbids_spot_recommends_graviton_instead_of_reserved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unlike ECS, EC2's baseline is NOT Graviton-priced by default (module 2
-    only ever picks x86 instance families) — so when Spot is unsafe, Graviton
-    is a real, additive saving and should win over jumping straight to Reserved."""
+    """EC2's baseline is NOT Graviton-priced (module 2 only picks x86) — so
+    when Spot is unsafe, Graviton is a real, additive saving and should win
+    over jumping straight to Reserved."""
     monkeypatch.setattr(finops_optimizer, "_detects_horizontal_scaling", lambda decision: False)
     raw = json.loads((FIXTURES_DIR / "sample_input.json").read_text(encoding="utf-8"))
     raw["stack_detection"]["container"]["compose_detected"] = True
@@ -146,19 +131,14 @@ def test_ec2_forbids_spot_recommends_graviton_instead_of_reserved(
 
 
 def test_detects_horizontal_scaling_false_for_oversized_task() -> None:
-    """A task sized so large that even 100K users fits in one replica ->
-    no scaling detected, proving this is computed from module 5, not fixed."""
+    """A task so large that even 100K users fits in one replica -> no scaling
+    detected; computed from module 5, not fixed."""
     decision = DecisionResult(
         compute_type="ecs",
         sizing={"task_cpu": "204800", "task_memory": "409600"},
         score_breakdown={"ecs": 1.0, "lambda": 0.0, "ec2": 0.0},
     )
     assert finops_optimizer._detects_horizontal_scaling(decision) is False
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_unknown_compute_type_raises_key_error() -> None:

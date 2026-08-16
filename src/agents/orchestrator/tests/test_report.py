@@ -1,6 +1,5 @@
 """
 Tests for report.py (T-3.12 / US-2.2.6)
-Place dans: src/agents/orchestrator/tests/test_report.py
 
 US-2.2.6 requires "PDF/HTML with all agent results, architecture diagram,
 and cost breakdown", in under 10 seconds (NFR).
@@ -8,8 +7,6 @@ and cost breakdown", in under 10 seconds (NFR).
 PDF assertions are conditional: WeasyPrint binds to system libraries
 (cairo, pango) that are absent on several of the team's machines, so the
 suite must pass with or without a working PDF backend.
-
-Lancer avec: pytest depuis la racine du repo.
 """
 
 import pytest
@@ -74,7 +71,6 @@ class TestArchitectureDiagram:
 class TestTemplateContext:
     def test_aggregates_all_finding_types(self, completed_state):
         ctx = build_template_context(completed_state)
-        # 12 sast + 2 secrets + 1 dependency + 3 dockerfile
         assert ctx["total_findings"] == 18
 
     def test_carries_security_score(self, completed_state):
@@ -90,8 +86,8 @@ class TestTemplateContext:
     def test_merges_security_and_finops_recommendations(self, completed_state):
         ctx = build_template_context(completed_state)
         joined = " ".join(ctx["recommendations"])
-        assert "SQL injection" in joined      # from CodeSec
-        assert "Graviton" in joined           # from InfraCost optimizations
+        assert "SQL injection" in joined
+        assert "Graviton" in joined
 
     def test_records_approval_trail(self, completed_state):
         ctx = build_template_context(completed_state)
@@ -119,13 +115,12 @@ class TestHtmlRendering:
         assert "</html>" in out
 
     def test_contains_every_required_section(self, completed_state):
-        """US-2.2.6: "all agent results, architecture diagram, cost breakdown"."""
         out = render_html(completed_state)
         assert "Security analysis" in out
         assert "Cost estimate" in out
         assert "Deployment" in out
-        assert "<svg" in out                 # architecture diagram
-        assert "ECS Fargate" in out          # cost breakdown line
+        assert "<svg" in out
+        assert "ECS Fargate" in out
         assert "145.32" in out
 
     def test_never_prints_secret_values(self, completed_state):
@@ -201,7 +196,13 @@ class TestGenerateReport:
         assert result["pdf_path"] is None
 
     def test_pdf_when_the_backend_supports_it(self, completed_state, tmp_path):
-        pytest.importorskip("weasyprint")
+        # WeasyPrint may raise ImportError or OSError if native libs (cairo,
+        # pango) are missing on the host. Treat either as a skip so CI can
+        # run on machines without the full PDF toolchain.
+        try:
+            pytest.importorskip("weasyprint")
+        except OSError as exc:  # missing native shared libs
+            pytest.skip(f"weasyprint not available: {exc}")
         result = generate_report(completed_state, output_dir=tmp_path)
         if "pdf" in result["formats_available"]:
             assert (tmp_path / f"report-{completed_state['job_id']}.pdf").exists()

@@ -1,6 +1,5 @@
 """
 CodeSec SAST Scanner
-=====================
 Runs static analysis for OWASP Top 10 vulnerabilities using Semgrep
 (with Bandit fallback), parses output, and maps findings to OWASP/CWE categories.
 
@@ -15,7 +14,6 @@ Technology Decision (ADR):
   Python-only repos when Semgrep is unavailable.
 - Not chosen: CodeQL — higher accuracy (F1 74.4%) but requires complex setup,
   GitHub dependency, and is slower. Overkill for our 5-minute pipeline target.
-
 """
 
 from __future__ import annotations

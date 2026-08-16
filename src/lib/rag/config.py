@@ -1,8 +1,3 @@
-"""
-RAG Configuration
-==================
-"""
-
 from __future__ import annotations
 
 import os
@@ -15,34 +10,27 @@ from typing import Final
 DEFAULT_QDRANT_URL: Final[str] = "http://localhost:6333"
 DEFAULT_QDRANT_COLLECTION: Final[str] = "devguard_repos"
 
-# Hugging Face embeddings (local, free)
 DEFAULT_HF_MODEL: Final[str] = "BAAI/bge-large-en-v1.5"
-DEFAULT_EMBEDDING_DIM: Final[int] = 1024  # FIX: bge-large = 1024
+DEFAULT_EMBEDDING_DIM: Final[int] = 1024
 
-# Gemini LLM (free tier)
-DEFAULT_GEMINI_MODEL: Final[str] = "gemini-flash-latest"  # FIX: alias stable
+DEFAULT_GEMINI_MODEL: Final[str] = "gemini-flash-latest"
 
-# Chunking
 DEFAULT_CHUNK_SIZE: Final[int] = 1000
 DEFAULT_CHUNK_OVERLAP: Final[int] = 200
 
 
 @dataclass(frozen=True)
 class RAGConfig:
-    """RAG pipeline configuration."""
 
     qdrant_url: str = DEFAULT_QDRANT_URL
     qdrant_collection: str = DEFAULT_QDRANT_COLLECTION
 
-    # Hugging Face embeddings
     hf_model: str = DEFAULT_HF_MODEL
     embedding_dim: int = DEFAULT_EMBEDDING_DIM
 
-    # Gemini LLM
     gemini_api_key: str | None = field(default=None)
     gemini_model: str = DEFAULT_GEMINI_MODEL
 
-    # Chunking
     chunk_size: int = DEFAULT_CHUNK_SIZE
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP
 

@@ -1,8 +1,5 @@
-"""Tests for core.llm_architecture_advisor.
-
-core.llm_provider.call_llm is always monkeypatched here — no test reaches
-OpenRouter for real. The focus of this file is the validation/fallback
-contract: the LLM may only ever select one of the three known compute
+"""call_llm is always monkeypatched here — no test reaches OpenRouter for
+real. Contract: the LLM may only select one of the three known compute
 types, never invent sizing, and any failure mode falls back to
 decide_architecture()'s deterministic result.
 """
@@ -37,11 +34,6 @@ def _patch_call_llm(monkeypatch: pytest.MonkeyPatch, return_value: Any) -> None:
         monkeypatch.setattr(
             "core.llm_architecture_advisor.call_llm", lambda *args, **kwargs: return_value
         )
-
-
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
 
 
 def test_llm_choice_is_used_when_valid_and_differs_from_deterministic(
@@ -98,11 +90,6 @@ def test_repo_context_is_included_in_the_prompt(monkeypatch: pytest.MonkeyPatch)
     assert "port 8000" in captured["prompt"]
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases -- every one of these must fall back deterministically
-# --------------------------------------------------------------------------
-
-
 def test_falls_back_when_call_llm_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     analysis = _load_analysis("sample_input.json")
     deterministic = decide_architecture(analysis)
@@ -153,11 +140,6 @@ def test_falls_back_when_reasoning_field_is_missing(monkeypatch: pytest.MonkeyPa
 
     assert result.decision_source == "deterministic"
     assert result.compute_type == deterministic.compute_type
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_falls_back_when_response_is_a_json_array_not_an_object(

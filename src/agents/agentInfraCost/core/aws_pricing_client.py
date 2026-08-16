@@ -60,7 +60,7 @@ _cache: dict[str, Any] = {"data": None, "fetched_at": 0.0}
 
 
 class AwsPricingFetchError(Exception):
-    """A specific live price point could not be parsed from AWS's response."""
+    pass
 
 
 def _get_pricing_client() -> Any:

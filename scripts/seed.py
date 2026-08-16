@@ -141,7 +141,6 @@ AGENT_NAMES = ["codesec", "infracost", "deployops"]
 
 
 def random_datetime_within(days_back: int = 30) -> datetime:
-    """Random datetime within the last N days."""
     now = datetime.now(timezone.utc)
     delta = timedelta(
         days=random.randint(0, days_back),
@@ -153,12 +152,10 @@ def random_datetime_within(days_back: int = 30) -> datetime:
 
 
 def weighted_choice(choices: list, weights: list):
-    """Return a random choice based on weights."""
     return random.choices(choices, weights=weights, k=1)[0]
 
 
 def get_or_create_system_user(db: Session) -> models.User:
-    """Get or create the system user for seeding."""
     user = db.query(models.User).filter(models.User.email == "system@devguard.ai").first()
     if user:
         return user
@@ -182,7 +179,6 @@ def clear_all_data(db: Session):
     """Delete all seeded data (in dependency order)."""
     print("Clearing existing data...")
     
-    # Delete in reverse dependency order
     db.query(models.Notification).delete()
     db.query(models.CostAlert).delete()
     db.query(models.Deployment).delete()
@@ -198,7 +194,6 @@ def clear_all_data(db: Session):
 
 
 def seed_projects(db: Session, user: models.User, count: int) -> list[models.Project]:
-    """Seed projects."""
     print(f"Seeding {count} projects...")
     projects = []
     
@@ -230,7 +225,6 @@ def seed_projects(db: Session, user: models.User, count: int) -> list[models.Pro
 
 
 def seed_runs(db: Session, projects: list[models.Project], user: models.User, runs_per_project: int) -> list[models.AnalysisRun]:
-    """Seed analysis runs for each project."""
     print(f"Seeding {runs_per_project} runs per project ({len(projects)} projects)...")
     runs = []
     
@@ -288,7 +282,6 @@ def seed_runs(db: Session, projects: list[models.Project], user: models.User, ru
 
 
 def seed_agent_tasks(db: Session, runs: list[models.AnalysisRun]):
-    """Seed agent tasks for each run."""
     print(f"Seeding agent tasks for {len(runs)} runs...")
     count = 0
     
@@ -318,7 +311,6 @@ def seed_agent_tasks(db: Session, runs: list[models.AnalysisRun]):
 
 
 def seed_findings(db: Session, runs: list[models.AnalysisRun]):
-    """Seed CodeSec findings for completed runs."""
     print(f"Seeding findings for completed runs...")
     count = 0
     
@@ -326,7 +318,6 @@ def seed_findings(db: Session, runs: list[models.AnalysisRun]):
         if run.status != "completed":
             continue
         
-        # Random number of findings (5-30)
         num_findings = random.randint(5, 30)
         
         for _ in range(num_findings):
@@ -361,7 +352,6 @@ def seed_findings(db: Session, runs: list[models.AnalysisRun]):
 
 
 def seed_cost_estimates(db: Session, runs: list[models.AnalysisRun]):
-    """Seed Infracost estimates for completed runs."""
     print(f"Seeding cost estimates for completed runs...")
     count = 0
     
@@ -371,7 +361,6 @@ def seed_cost_estimates(db: Session, runs: list[models.AnalysisRun]):
         
         architecture = random.choice(ARCHITECTURES)
         
-        # Cost breakdown based on architecture
         if architecture == "ecs_fargate":
             breakdown = [
                 {"service": "ECS Fargate", "monthly_cost_usd": round(random.uniform(50, 200), 2)},
@@ -430,7 +419,6 @@ def seed_cost_estimates(db: Session, runs: list[models.AnalysisRun]):
 
 
 def seed_terraform_artifacts(db: Session, runs: list[models.AnalysisRun]):
-    """Seed Terraform artifacts for completed runs."""
     print(f"Seeding Terraform artifacts for completed runs...")
     count = 0
     
@@ -508,7 +496,6 @@ output "service_name" {{
 
 
 def seed_deployments(db: Session, runs: list[models.AnalysisRun]):
-    """Seed deployments for completed runs."""
     print(f"Seeding deployments for completed runs...")
     count = 0
     
@@ -561,13 +548,11 @@ def seed_deployments(db: Session, runs: list[models.AnalysisRun]):
 
 
 def seed_notifications(db: Session, runs: list[models.AnalysisRun], user: models.User):
-    """Seed notifications for runs."""
     print(f"Seeding notifications...")
     count = 0
     
     for run in runs:
         if run.status == "completed":
-            # Security findings notification
             if random.random() > 0.3:
                 notif = models.Notification(
                     user_id=user.id,
@@ -583,7 +568,6 @@ def seed_notifications(db: Session, runs: list[models.AnalysisRun], user: models
                 db.add(notif)
                 count += 1
             
-            # Deployment notification
             deployment = db.query(models.Deployment).filter(models.Deployment.run_id == run.id).first()
             if deployment:
                 notif = models.Notification(
@@ -618,7 +602,6 @@ def seed_notifications(db: Session, runs: list[models.AnalysisRun], user: models
 
 
 def seed_cost_alerts(db: Session, runs: list[models.AnalysisRun], user: models.User):
-    """Seed cost alerts for runs with deployments."""
     print(f"Seeding cost alerts...")
     count = 0
     
@@ -657,7 +640,6 @@ def seed_cost_alerts(db: Session, runs: list[models.AnalysisRun], user: models.U
 
 
 def print_summary(db: Session):
-    """Print a summary of seeded data."""
     print("\n" + "=" * 50)
     print("SEEDING SUMMARY")
     print("=" * 50)
@@ -678,7 +660,6 @@ def print_summary(db: Session):
     for name, count in counts.items():
         print(f"   {name:20s}: {count}")
     
-    # Run status breakdown
     print("\n   Run Statuses:")
     for status in ["queued", "running", "completed", "failed", "rejected"]:
         count = db.query(models.AnalysisRun).filter(models.AnalysisRun.status == status).count()
@@ -701,7 +682,6 @@ def main():
     print("DevGuard AI Database Seeder")
     print("=" * 50)
     
-    # Initialize database
     init_db()
     db = SessionLocal()
     
@@ -725,7 +705,6 @@ def main():
             seed_notifications(db, runs, user)
             seed_cost_alerts(db, runs, user)
         else:
-            # Full seed
             projects = seed_projects(db, user, args.projects)
             runs = seed_runs(db, projects, user, args.runs_per_project)
             seed_agent_tasks(db, runs)

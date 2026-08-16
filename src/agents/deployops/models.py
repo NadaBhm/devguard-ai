@@ -36,7 +36,6 @@ class TerraformArtifacts(BaseModel):
 
 
 class Artifacts(BaseModel):
-    """All artifacts """
     terraform: TerraformArtifacts
     docker_images: List[DockerImageConfig] = Field(default_factory=list)
 
@@ -47,6 +46,7 @@ class AWSConfig(BaseModel):
     target_account_id: Optional[str] = None
     ecs_cluster: Optional[str] = None
     service_name: Optional[str] = None
+    bucket_name: Optional[str] = None
 
 
 class DeploymentConfig(BaseModel):
@@ -67,13 +67,13 @@ class Approval(BaseModel):
 
 
 class DeployPayload(BaseModel):
-    """Simple deployment payload ,just artifacts + config."""
     job_id: str
     artifacts: Artifacts
     aws_config: AWSConfig = Field(default_factory=AWSConfig)
     deployment_config: DeploymentConfig = Field(default_factory=DeploymentConfig)
     approval: Approval = Field(default_factory=Approval)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    compute_type: str = "ecs"
 
 
 class RollbackRequest(BaseModel):

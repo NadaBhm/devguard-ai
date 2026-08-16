@@ -1,4 +1,3 @@
-"""Tests for Gemini LLM integration."""
 from unittest.mock import MagicMock, patch
 
 import pytest

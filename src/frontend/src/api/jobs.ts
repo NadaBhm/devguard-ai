@@ -50,6 +50,25 @@ export interface ArtifactsEditResponse {
 
 export const jobsApi = {
   create: (body: JobCreate) => client.post<JobResponse>("/jobs/", body),
+  upload: (formData: FormData) => fetch(`/api/jobs/upload`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${localStorage.getItem("access_token") ?? ""}`,
+    },
+    body: formData,
+  }).then(async (res) => {
+    if (!res.ok) {
+      let detail = res.statusText
+      try {
+        const body = (await res.json()) as { detail?: string }
+        if (typeof body.detail === "string") detail = body.detail
+      } catch {
+        // ignore invalid JSON responses
+      }
+      throw new Error(detail)
+    }
+    return res.json() as Promise<JobResponse>
+  }),
   list: () => client.get<JobListResponse>("/jobs/"),
   get: (jobId: string) => client.get<JobDetail>(`/jobs/${jobId}`),
   approve: (jobId: string, body: ApproveRequest) => client.post<JobResponse>(`/jobs/${jobId}/approve`, body),

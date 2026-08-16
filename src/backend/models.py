@@ -126,7 +126,7 @@ class User(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
     email = Column(String, unique=True, nullable=False, index=True)
     username = Column(String(50), unique=True, nullable=True, index=True)
-    hashed_password = Column(String, nullable=False)  # FIX: renamed from 'password'
+    hashed_password = Column(String, nullable=False)
     is_verified = Column(Boolean, nullable=False, default=True)
     first_name = Column(String, nullable=False)
     last_name = Column(String, nullable=False)
@@ -135,7 +135,6 @@ class User(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     deleted_at = Column(DateTime, nullable=True)
 
-    # Relationships
     projects = relationship("Project", back_populates="owner", cascade="all, delete-orphan")
     triggered_runs = relationship("AnalysisRun", back_populates="triggered_by_user", foreign_keys="AnalysisRun.triggered_by")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
@@ -155,7 +154,6 @@ class Project(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     is_active = Column(Boolean, nullable=False, default=True)
 
-    # Relationships
     owner = relationship("User", back_populates="projects")
     analysis_runs = relationship("AnalysisRun", back_populates="project", cascade="all, delete-orphan")
     cost_alerts = relationship("CostAlert", back_populates="project", cascade="all, delete-orphan")
@@ -173,9 +171,8 @@ class AnalysisRun(Base):
     started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
     duration_seconds = Column(Integer, nullable=True)
-    run_metadata = Column("run_metadata", Json, nullable=True)  # FIX: JSON instead of JSONB
+    run_metadata = Column("run_metadata", Json, nullable=True)
 
-    # Relationships
     project = relationship("Project", back_populates="analysis_runs")
     triggered_by_user = relationship("User", back_populates="triggered_runs", foreign_keys=[triggered_by])
     agent_tasks = relationship("AgentTask", back_populates="run", cascade="all, delete-orphan")
@@ -199,9 +196,8 @@ class AgentTask(Base):
     finished_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, nullable=False, default=0)
-    raw_result = Column(Json, nullable=True)  # FIX: JSON instead of JSONB
+    raw_result = Column(Json, nullable=True)
 
-    # Relationships
     run = relationship("AnalysisRun", back_populates="agent_tasks")
 
     __table_args__ = (
@@ -229,10 +225,9 @@ class CodeSecFinding(Base):
     rule_title = Column(String, nullable=False)
     description = Column(Text, nullable=False)
     remediation_hint = Column(Text, nullable=True)
-    raw_json = Column(Json, nullable=True)  # FIX: JSON instead of JSONB
+    raw_json = Column(Json, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    # Relationships
     run = relationship("AnalysisRun", back_populates="codesec_findings")
 
     __table_args__ = (
@@ -263,7 +258,6 @@ class InfracostEstimate(Base):
     confidence_level = Column(String(50), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    # Relationships
     run = relationship("AnalysisRun", back_populates="infracost_estimates")
 
     __table_args__ = (
@@ -288,7 +282,6 @@ class TerraformArtifact(Base):
     edited_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    # Relationships
     run = relationship("AnalysisRun", back_populates="terraform_artifacts")
 
     __table_args__ = (
@@ -316,7 +309,6 @@ class Deployment(Base):
     cost_total_monthly = Column(Numeric(12, 2), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
-    # Relationships
     run = relationship("AnalysisRun", back_populates="deployments")
 
     __table_args__ = (
@@ -348,7 +340,6 @@ class Notification(Base):
     read_at = Column(DateTime, nullable=True)
     dismissed_at = Column(DateTime, nullable=True)
 
-    # Relationships
     user = relationship("User", back_populates="notifications")
     run = relationship("AnalysisRun", back_populates="notifications")
     related_finding = relationship("CodeSecFinding")
@@ -382,7 +373,6 @@ class CostAlert(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
 
-    # Relationships
     run = relationship("AnalysisRun", back_populates="cost_alerts")
     project = relationship("Project", back_populates="cost_alerts")
     user = relationship("User", back_populates="cost_alerts")

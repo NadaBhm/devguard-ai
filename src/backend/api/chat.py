@@ -2,21 +2,13 @@
 Chat API - wired to the orchestrator's chat module (T-3.10 / T-3.11).
 
 FIXED (2026-08-09): this router used to call lib.rag.retrieval.ask_repo()
-directly, completely bypassing src/agents/orchestrator/chat.py. That meant:
-  - No conversation memory (T-3.11): every question started from scratch.
-  - No job context (T-3.10 / US-2.2.5): the LLM never saw the security
-    score, cost estimate, or deployment status - only repo excerpts.
-  - The isinstance(result, tuple) branch below was also always False
-    (ask_repo returns a plain string, never a tuple), so `sources` was
-    always [] regardless of what the RAG actually retrieved.
+directly, bypassing src/agents/orchestrator/chat.py: no conversation memory,
+no job context, and `sources` was always [] because ask_repo never returns a
+tuple.
 
-Now this router:
-  1. Loads the persisted orchestrator state for the job (same run_metadata
-     jobs.py writes via persistence.update_run_state), so the chat has the
-     same job context (security score, cost, deployment status) the
-     dashboard would show.
-  2. Calls the orchestrator's chat() function, which combines that context
-     with Nada's RAG retrieval and this job's conversation history.
+Now it loads the persisted orchestrator state for the job and calls the
+orchestrator's chat(), which combines that job context with Nada's RAG
+retrieval and this job's conversation history.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -47,12 +39,10 @@ class IngestRequest(BaseModel):
 
 
 def _load_job_state(job_id: str, db: Session, user_id: str) -> dict | None:
-    """
-    Reconstruct the orchestrator state chat() needs (codesec_result,
-    infracost_result, deployops_result, status) from the persisted
-    AnalysisRun row, scoped to the requesting user. Returns None if the
-    job doesn't exist (or isn't the user's) - chat() handles that fine
-    (falls back to RAG-only answers).
+    """Return the persisted AnalysisRun.run_metadata, scoped to the user.
+
+    Returns None if the job doesn't exist (or isn't the user's) - chat()
+    falls back to RAG-only answers then.
     """
     run = (
         db.query(models.AnalysisRun)
@@ -73,7 +63,6 @@ async def ask_question(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user),
 ):
-    """Ask a question about an analyzed repository, using job context + RAG + memory."""
     try:
         from src.agents.orchestrator.chat import chat as orchestrator_chat
 
@@ -82,12 +71,11 @@ async def ask_question(
 
         return ChatResponse(
             answer=result["answer"],
-            sources=[],  # TODO: have orchestrator.chat surface retrieved chunk paths here
+            sources=[],
             used_rag=result["used_rag"],
             used_job_context=result["used_job_context"],
         )
     except ValueError as e:
-        # e.g. empty message - a client error, not a server error.
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -98,7 +86,6 @@ async def ingest_repository(
     req: IngestRequest,
     current_user: models.User = Depends(auth.get_current_active_user),
 ):
-    """Ingest a repository into the RAG vector store."""
     try:
         from ...lib.rag.ingestion import ingest_repo
         count = ingest_repo(Path(req.repo_path), req.job_id)

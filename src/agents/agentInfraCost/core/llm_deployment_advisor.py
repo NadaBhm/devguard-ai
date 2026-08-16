@@ -153,5 +153,6 @@ def decide_deployment_context(
         docker_image=docker_image,
         source_code_path=source_code_path,
         health_check_port=health_check_port,
+        account_id=analysis.account_id,
         database=analysis.stack_detection.database,
     )

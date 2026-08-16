@@ -1,14 +1,9 @@
-"""Relevance benchmark tests for RAG.
+"""Relevance benchmark for RAG.
 
-NOTE ON KPI: The spec book (US-1.3.4) targets >70% relevance.
-With local free embeddings (BAAI/bge-large-en-v1.5), realistic scores
-are ~0.63-0.66 on focused repo content. The 0.70 KPI requires:
-  - OpenAI text-embedding-3-small/large (spec book recommendation), OR
-  - Fine-tuned BGE with query expansion / cross-encoder re-ranking
-
-This test validates that:
-  1. Retrieval returns semantically correct chunks (content check)
-  2. Scores are consistently >0.60 (baseline for bge-large)
+US-1.3.4 targets >70% relevance. Local free embeddings (BAAI/bge-large-en-v1.5)
+realistically score ~0.63-0.66, so we assert >0.60. Hitting 0.70 requires OpenAI
+text-embedding-3-small/large or fine-tuned BGE with query expansion /
+cross-encoder re-ranking.
 """
 import uuid
 from pathlib import Path
@@ -22,7 +17,6 @@ from qdrant_client import QdrantClient
 
 
 def _qdrant_available() -> bool:
-    """Check if Qdrant is running locally."""
     try:
         client = QdrantClient(url=RAGConfig().qdrant_url)
         client.get_collections()
@@ -32,7 +26,6 @@ def _qdrant_available() -> bool:
 
 
 def _delete_collection(job_id: str) -> None:
-    """Clean up test collection."""
     try:
         config = RAGConfig()
         client = QdrantClient(url=config.qdrant_url)
@@ -44,7 +37,6 @@ def _delete_collection(job_id: str) -> None:
 
 @pytest.fixture
 def fastapi_repo(tmp_path: Path) -> Path:
-    """Create a realistic FastAPI repo for relevance testing."""
     repo = tmp_path / "fastapi_demo"
     repo.mkdir()
 
@@ -96,10 +88,7 @@ def fastapi_repo(tmp_path: Path) -> Path:
 
 @pytest.mark.skipif(not _qdrant_available(), reason="Qdrant not running")
 class TestRelevanceBenchmark:
-    """Benchmark semantic relevance for RAG retrieval."""
-
     def test_relevance_fastapi_framework(self, fastapi_repo: Path):
-        """Framework query should return FastAPI content with strong relevance."""
         job_id = f"bench-fw-{uuid.uuid4().hex[:8]}"
         config = RAGConfig(
             hf_model="BAAI/bge-large-en-v1.5",
@@ -131,7 +120,6 @@ class TestRelevanceBenchmark:
             _delete_collection(job_id)
 
     def test_relevance_database_detection(self, fastapi_repo: Path):
-        """Database query should return PostgreSQL content with strong relevance."""
         job_id = f"bench-db-{uuid.uuid4().hex[:8]}"
         config = RAGConfig(
             hf_model="BAAI/bge-large-en-v1.5",

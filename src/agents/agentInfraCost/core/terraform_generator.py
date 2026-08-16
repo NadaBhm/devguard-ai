@@ -21,6 +21,7 @@ from core.constants import (
     EC2_AMI_ID,
     EC2_INSTANCE_COUNT,
     EC2_INSTANCE_NAME,
+    EC2_INSTANCE_PORT,
     EC2_KEY_PAIR_NAME,
     ECS_CLUSTER_NAME,
     unique_resource_name,
@@ -32,6 +33,9 @@ from core.constants import (
     LAMBDA_HANDLER,
     LAMBDA_RUNTIME,
     LAMBDA_TIMEOUT_SECONDS,
+    S3_BUCKET_PREFIX,
+    S3_ERROR_DOCUMENT,
+    S3_INDEX_DOCUMENT,
 )
 from core.decision_engine import DecisionResult
 from models.output_schema import TerraformFiles
@@ -48,12 +52,10 @@ _ENV: Final[Environment] = Environment(
 
 _TEMPLATE_FILENAMES: Final[tuple[str, ...]] = ("main.tf", "variables.tf", "outputs.tf")
 
-# --------------------------------------------------------------------------
 # Conventions used to fill in template variables that module 2 does not
 # decide (naming, ports, IAM role shape, ...). Single source of truth:
-# ``core/constants.py`` — module 7 (output_builder) imports the same values
+# core/constants.py — module 7 (output_builder) imports the same values
 # so the JSON contract and the rendered Terraform can never drift.
-# --------------------------------------------------------------------------
 
 
 class TerraformContext(BaseModel):
@@ -78,6 +80,7 @@ class TerraformContext(BaseModel):
     container's containerPort and the ALB target group, so nothing ever
     answered on 8080 and the health check failed with 502 on every
     attempt, triggering a full rollback)."""
+    account_id: str | None = None
     database: str | None = None
     """The database engine module 1 detected (e.g. "postgresql"), if any —
     ``analysis.stack_detection.database`` passed straight through. Only used
@@ -130,6 +133,32 @@ def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> 
         "instance_count": EC2_INSTANCE_COUNT,
         "key_pair_name": EC2_KEY_PAIR_NAME,
         "instance_name": EC2_INSTANCE_NAME,
+        "instance_port": EC2_INSTANCE_PORT,
+        "docker_image": context.docker_image or "devguard-app:latest",
+        "ecr_registry_host": _ecr_registry_host(context),
+    }
+
+
+def _ecr_registry_host(context: TerraformContext) -> str:
+    """Extract the ECR registry host (e.g. ``123456.dkr.ecr.us-east-1.amazonaws.com``)
+    from the fully-qualified image string. Fail-soft: if the image has no
+    registry prefix (bare ``name:tag``), fall back to the account-qualified
+    host when ``account_id`` is available on the context, else the region's
+    ECR endpoint with a placeholder account.
+    """
+    image = context.docker_image or ""
+    if "/" in image:
+        return image.split("/", 1)[0]
+    return f"{context.account_id or '000000000000'}.dkr.ecr.{context.region}.amazonaws.com"
+
+
+def _s3_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
+    return {
+        "region": context.region,
+        "environment": context.environment,
+        "bucket_name": f"{S3_BUCKET_PREFIX}-{context.job_id[:32].lower()}",
+        "index_document": S3_INDEX_DOCUMENT,
+        "error_document": S3_ERROR_DOCUMENT,
     }
 
 
@@ -137,6 +166,7 @@ _CONTEXT_BUILDERS = {
     "ecs": _ecs_render_context,
     "lambda": _lambda_render_context,
     "ec2": _ec2_render_context,
+    "s3": _s3_render_context,
 }
 
 

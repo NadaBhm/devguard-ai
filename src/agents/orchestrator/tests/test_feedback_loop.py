@@ -1,16 +1,5 @@
 """
 Tests for the Gate-2 feedback / regeneration loop (Phase 6).
-Place dans: src/agents/orchestrator/tests/test_feedback_loop.py
-
-Covers the end-to-end contract of "Regenerate with feedback" at Gate 2:
-  - route_after_gate_2 three-way routing (approve / reject / loop back)
-  - the regeneration iteration cap (MAX_INFRACOST_ITERATIONS = 3)
-  - human_gate_2_impl recording requested_changes + infracost_feedback
-    (regenerate action hidden once the cap is reached)
-  - infracost_agent_impl appending iteration records and consuming feedback
-  - _mock_infracost_with_feedback producing visibly different results
-
-Lancer avec: pytest depuis la racine du repo.
 """
 
 from datetime import datetime, timezone
@@ -32,7 +21,6 @@ from src.agents.orchestrator.state import OrchestratorState, create_initial_stat
 
 @pytest.fixture
 def state():
-    """A state that has already passed CodeSec and the first InfraCost run."""
     from src.agents.orchestrator.nodes import (
         mock_codesec_agent_impl,
         mock_infracost_agent_impl,
@@ -45,16 +33,10 @@ def state():
 
 
 def _run_gate2_with(approval: dict, state: OrchestratorState) -> OrchestratorState:
-    """Run human_gate_2_impl with interrupt() patched to feed the decision."""
     with patch(
         "src.agents.orchestrator.human_gates.interrupt", return_value=approval
     ):
         return human_gate_2_impl(state)
-
-
-# =============================================================================
-# Three-way routing after Gate 2
-# =============================================================================
 
 
 class TestRouteAfterGate2:
@@ -87,7 +69,6 @@ class TestRouteAfterGate2:
         gate = state["human_gates"]["gate_2_pre_deployops"]
         gate["approved"] = False
         gate["requested_changes"] = "one more try"
-        # MAX rounds already consumed -> must halt, never loop forever.
         state["infracost_iterations"] = [
             {
                 "iteration": i,
@@ -98,11 +79,6 @@ class TestRouteAfterGate2:
             for i in range(1, MAX_INFRACOST_ITERATIONS + 1)
         ]
         assert route_after_gate_2(state) == "end"
-
-
-# =============================================================================
-# human_gate_2_impl recording a regeneration request
-# =============================================================================
 
 
 class TestHumanGate2Regeneration:
@@ -121,7 +97,7 @@ class TestHumanGate2Regeneration:
         assert gate["approved"] is False
         assert gate["requested_changes"] == "switch to lambda"
         assert result["infracost_feedback"] == "switch to lambda"
-        assert result["status"] == "awaiting_approval_gate_2"  # still looping
+        assert result["status"] == "awaiting_approval_gate_2"
 
     def test_regenerate_with_blank_comment_is_recorded_but_empty(self, state):
         result = _run_gate2_with(
@@ -175,10 +151,8 @@ class TestHumanGate2Regeneration:
         assert result["error_log"][0]["node"] == "human_gate_2"
 
     def test_pause_resets_previous_round_decision(self, state):
-        """A re-pause after regeneration must look fresh: the stale round-0
-        decision (approved=False, requested_changes set) is cleared BEFORE
-        interrupt(), so the frontend's pendingGate (approved === null) can
-        find the gate again."""
+        """Stale round-0 decision must be cleared BEFORE interrupt() so frontend
+        pendingGate (approved === null) finds the gate again."""
         gate = state["human_gates"]["gate_2_pre_deployops"]
         gate["approved"] = False
         gate["comment"] = "make it cheaper"
@@ -197,11 +171,6 @@ class TestHumanGate2Regeneration:
         assert gate["approved_at"] is None
         assert gate["approved_by"] is None
         assert gate["requested_changes"] is None
-
-
-# =============================================================================
-# infracost_agent_impl iteration bookkeeping
-# =============================================================================
 
 
 class TestInfracostNodeIterations:
@@ -230,11 +199,6 @@ class TestInfracostNodeIterations:
 
         assert [r["iteration"] for r in result["infracost_iterations"]] == [1, 2]
         assert result["infracost_iterations"][1]["prompt"] == "round two"
-
-
-# =============================================================================
-# Mock feedback determinism (exercised without a real LLM)
-# =============================================================================
 
 
 class TestMockInfracostWithFeedback:

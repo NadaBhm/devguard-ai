@@ -1,6 +1,3 @@
-"""Custom exceptions for DevGuard AI."""
-
-
 class DevGuardError(Exception):
     """Base exception."""
     pass

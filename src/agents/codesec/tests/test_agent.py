@@ -1,4 +1,3 @@
-"""Tests for CodeSec Agent."""
 import asyncio
 import subprocess
 from pathlib import Path
@@ -26,8 +25,6 @@ from codesec.models import (
 
 
 class TestCodeSecAgentInitialization:
-    """Test agent initialization."""
-
     def test_agent_default_init(self):
         agent = CodeSecAgent()
         assert agent.clone_dir.exists()
@@ -37,48 +34,49 @@ class TestCodeSecAgentInitialization:
         assert agent.clone_dir == tmp_path
 
 
-class TestValidateGitHubURL:
-    """Test GitHub URL validation."""
-
-    def test_valid_https_url(self):
+class TestValidateRepoURL:
+    def test_valid_github_https_url(self):
         agent = CodeSecAgent()
-        url = agent._validate_github_url("https://github.com/owner/repo")
+        url = agent._validate_repo_url("https://github.com/owner/repo")
         assert url == "https://github.com/owner/repo"
+
+    def test_valid_gitlab_https_url(self):
+        agent = CodeSecAgent()
+        url = agent._validate_repo_url("https://gitlab.com/owner/repo")
+        assert url == "https://gitlab.com/owner/repo"
 
     def test_valid_url_with_git_suffix(self):
         agent = CodeSecAgent()
-        url = agent._validate_github_url("https://github.com/owner/repo.git")
+        url = agent._validate_repo_url("https://github.com/owner/repo.git")
         assert url == "https://github.com/owner/repo"
 
-    def test_invalid_url_not_github(self):
+    def test_invalid_url_not_github_or_gitlab(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url("https://gitlab.com/owner/repo")
+            agent._validate_repo_url("https://bitbucket.org/owner/repo")
 
     def test_invalid_url_malformed(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url("not-a-url")
+            agent._validate_repo_url("not-a-url")
 
     def test_invalid_url_empty(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url("")
+            agent._validate_repo_url("")
 
     def test_invalid_url_none(self):
         agent = CodeSecAgent()
         with pytest.raises(ValueError):
-            agent._validate_github_url(None)
+            agent._validate_repo_url(None)
 
     def test_url_with_path(self):
         agent = CodeSecAgent()
-        url = agent._validate_github_url("https://github.com/owner/repo/tree/main")
+        url = agent._validate_repo_url("https://github.com/owner/repo/tree/main")
         assert url == "https://github.com/owner/repo/tree/main"
 
 
 class TestCloneRepo:
-    """Test repository cloning."""
-
     @patch("codesec.agent.subprocess.run")
     def test_clone_success(self, mock_run, tmp_path: Path):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -107,8 +105,6 @@ class TestCloneRepo:
 
 
 class TestGetRepoMetadata:
-    """Test metadata extraction."""
-
     def test_metadata_from_repo(self, sample_python_repo: Path):
         agent = CodeSecAgent()
         metadata = agent._get_repo_metadata(sample_python_repo, "https://github.com/test/repo")
@@ -121,8 +117,6 @@ class TestGetRepoMetadata:
 
 
 class TestAnalyze:
-    """Test the main analysis function."""
-
     @patch("codesec.agent.run_sast")
     @patch("codesec.agent.run_secrets_scan")
     @patch("codesec.agent.run_dependency_scan")
@@ -156,8 +150,8 @@ class TestAnalyze:
         assert result.repo_url == "https://github.com/owner/repo"
         assert result.security_score is not None
 
-    @patch("codesec.agent.CodeSecAgent._validate_github_url")
-    @pytest.mark.asyncio 
+    @patch("codesec.agent.CodeSecAgent._validate_repo_url")
+    @pytest.mark.asyncio
     async def test_analyze_invalid_url(self, mock_validate, tmp_path: Path):
         mock_validate.side_effect = ValueError("Invalid URL")
 
@@ -168,8 +162,37 @@ class TestAnalyze:
         assert result.status == "failed"
         assert result.error is not None
 
+    @patch("codesec.agent.run_sast")
+    @patch("codesec.agent.run_secrets_scan")
+    @patch("codesec.agent.run_dependency_scan")
+    @patch("codesec.agent.run_dockerfile_scan")
+    @patch("codesec.agent.generate_sbom")
+    @patch("codesec.agent.detect_stack")
+    @patch("codesec.agent.calculate_score")
+    @pytest.mark.asyncio
+    async def test_analyze_local_directory(self, mock_score, mock_stack, mock_sbom, mock_docker,
+                                        mock_deps, mock_secrets, mock_sast, tmp_path: Path):
+        project_dir = tmp_path / "uploaded_project"
+        project_dir.mkdir()
+        (project_dir / "README.md").write_text("# Local project")
+
+        mock_sast.return_value = []
+        mock_secrets.return_value = []
+        mock_deps.return_value = DependenciesResult()
+        mock_docker.return_value = []
+        mock_sbom.return_value = SBOM(serial_number="urn:uuid:test")
+        mock_stack.return_value = StackDetection(primary_language="python", confidence=0.9)
+        mock_score.return_value = SecurityScore(score=90, grade=Grade.A)
+
+        agent = CodeSecAgent()
+        result = await agent.analyze(str(project_dir))
+
+        assert isinstance(result, CodeSecResult)
+        assert result.status in ["completed", "completed_with_errors"]
+        assert result.repo_url == str(project_dir.resolve())
+
     @patch("codesec.agent.CodeSecAgent._clone_repo")
-    @pytest.mark.asyncio 
+    @pytest.mark.asyncio
     async def test_analyze_clone_failure(self, mock_clone, tmp_path: Path):
         mock_clone.side_effect = RuntimeError("Clone failed")
 
@@ -181,8 +204,6 @@ class TestAnalyze:
 
 
 class TestAnalyzeSyncWrapper:
-    """Test synchronous wrapper."""
-
     @patch("codesec.agent.CodeSecAgent.analyze")
     def test_analyze_sync(self, mock_analyze, tmp_path: Path):
         mock_analyze.return_value = CodeSecResult(
@@ -202,8 +223,6 @@ class TestAnalyzeSyncWrapper:
 
 
 class TestCodeSecResultModel:
-    """Test CodeSecResult model."""
-
     def test_creation(self):
         result = CodeSecResult(
             job_id="550e8400-e29b-41d4-a716-446655440000",

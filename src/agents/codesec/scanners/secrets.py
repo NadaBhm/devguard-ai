@@ -1,10 +1,8 @@
 """
 CodeSec Secrets Scanner
-========================
 Detects hardcoded credentials and sensitive values in repository files.
 
 US-1.1.4: As a user, I want secrets detection with >80% recall.
-
 """
 
 from __future__ import annotations
@@ -69,20 +67,20 @@ def _is_likely_false_positive(secret: Secret) -> bool:
     Returns True if the secret should be excluded.
     """
     file_lower = secret.file.lower() if secret.file else ""
-    
+
     # 1. Exclude documentation files
     if file_lower.endswith((".md", ".markdown", ".rst", ".txt")):
         return True
     if any(name in file_lower for name in ("readme", "contributing", "changelog", "license", "notice")):
         return True
-    
+
     value_preview = (secret.value_preview or "")
-    
+
     # 2. NEVER filter real AWS keys even if they contain "EXAMPLE"
     #    (AKIAIOSFODNN7EXAMPLE is the official AWS example key and is copy-pasted in real code)
     if re.search(r"AKIA[0-9A-Z]{16}", value_preview):
         return False
-    
+
     # 3. Exclude placeholder values
     placeholder_patterns = [
         "your_", "YOUR_", "sample", "SAMPLE",
@@ -91,15 +89,15 @@ def _is_likely_false_positive(secret: Secret) -> bool:
         "CHANGE_ME", "insert_", "my_", "YOUR-API-KEY", "YOUR_API_KEY",
         "sk_test_", "pk_test_", "sk_live_", "pk_live_",
     ]
-    
+
     value = value_preview.lower()
     secret_type = (secret.type or "").lower()
-    
+
     if any(pattern.lower() in value for pattern in placeholder_patterns):
         return True
     if any(pattern.lower() in secret_type for pattern in placeholder_patterns):
         return True
-    
+
     return False
 
 

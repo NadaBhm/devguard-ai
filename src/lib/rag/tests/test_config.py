@@ -1,12 +1,9 @@
-"""Tests for RAG configuration."""
 import pytest
 
 from lib.rag.config import RAGConfig, get_rag_config
 
 
 class TestRAGConfig:
-    """Test configuration defaults and overrides."""
-
     def test_default_values(self):
         config = RAGConfig()
         assert config.qdrant_url == "http://localhost:6333"
@@ -30,21 +27,17 @@ class TestRAGConfig:
         assert config.chunk_size == 500
 
     def test_frozen_dataclass(self):
-        """Config should be immutable."""
         config = RAGConfig()
         with pytest.raises(AttributeError):
             config.qdrant_url = "new-url"  # type: ignore[reportAttributeAccessIssue]
 
 
 class TestGetRAGConfig:
-    """Test factory function."""
-
     def test_returns_rag_config(self):
         config = get_rag_config()
         assert isinstance(config, RAGConfig)
 
     def test_env_override(self, monkeypatch):
-        """get_rag_config should read env vars dynamically."""
         monkeypatch.setenv("QDRANT_URL", "http://env-host:6333")
         monkeypatch.setenv("HF_MODEL", "env-model")
         monkeypatch.setenv("EMBEDDING_DIM", "384")

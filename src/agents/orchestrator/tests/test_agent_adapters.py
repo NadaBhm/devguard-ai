@@ -1,15 +1,10 @@
 """
-Tests for agent_adapters.py (T-2.17 / T-3.16)
-Place dans: src/agents/orchestrator/tests/test_agent_adapters.py
+Tests for agent_adapters.py (T-2.17 / T-3.16).
 
-Rewritten after discovering Karim's InfraCost API on master is not what an
-earlier version of this adapter (and these tests) targeted:
-run_pipeline_with_context() and core.orchestrator_adapter don't exist on
-master - only run_pipeline() -> InfraCostOutput (see models/output_models.py).
-These fixtures use that real shape (compute_type + aws_config.ecs.* +
-deployment_config.ecs.* + artifacts.docker_image/dockerfile/source_code).
-
-Lancer avec: pytest depuis la racine du repo.
+These fixtures use the real InfraCost shape from master:
+run_pipeline() -> InfraCostOutput (models/output_models.py) with
+compute_type + aws_config.ecs.* + deployment_config.ecs.* +
+artifacts.docker_image/dockerfile/source_code.
 """
 
 import pytest
@@ -28,11 +23,6 @@ from src.agents.orchestrator.agent_adapters import (
 
 @pytest.fixture
 def infracost_result():
-    """
-    What call_infracost() actually returns in real mode: Karim's
-    to_orchestrator_result() output (already orchestrator-shaped), plus the
-    "_deploy_inputs" block _run_infracost_pipeline() stashes alongside it.
-    """
     return {
         "architecture_recommendation": "ecs_fargate",
         "justification": "FastAPI with moderate traffic suits ECS Fargate.",
@@ -96,12 +86,11 @@ def infracost_result():
 
 @pytest.fixture
 def deploy_inputs(infracost_result):
-    """Just the _deploy_inputs block, as translate_infracost_to_deploy_payload receives it."""
     return infracost_result["_deploy_inputs"]
 
 
 class TestFeatureFlags:
-    """Mock mode must be the default: real agents aren't merged yet."""
+    pass
 
     def test_all_agents_mocked_by_default(self, monkeypatch):
         for var in (
@@ -128,11 +117,7 @@ class TestFeatureFlags:
 
 
 class TestNormalizeInfraCostResult:
-    """
-    Defensive layer on top of Karim's to_orchestrator_result(), which
-    correctly renames 6 of 7 fields but leaves cost_estimate as a raw Money
-    dump ({amount,...}) instead of the schema's {monthly_cost_usd,...}.
-    """
+    pass
 
     def test_fixes_cost_estimate_field_name(self, infracost_result):
         infracost_result["cost_estimate"] = {
@@ -233,22 +218,61 @@ class TestInfraCostToDeployPayload:
         )
         assert payload["metadata"] == {}
 
+    def test_ec2_compute_type_uses_docker_but_no_cluster(self, deploy_inputs):
+        deploy_inputs["compute_type"] = "ec2"
+        deploy_inputs["aws_config"] = {
+            "region": "eu-west-1",
+            "ecs": None,
+            "ec2": {"instance_type": "t3.small"},
+            "s3": None,
+        }
+        deploy_inputs["deployment_config"] = {
+            "ec2": {"strategy": "rolling", "health_check_path": "/health", "health_check_port": 8080},
+            "ecs": None,
+            "s3": None,
+        }
+        payload = translate_infracost_to_deploy_payload(
+            "job-abc", deploy_inputs, approved_by="x"
+        )
+        assert payload["compute_type"] == "ec2"
+        assert payload["aws_config"]["ecs_cluster"] is None
+        assert payload["aws_config"]["service_name"] is None
+        assert len(payload["artifacts"]["docker_images"]) == 1
+        assert payload["deployment_config"]["health_check_port"] == 8080
+
+    def test_s3_compute_type_skips_docker_and_sets_bucket(self, deploy_inputs):
+        deploy_inputs["compute_type"] = "s3"
+        deploy_inputs["aws_config"] = {
+            "region": "eu-west-1",
+            "ecs": None,
+            "ec2": None,
+            "s3": {"bucket_name": "devguard-static-abc"},
+        }
+        deploy_inputs["deployment_config"] = {
+            "s3": {"strategy": "static", "health_check_path": "/", "timeout_minutes": 5},
+            "ecs": None,
+            "ec2": None,
+        }
+        payload = translate_infracost_to_deploy_payload(
+            "job-abc", deploy_inputs, approved_by="x"
+        )
+        assert payload["compute_type"] == "s3"
+        assert payload["aws_config"]["bucket_name"] == "devguard-static-abc"
+        assert payload["artifacts"]["docker_images"] == []
+        assert payload["deployment_config"]["health_check_path"] == "/"
+        assert payload["deployment_config"]["timeout_minutes"] == 5
+
 
 class TestTranslationFailsLoudly:
-    """Every one of these would otherwise be a silent no-op deep inside AWS."""
+    pass
 
     def test_non_ecs_compute_type_is_rejected(self, deploy_inputs):
         deploy_inputs["compute_type"] = "lambda"
         deploy_inputs["aws_config"]["ecs"] = None
-        with pytest.raises(ValueError, match="only supports ECS"):
+        with pytest.raises(ValueError, match="No 'lambda' mapping"):
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
 
     def test_missing_dockerfile_content_is_rejected(self, deploy_inputs):
-        """
-        This InfraCost build generates Dockerfile content itself, but must
-        still fail loudly (not silently build an empty image) if that ever
-        regresses to empty/None - e.g. for a Lambda-only deployment.
-        """
         deploy_inputs["artifacts"]["dockerfile"] = None
         with pytest.raises(ValueError, match="no Dockerfile content"):
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
@@ -265,7 +289,7 @@ class TestTranslationFailsLoudly:
 
 
 class TestDeployOpsResultTranslation:
-    """DeployOps returns its own flat dict, not the orchestrator's shape."""
+    pass
 
     def test_success_is_mapped(self):
         raw = {
@@ -328,9 +352,8 @@ class TestRunSyncBridge:
 
 
 class TestCallInfraCostRepoClone:
-    """Gate-2 regeneration: the real InfraCost path re-clones the analyzed
-    repo so the pipeline can digest the whole codebase (CodeSec deletes its
-    clone the moment analysis finishes)."""
+    """Real InfraCost path re-clones the repo so the pipeline can digest
+    the whole codebase (CodeSec deletes its clone when analysis finishes)."""
 
     @pytest.fixture(autouse=True)
     def _real_infracost(self, monkeypatch):
@@ -400,8 +423,7 @@ class TestCallInfraCostRepoClone:
         assert captured["repo_path"] is None
 
     async def test_clone_failure_is_fail_soft(self, monkeypatch):
-        """A failed re-clone must not take the regeneration down: the
-        pipeline runs without repo context."""
+        """Failed re-clone must not break regeneration; pipeline runs without repo context."""
         captured = {}
 
         def _fake_clone(*_args, **_kwargs):
@@ -425,8 +447,7 @@ class TestCallInfraCostRepoClone:
         assert result["cost_estimate"]["monthly_cost_usd"] == 10.0
 
     async def test_iteration_number_is_threaded_into_raw_input(self, monkeypatch):
-        """The first-regen hidden fix lives in the pipeline; the adapter must
-        forward the 1-based regen round so the pipeline can gate it."""
+        """Adapter must forward 1-based regen round so pipeline can gate first-regen fix."""
         captured = {}
 
         def _fake_pipeline(raw_input):

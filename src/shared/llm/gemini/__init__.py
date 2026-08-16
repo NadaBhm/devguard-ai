@@ -1,5 +1,3 @@
-"""Shared utilities for DevGuard AI agents."""
-
 from .gemini_client import (
     GeminiClient,
     GeminiResponse,
@@ -11,7 +9,7 @@ from .gemini_client import (
 
 __all__ = [
     "GeminiClient",
-    "GeminiResponse", 
+    "GeminiResponse",
     "GeminiModel",
     "get_gemini_client",
     "gemini_dependency",

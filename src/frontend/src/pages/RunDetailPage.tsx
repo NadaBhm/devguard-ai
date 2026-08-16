@@ -19,7 +19,7 @@ import type { GateContext, JobDetail, JobState, RunState } from "../types/jobs"
 
 const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "artifacts", "deploy"]
 
-// Legacy tab aliases: pre-rename URLs used ?tab=terraform.
+// Legacy: pre-rename URLs used ?tab=terraform.
 const LEGACY_TAB_ALIASES: Record<string, RunTab> = { terraform: "artifacts" }
 
 interface InterruptInfo {

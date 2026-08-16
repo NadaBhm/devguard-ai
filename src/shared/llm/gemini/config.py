@@ -1,5 +1,3 @@
-"""Shared configuration for DevGuard AI."""
-
 import os
 from dataclasses import dataclass
 

@@ -176,6 +176,9 @@ def _sizing_from_refined_terraform(
             if not mem:
                 return None
             return {"memory_mb": int(mem)}
+        if compute_type == "s3":
+            # No compute sizing to extract — S3 scales on storage, not CPU.
+            return {}
     except Exception:
         pass
     return None

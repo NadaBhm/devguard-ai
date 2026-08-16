@@ -1,12 +1,9 @@
 """
 Tests for chat.py (T-3.10 chat LLM / T-3.11 conversation memory)
-Place dans: src/agents/orchestrator/tests/test_chat.py
 
 US-2.2.5: the assistant must answer "using job context AND RAG retrieval".
 Both halves are asserted here, as is the memory behaviour that makes
 follow-up questions ("and that one?") answerable at all.
-
-Lancer avec: pytest depuis la racine du repo.
 """
 
 import pytest
@@ -33,7 +30,6 @@ from src.agents.orchestrator.state import create_initial_state
 
 @pytest.fixture(autouse=True)
 def clean_memory():
-    """Conversations are process-global; isolate every test."""
     reset_all_conversations()
     yield
     reset_all_conversations()
@@ -41,7 +37,6 @@ def clean_memory():
 
 @pytest.fixture
 def completed_state():
-    """A state as it looks once the whole pipeline has run."""
     state = create_initial_state("https://github.com/test/repo")
     state["status"] = "completed"
     state["codesec_result"] = build_mock_codesec_result(state["job_id"], state["repo_url"])
@@ -49,10 +44,6 @@ def completed_state():
     state["deployops_result"] = build_mock_deployops_result(state["job_id"])
     return state
 
-
-# =============================================================================
-# T-3.11: CONVERSATION MEMORY
-# =============================================================================
 
 class TestConversationMemory:
     def test_starts_empty(self):
@@ -63,7 +54,6 @@ class TestConversationMemory:
         assert len(get_conversation("job-1").messages) == 1
 
     def test_jobs_are_isolated(self):
-        """Two users' conversations must never bleed into each other."""
         get_conversation("job-1").append("user", "secret question")
         assert get_conversation("job-2").messages == []
 
@@ -73,8 +63,8 @@ class TestConversationMemory:
         for i in range(10):
             memory.append("user", f"message {i}")
         assert len(memory.messages) == 4
-        assert memory.messages[-1].content == "message 9"   # newest kept
-        assert memory.messages[0].content == "message 6"    # oldest dropped
+        assert memory.messages[-1].content == "message 9"
+        assert memory.messages[0].content == "message 6"
 
     def test_default_bound_is_applied(self):
         memory = get_conversation("job-1")
@@ -95,10 +85,6 @@ class TestConversationMemory:
         clear_conversation("job-1")
         assert get_conversation("job-1").messages == []
 
-
-# =============================================================================
-# JOB CONTEXT (the half RAG cannot provide)
-# =============================================================================
 
 class TestJobContext:
     def test_empty_without_state(self):
@@ -147,10 +133,6 @@ class TestJobContext:
         assert "health check failed" in context
 
 
-# =============================================================================
-# PROMPT ASSEMBLY
-# =============================================================================
-
 class TestPromptAssembly:
     def test_contains_all_provided_blocks(self):
         prompt = build_prompt(
@@ -175,10 +157,6 @@ class TestPromptAssembly:
         assert "never invent" in prompt.lower()
 
 
-# =============================================================================
-# T-3.10: CHAT ENTRY POINT
-# =============================================================================
-
 class TestChat:
     def test_returns_an_answer(self, completed_state):
         result = chat("job-1", "What is my security score?", completed_state)
@@ -186,7 +164,6 @@ class TestChat:
         assert result["job_id"] == "job-1"
 
     def test_uses_both_sources(self, completed_state):
-        """US-2.2.5: "using job context and RAG retrieval" - both, not either."""
         result = chat("job-1", "What is my security score?", completed_state)
         assert result["used_job_context"] is True
         assert result["used_rag"] is True
@@ -198,11 +175,9 @@ class TestChat:
         assert result["history"][1]["role"] == "assistant"
 
     def test_second_question_sees_the_first(self, completed_state):
-        """Without this, "and that one?" is unanswerable."""
         chat("job-1", "What is my security score?", completed_state)
         result = chat("job-1", "And how much does it cost?", completed_state)
         assert len(result["history"]) == 4
-        # The mock answer reports which prompt blocks were assembled.
         assert "conversation history" in result["answer"]
 
     def test_first_question_has_no_history_block(self, completed_state):
@@ -210,7 +185,6 @@ class TestChat:
         assert "conversation history" not in result["answer"]
 
     def test_works_without_state(self):
-        """Repo questions still answerable from RAG alone."""
         result = chat("job-1", "What framework does this use?", None)
         assert result["used_job_context"] is False
         assert result["used_rag"] is True
@@ -222,7 +196,6 @@ class TestChat:
 
 class TestGracefulDegradation:
     def test_rag_failure_does_not_break_chat(self, completed_state, monkeypatch):
-        """A cold Qdrant must not take the assistant down."""
         monkeypatch.setenv("DEVGUARD_REAL_RAG", "1")
 
         def boom(*args, **kwargs):
@@ -233,7 +206,7 @@ class TestGracefulDegradation:
 
         result = chat("job-1", "What is my score?", completed_state)
         assert result["used_rag"] is False
-        assert result["used_job_context"] is True   # still useful
+        assert result["used_job_context"] is True
         assert result["answer"] == "answer"
 
     def test_llm_failure_returns_a_message_not_an_exception(self, completed_state, monkeypatch):
@@ -241,8 +214,6 @@ class TestGracefulDegradation:
         monkeypatch.setattr(chat_module, "_retrieve_repo_context", lambda *a, **k: "ctx")
 
         result = chat("job-1", "hi", completed_state)
-        # Real RAG mode with no Gemini key: the import/call fails and the
-        # user gets a sentence, not a 500.
         assert isinstance(result["answer"], str)
         assert result["answer"]
 

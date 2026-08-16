@@ -39,7 +39,7 @@ ArchFamily = Literal["x86", "arm_graviton"]
 
 
 class CostEstimationError(Exception):
-    """Base class for cost_estimator failures."""
+    pass
 
 
 class MissingPricingDataError(CostEstimationError):
@@ -100,8 +100,6 @@ def _load_pricing_data() -> dict[str, Any]:
 
 
 def _get_pricing(data: dict[str, Any], *path: str) -> Any:
-    """Walk `data` through `path`; raise MissingPricingDataError naming the
-    full dotted path if any key along the way is absent."""
     node: Any = data
     for key in path:
         if not isinstance(node, dict) or key not in node:
@@ -171,10 +169,21 @@ def _estimate_ec2(
     return compute_cost + ebs_cost
 
 
+def _estimate_s3(
+    decision: DecisionResult, pricing: dict[str, Any], context: CostEstimationContext
+) -> float:
+    # S3 static hosting is effectively free at the scale this pipeline serves:
+    # storage pennies + no compute hours. Modeled as a flat, sub-dollar cost.
+    storage_gb = context.ebs_gb
+    s3_per_gb_month = _get_pricing(pricing, "s3_standard_per_gb_month")
+    return s3_per_gb_month * storage_gb
+
+
 _ESTIMATORS = {
     "ecs": _estimate_ecs,
     "lambda": _estimate_lambda,
     "ec2": _estimate_ec2,
+    "s3": _estimate_s3,
 }
 
 

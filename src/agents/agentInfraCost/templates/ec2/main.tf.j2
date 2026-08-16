@@ -11,11 +11,119 @@ provider "aws" {
   region = var.region
 }
 
+# Resolve a real, current Amazon Linux 2 AMI instead of hardcoding a (fake)
+# AMI id — an ami that doesn't exist in this region fails terraform apply.
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+}
+
+# The app is shipped as the same Docker image DeployOps builds & pushes to
+# ECR for ECS; the instance just pulls and runs it. Instance needs a role to
+# authenticate against ECR (get-login-password + pull).
+resource "aws_iam_role" "instance" {
+  name = "{{ instance_name }}-ec2-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "ecr_pull" {
+  role = aws_iam_role.instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "instance" {
+  name = "{{ instance_name }}-ec2-profile"
+  role = aws_iam_role.instance.name
+}
+
+resource "aws_security_group" "instance" {
+  name   = "{{ instance_name }}-ec2-sg"
+  vpc_id = var.vpc_id
+
+  ingress {
+    from_port   = {{ instance_port }}
+    to_port     = {{ instance_port }}
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
 resource "aws_instance" "this" {
-  count         = {{ instance_count }}
-  ami           = "{{ ami_id }}"
+  count           = {{ instance_count }}
+  ami             = data.aws_ami.amazon_linux.id
   instance_type = "{{ instance_type }}"
-  key_name      = "{{ key_pair_name }}"
+{% if key_pair_name %}
+  key_name        = "{{ key_pair_name }}"
+{% endif %}
+  subnet_id       = var.subnet_id
+  vpc_security_group_ids = [aws_security_group.instance.id]
+  iam_instance_profile    = aws_iam_instance_profile.instance.name
+
+  user_data = <<-EOF
+    #!/bin/bash
+    set -e
+    yum update -y
+    yum install -y docker jq
+    systemctl enable docker
+    systemctl start docker
+    usermod -a -G docker ec2-user
+
+    # Instance role supplies ECR credentials via the metadata service; the
+    # metadata token call below is the same flow `aws ecr get-login-password`
+    # uses internally, so an installed aws-cli isn't required.
+    TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+    REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+    aws_ecr_endpoint="{{ ecr_registry_host }}"
+    aws ecr get-login-password --region "{{ region }}" | docker login --username AWS --password-stdin "$aws_ecr_endpoint"
+
+    docker pull "{{ docker_image }}"
+    docker run -d --restart unless-stopped -p {{ instance_port }}:{{ instance_port }} --name {{ instance_name }} "{{ docker_image }}"
+
+    echo "devguard bootstrap complete" > /var/log/devguard-bootstrap.log
+  EOF
 
   tags = {
     Name = "{{ instance_name }}"

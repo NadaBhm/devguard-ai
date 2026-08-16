@@ -17,8 +17,7 @@ def get_db():
         db.close()
 
 def init_db():
-    # The models register their tables on models.Base (a separate
-    # declarative_base instance from the one above). Create those tables
-    # so local SQLite dev (and any Base.metadata consumers) get them.
+    # models register their tables on models.Base (a separate declarative_base
+    # instance from the one above); create those tables for local SQLite dev.
     from . import models
     models.Base.metadata.create_all(bind=engine)

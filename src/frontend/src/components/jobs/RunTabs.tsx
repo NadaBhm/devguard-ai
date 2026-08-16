@@ -10,7 +10,7 @@ const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "deploy", label: "Deploy" },
 ]
 
-// Legacy tab id kept working: pre-rename URLs used ?tab=terraform.
+// Legacy: pre-rename URLs used ?tab=terraform.
 const LEGACY_TAB_ALIASES: Record<string, RunTab> = { terraform: "artifacts" }
 
 export function RunTabs({ jobId, codesecCount }: { jobId: string; codesecCount?: number }) {

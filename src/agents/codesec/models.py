@@ -1,10 +1,7 @@
 """
-CodeSec Agent - Pydantic Models
-================================
+CodeSec Agent - Pydantic Models.
 Defines all data models for the CodeSec security analysis pipeline.
-Maps to the JSON schema mockup (job_id 550e...) and spec book US-1.1.1 through US-1.1.6.
-
-Author: Nada 
+Matches the JSON schema mockup expected by downstream consumers.
 """
 
 from __future__ import annotations
@@ -16,13 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
-
 class Severity(str, Enum):
-    """Severity levels aligned with CVSS and OWASP risk rating."""
-
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
@@ -31,8 +22,6 @@ class Severity(str, Enum):
 
 
 class Grade(str, Enum):
-    """Letter grade for security posture (A=excellent, F=critical)."""
-
     A = "A"
     B = "B"
     C = "C"
@@ -42,8 +31,6 @@ class Grade(str, Enum):
 
 
 class PhaseStatus(str, Enum):
-    """Status of an analysis phase."""
-
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -52,19 +39,11 @@ class PhaseStatus(str, Enum):
 
 
 class SbomFormat(str, Enum):
-    """Supported SBOM output formats."""
-
     CYCLONE_DX = "CycloneDX"
     SPDX = "SPDX"
 
 
-# ---------------------------------------------------------------------------
-# Phase Tracking
-# ---------------------------------------------------------------------------
-
 class PhaseInfo(BaseModel):
-    """Tracks the execution status of a single analysis phase."""
-
     name: str = Field(..., description="Phase identifier (e.g., 'sast', 'secrets')")
     status: PhaseStatus = Field(default=PhaseStatus.PENDING)
     started_at: datetime | None = Field(default=None)
@@ -72,13 +51,7 @@ class PhaseInfo(BaseModel):
     error_message: str | None = Field(default=None)
 
 
-# ---------------------------------------------------------------------------
-# Stack Detection Models
-# ---------------------------------------------------------------------------
-
 class ContainerInfo(BaseModel):
-    """Container/Docker metadata detected from repository."""
-
     detected: bool = Field(default=False)
     base_image: str | None = Field(default=None)
     dockerfile_path: str | None = Field(default=None)
@@ -86,10 +59,7 @@ class ContainerInfo(BaseModel):
 
 
 class StackDetection(BaseModel):
-    """
-    Technology stack identification result.
-    US-1.1.2: Detect language, framework, database with >=80% accuracy.
-    """
+    """Technology stack identification result."""
 
     primary_language: str = Field(..., description="Dominant programming language")
     languages: list[str] = Field(default_factory=list, description="All detected languages")
@@ -103,15 +73,8 @@ class StackDetection(BaseModel):
     detected_files: list[str] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# SAST Models
-# ---------------------------------------------------------------------------
-
 class SASTFinding(BaseModel):
-    """
-    Single static analysis security finding.
-    US-1.1.3: Identify SQL injection, XSS, and other OWASP Top 10 risks.
-    """
+    """Single static analysis security finding."""
 
     model_config = {"extra": "allow"}
 
@@ -180,15 +143,8 @@ class SASTResult(BaseModel):
         return bool(self.findings)
 
 
-# ---------------------------------------------------------------------------
-# Secrets Detection Models
-# ---------------------------------------------------------------------------
-
 class Secret(BaseModel):
-    """
-    Hardcoded credential or sensitive token found in source.
-    US-1.1.4: Detect API keys, tokens, passwords with >80% recall.
-    """
+    """Hardcoded credential or sensitive token found in source."""
 
     type: str = Field(..., description="Secret type (e.g., 'aws_access_key_id')")
     tool: str = Field(..., description="Detection tool (e.g., 'gitleaks')")
@@ -204,13 +160,7 @@ class Secret(BaseModel):
     remediation: str | None = Field(default=None)
 
 
-# ---------------------------------------------------------------------------
-# Dependency Vulnerability Models
-# ---------------------------------------------------------------------------
-
 class VulnerablePackage(BaseModel):
-    """A dependency with known CVEs."""
-
     package: str = Field(...)
     installed_version: str = Field(...)
     fixed_version: str | None = Field(default=None)
@@ -221,21 +171,13 @@ class VulnerablePackage(BaseModel):
 
 
 class DependenciesResult(BaseModel):
-    """Aggregated dependency vulnerability scan result."""
-
     total_packages: int = Field(default=0)
     direct: int = Field(default=0)
     transitive: int = Field(default=0)
     vulnerable_packages: list[VulnerablePackage] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Dockerfile Scan Models
-# ---------------------------------------------------------------------------
-
 class DockerfileFinding(BaseModel):
-    """Security issue found in a Dockerfile."""
-
     rule_id: str = Field(...)
     tool: str = Field(...)
     severity: Severity = Field(...)
@@ -247,34 +189,23 @@ class DockerfileFinding(BaseModel):
     remediation: str | None = Field(default=None)
 
 
-# ---------------------------------------------------------------------------
-# SBOM Models
-# ---------------------------------------------------------------------------
-
 class LicenseInfo(BaseModel):
-    """Software license declaration."""
-
     id: str | None = Field(default=None)
     name: str | None = Field(default=None)
 
 
 class SbomComponent(BaseModel):
-    """Individual component in an SBOM."""
-
     type: str = Field(default="library")
     name: str = Field(...)
     version: str = Field(...)
     purl: str | None = Field(default=None, description="Package URL")
     licenses: list[LicenseInfo] = Field(default_factory=list)
     source_file: str | None = Field(default=None)
-    cve_ids: list[str] = Field(default_factory=list, description="Known CVEs affecting this component") 
+    cve_ids: list[str] = Field(default_factory=list, description="Known CVEs affecting this component")
 
 
 class SBOM(BaseModel):
-    """
-    Software Bill of Materials output.
-    US-1.1.6: Produce valid CycloneDX/SPDX format SBOM.
-    """
+    """Software Bill of Materials output."""
 
     format: SbomFormat = Field(default=SbomFormat.CYCLONE_DX)
     spec_version: str = Field(default="1.5")
@@ -285,13 +216,7 @@ class SBOM(BaseModel):
     download_url: str | None = Field(default=None)
 
 
-# ---------------------------------------------------------------------------
-# Security Score Models
-# ---------------------------------------------------------------------------
-
 class ScoreBreakdown(BaseModel):
-    """Per-category score contribution (0-100 scale per category)."""
-
     sast: int = Field(default=0, ge=0, le=100)
     secrets: int = Field(default=0, ge=0, le=100)
     dependencies: int = Field(default=0, ge=0, le=100)
@@ -301,8 +226,6 @@ class ScoreBreakdown(BaseModel):
 
 
 class SeverityCounts(BaseModel):
-    """Aggregate severity tally across all findings."""
-
     critical: int = Field(default=0, ge=0)
     high: int = Field(default=0, ge=0)
     medium: int = Field(default=0, ge=0)
@@ -311,10 +234,7 @@ class SeverityCounts(BaseModel):
 
 
 class SecurityScore(BaseModel):
-    """
-    Overall security posture score and grade.
-    US-1.1.5: 0-100 score with Critical/High/Medium/Low prioritization.
-    """
+    """Overall security posture score and grade."""
 
     score: int = Field(..., ge=0, le=100)
     grade: Grade = Field(...)

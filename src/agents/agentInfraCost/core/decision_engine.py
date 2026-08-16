@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from models.input_schema import RepoAnalysisInput
 
-ComputeType = Literal["ecs", "lambda", "ec2"]
+ComputeType = Literal["ecs", "lambda", "ec2", "s3"]
 DecisionSource = Literal["deterministic", "llm"]
 
 # Below this many lines of code, an un-containerized project is considered
@@ -28,8 +28,15 @@ DecisionSource = Literal["deterministic", "llm"]
 # persistent server.
 SMALL_PROJECT_LOC_THRESHOLD: Final[int] = 2_000
 
+# A bare static site (plain HTML/CSS/JS, no server-side runtime, no database,
+# no container) is the one shape S3 should always win for. Anything else gets
+# a strong negative so it can never win on accident.
+_STATIC_PRIMARY_LANGUAGES: Final[frozenset[str]] = frozenset(
+    {"html", "css", "javascript", "typescript"}
+)
+
 # ECS Fargate task_cpu/task_memory must be one of AWS's valid paired
-# combinations; these three are valid low/mid/high tiers.
+# combinations; the high tier lives in _ECS_SIZE_DEFAULT.
 _ECS_SIZE_TIERS: Final[tuple[tuple[int, str, str], ...]] = (
     (5_000, "256", "512"),
     (15_000, "512", "1024"),
@@ -72,6 +79,15 @@ class DecisionResult(BaseModel):
     llm_reasoning: str | None = None
 
 
+def _is_static_site(analysis: RepoAnalysisInput) -> bool:
+    stack = analysis.stack_detection
+    if stack.container.detected or stack.database is not None:
+        return False
+    if stack.frameworks:
+        return False
+    return stack.primary_language.strip().lower() in _STATIC_PRIMARY_LANGUAGES
+
+
 def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
     """Score each compute type from generic stack properties.
 
@@ -82,7 +98,7 @@ def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
     Express+MySQL) score identically.
     """
     container = analysis.stack_detection.container
-    scores = {"ecs": 0.0, "lambda": 0.0, "ec2": 0.0}
+    scores = {"ecs": 0.0, "lambda": 0.0, "ec2": 0.0, "s3": 0.0}
 
     if container.detected:
         scores["ecs"] += 3.0
@@ -107,6 +123,19 @@ def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
         scores["ecs"] += 1.0
         scores["lambda"] -= 1.0
 
+    if _is_static_site(analysis):
+        # A bare static site is a strict S3 candidate: hosting it on a
+        # managed container/VM is wasted money. The bonus must dominate
+        # everything the scoring above could have accumulated for a small
+        # un-containerized project (lambda +5), so +8 guarantees the win.
+        scores["s3"] += 8.0
+        scores["lambda"] -= 5.0
+        scores["ec2"] -= 5.0
+        scores["ecs"] -= 5.0
+    else:
+        # S3 never wins for anything that isn't a bare static site.
+        scores["s3"] -= 20.0
+
     return scores
 
 
@@ -114,19 +143,20 @@ def _choose_compute_type(scores: dict[str, float]) -> ComputeType:
     """Pick the highest-scoring compute type.
 
     Ties resolve in ``scores`` insertion order (ecs, then lambda, then
-    ec2) since ``_score_stack`` always builds the dict in that order and
-    ``max`` keeps the first maximal item — a managed container service is
-    the safer default when signals are genuinely inconclusive.
+    ec2, then s3) since ``_score_stack`` always builds the dict in that
+    order and ``max`` keeps the first maximal item — a managed container
+    service is the safer default when signals are genuinely inconclusive.
 
-    DeployOps only has a deployment path for compute_type='ecs' (lambda/ec2
-    raise ValueError in deployops/agent.py _normalize_payload before ever
-    reaching Terraform). To keep the real pipeline safe until those paths
-    land, the ECS force is gated behind DEVGUARD_FORCE_COMPUTE_ECS (default
-    "1" = force ecs). Unit tests set it to "0" so the scoring logic above
-    stays exercised; remove the flag entirely once DeployOps grows lambda/ec2.
+    DeployOps has a real deployment path for ecs, ec2 and s3, but not yet
+    for lambda (deployops/agent.py _normalize_payload still raises for it).
+    To keep the real pipeline from deterministically landing on a compute
+    type DeployOps refuses, lambda is excluded from selection while
+    DEVGUARD_FORCE_COMPUTE_ECS (default "1") is set. Unit tests set it to
+    "0" so the full scoring — lambda included — stays exercised. Remove the
+    lambda exclusion entirely once DeployOps grows a lambda path.
     """
     if os.getenv("DEVGUARD_FORCE_COMPUTE_ECS", "1").lower() == "1":
-        return "ecs"
+        scores = {k: v for k, v in scores.items() if k != "lambda"}
     return max(scores, key=lambda compute_type: scores[compute_type])  # type: ignore[return-value]
 
 
@@ -155,10 +185,15 @@ def _size_ec2(analysis: RepoAnalysisInput) -> dict[str, int | str]:
     return {"instance_type": _EC2_SIZE_DEFAULT}
 
 
+def _size_s3(analysis: RepoAnalysisInput) -> dict[str, int | str]:
+    return {}
+
+
 _SIZERS = {
     "ecs": _size_ecs,
     "lambda": _size_lambda,
     "ec2": _size_ec2,
+    "s3": _size_s3,
 }
 
 
@@ -175,16 +210,6 @@ def compute_sizing(compute_type: ComputeType, analysis: RepoAnalysisInput) -> di
 
 
 def decide_architecture(analysis: RepoAnalysisInput) -> DecisionResult:
-    """Choose a compute type and its sizing for a validated repo analysis.
-
-    Args:
-        analysis: The validated payload produced by ``input_validator``.
-
-    Returns:
-        A ``DecisionResult`` naming the chosen ``compute_type``, its
-        computed ``sizing``, and the full ``score_breakdown`` used to reach
-        that decision.
-    """
     scores = _score_stack(analysis)
     compute_type = _choose_compute_type(scores)
     sizing = _SIZERS[compute_type](analysis)

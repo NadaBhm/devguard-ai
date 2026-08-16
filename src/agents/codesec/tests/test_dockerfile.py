@@ -1,4 +1,3 @@
-"""Tests for Dockerfile Scanner."""
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -16,8 +15,6 @@ from codesec.models import DockerfileFinding, Severity
 
 
 class TestGetRemediation:
-    """Test remediation advice lookup."""
-
     def test_known_rule(self):
         remediation = _get_remediation("DS001")
         assert remediation is not None
@@ -28,8 +25,6 @@ class TestGetRemediation:
 
 
 class TestRunBuiltinChecks:
-    """Test built-in Dockerfile security checks."""
-
     def test_detect_root_user(self, tmp_path: Path):
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -99,15 +94,11 @@ CMD ["python", "app.py"]
 """)
 
         findings = _run_builtin_checks(repo)
-        # Should have minimal or no issues
         assert len(findings) <= 1
 
 
 class TestRunDockerfileScan:
-    """Test the main Dockerfile scan function."""
-
     def test_run_dockerfile_scan_with_dockerfile(self, sample_python_repo: Path):
-        """Scan repo that has a Dockerfile."""
         findings = run_dockerfile_scan(sample_python_repo)
 
         assert isinstance(findings, list)
@@ -115,7 +106,6 @@ class TestRunDockerfileScan:
             assert isinstance(finding, DockerfileFinding)
 
     def test_run_dockerfile_scan_no_dockerfile(self, temp_repo: Path):
-        """Scan repo with no Dockerfile."""
         findings = run_dockerfile_scan(temp_repo)
         assert findings == []
 
@@ -155,7 +145,7 @@ class TestRunDockerfileScan:
             message="Same issue",
         )
         mock_trivy.return_value = [finding]
-        mock_hadolint.return_value = [finding]  # Duplicate
+        mock_hadolint.return_value = [finding]
 
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -163,13 +153,10 @@ class TestRunDockerfileScan:
 
         findings = run_dockerfile_scan(repo)
 
-        # Should deduplicate by (file, line, rule_id)
         assert len(findings) == 1
 
 
 class TestDockerfileFindingModel:
-    """Test DockerfileFinding model."""
-
     def test_creation(self):
         finding = DockerfileFinding(
             rule_id="DS001",

@@ -8,28 +8,14 @@ run_workflow / resume_workflow returns at the next human gate; the API persists
 the resulting state to Postgres when the run reaches a terminal state.
 """
 
-"""
-functions : 
-- get/create system user
-- get/create project
-- create run
-- publish progress to redis
-- create job
-- approve job
-- get job
-- list jobs
-- current gate
-
-
-"""
-
 
 import asyncio
 import logging
+import tempfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -52,12 +38,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
-# The orchestrator's repo_url is the same as the project's github_url.
-# Jobs are created by the authenticated user, who owns the project and run.
-
 
 class JobCreate(BaseModel):
-    repo_url: str = Field(..., description="Public GitHub repository URL")
+    repo_url: str | None = Field(default=None, description="Public GitHub/GitLab repository URL or local folder path")
+    source_type: str = Field(default="github", description="github | gitlab | local_folder")
     commit_sha: str = "HEAD"
     commit_message: str | None = None
     default_branch: str = "main"
@@ -122,9 +106,24 @@ def _create_run(
     return run
 
 
+def _store_uploaded_files(files: list[UploadFile], job_id: str) -> Path:
+    base_dir = Path(tempfile.mkdtemp(prefix=f"devguard_upload_{job_id}_"))
+    for uploaded in files:
+        if not uploaded.filename:
+            continue
+        relative = PurePosixPath(uploaded.filename)
+        if relative.is_absolute() or any(part in ("..", "") for part in relative.parts):
+            continue
+        target = base_dir.joinpath(*relative.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = uploaded.file.read()
+        target.write_bytes(content)
+    return base_dir
+
+
 def _get_owned_run(db: Session, job_id: str, user_id: str) -> models.AnalysisRun:
-    """Fetch a run that belongs to ``user_id`` or 404 (without revealing the
-    run's existence to other tenants)."""
+    """Fetch a run belonging to ``user_id`` or 404, without revealing the
+    run's existence to other tenants."""
     run = (
         db.query(models.AnalysisRun)
         .filter(
@@ -144,8 +143,8 @@ def _publish(state: dict, progress: int, message: str) -> None:
     publish_progress(job_id, phase=phase, progress=progress, message=message)
 
 
-# Coarse map of orchestrator nodes to a progress percentage, so clients get
-# per-node streaming instead of only the 5/30/60/100 milestones.
+# Coarse per-node progress percentages so clients get streaming instead of
+# only the 5/30/60/100 milestones.
 _NODE_PROGRESS = {
     "codesec_agent": 15,
     "human_gate_1": 25,
@@ -158,8 +157,6 @@ _NODE_PROGRESS = {
 
 
 def _publish_node_progress(job_id: str):
-    """Return a callback that publishes a per-node progress event to Redis/WS."""
-
     def handler(node_name: str, node_state: dict) -> None:
         progress = _NODE_PROGRESS.get(node_name)
         if progress is None:
@@ -174,28 +171,28 @@ def _publish_node_progress(job_id: str):
     return handler
 
 
-@router.post("/", status_code=201)
-def create_job(
-    body: JobCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
+def _create_job_for_repo(
+    db: Session,
+    current_user: models.User,
+    repo_url: str,
+    default_branch: str,
+    commit_sha: str,
+    commit_message: str | None,
 ):
-    """Start a job: create Project + AnalysisRun, run the orchestrator up to
-    the first human gate, and persist the resulting state."""
-    project = _get_or_create_project(db, current_user.id, body.repo_url, body.default_branch)
-    run = _create_run(db, project, current_user.id, body.commit_sha, body.commit_message)
+    project = _get_or_create_project(db, current_user.id, repo_url, default_branch)
+    run = _create_run(db, project, current_user.id, commit_sha, commit_message)
 
-    logger.info(f"Starting orchestrator for run {run.id} | repo {body.repo_url}")
+    logger.info(f"Starting orchestrator for run {run.id} | repo {repo_url}")
     publish_progress(str(run.id), phase="start", progress=5, message="Job started")
 
     try:
         from src.agents.orchestrator.graph import run_workflow
         state = run_workflow(
-            repo_url=body.repo_url,
+            repo_url=repo_url,
             thread_id=str(run.id),
             on_node_progress=_publish_node_progress(str(run.id)),
         )
-        state["job_id"] = str(run.id)  # keep orchestrator job_id == DB run id
+        state["job_id"] = str(run.id)
     except Exception as exc:
         logger.error(f"run_workflow failed for {run.id}: {exc}", exc_info=True)
         state = {"status": "failed", "error": str(exc), "job_id": str(run.id)}
@@ -217,6 +214,50 @@ def create_job(
     }
 
 
+@router.post("/", status_code=201)
+def create_job(
+    body: JobCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Start a job: create Project + AnalysisRun, run the orchestrator up to
+    the first human gate, and persist the resulting state."""
+    if not body.repo_url:
+        raise HTTPException(status_code=400, detail="A repository URL is required")
+    return _create_job_for_repo(
+        db,
+        current_user,
+        body.repo_url,
+        body.default_branch,
+        body.commit_sha,
+        body.commit_message,
+    )
+
+
+@router.post("/upload", status_code=201)
+def upload_job(
+    files: list[UploadFile] = File(...),
+    commit_sha: str = Form("HEAD"),
+    commit_message: str | None = Form(default=None),
+    default_branch: str = Form("main"),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No project files were uploaded")
+
+    extracted_dir = _store_uploaded_files(files, "upload")
+    repo_url = str(extracted_dir)
+    return _create_job_for_repo(
+        db,
+        current_user,
+        repo_url,
+        default_branch,
+        commit_sha,
+        commit_message,
+    )
+
+
 @router.post("/{job_id}/approve")
 def approve_job(
     job_id: str,
@@ -224,7 +265,6 @@ def approve_job(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Resume a paused workflow at its human gate with an approval/rejection."""
     run = _get_owned_run(db, job_id, current_user.id)
 
     try:
@@ -284,14 +324,11 @@ def edit_artifacts(
 ):
     """Apply manual artifact edits to a run paused at Gate 2.
 
-    Users can tweak the generated Terraform / Dockerfile directly in the
-    browser before approving the deployment. Edits are written into BOTH the
-    orchestrator's ``_deploy_inputs`` (what DeployOps consumes on resume) and
-    the ``generated_terraform`` shape (what the tabs read), then the
-    materialized artifact rows are rewritten with an edit-audit trail.
-
-    Only allowed while the run is paused at Gate 2 — before then there are no
-    artifacts, after approval the deployment is in flight.
+    Edits go into BOTH the orchestrator's ``_deploy_inputs`` (what DeployOps
+    consumes on resume) and the ``generated_terraform`` shape (what the tabs
+    read), then the materialized artifact rows are rewritten with an
+    edit-audit trail. Only allowed while the run is paused at Gate 2 -- before
+    then there are no artifacts, after approval the deployment is in flight.
     """
     if not body.files:
         raise HTTPException(status_code=422, detail="No artifact edits supplied")
@@ -360,7 +397,7 @@ def edit_artifacts(
 def _apply_artifact_edits(state: dict, edits: list[ArtifactEditRequest]) -> None:
     """Apply file edits to the orchestrator state in place, into both the
     ``_deploy_inputs`` block DeployOps reads and the ``generated_terraform``
-    block the tabs read (supporting the real nested ``files`` shape AND the
+    block the tabs read (supporting both the nested ``files`` shape and the
     mock's flat keys)."""
     infracost = state.setdefault("infracost_result", {})
     deploy_inputs = infracost.setdefault("_deploy_inputs", {})
@@ -409,11 +446,9 @@ def rollback_job(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Roll back the most recent deployment of a run to a previous ECS task-definition revision.
-
-    Delegates to DeployOpsAgent.rollback_deployment using the AWS config and
-    service details captured in the run's persisted deployment record.
-    """
+    """Roll back a run's most recent deployment to a previous ECS
+    task-definition revision, delegating to DeployOpsAgent using the AWS
+    config captured in the persisted deployment record."""
     run = _get_owned_run(db, job_id, current_user.id)
 
     deployment = (
@@ -491,10 +526,6 @@ def list_deployment_revisions(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """List deployable ECS task-definition revisions for a run's deployment.
-
-    Powers the "roll back to a specific version" dropdown in the UI.
-    """
     _get_owned_run(db, job_id, current_user.id)
 
     deployment = (
@@ -579,7 +610,6 @@ def get_job_results(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Return the normalized result tables for a run (findings, cost, IaC, deploy)."""
     run = _get_owned_run(db, job_id, current_user.id)
 
     def _rows(query):
@@ -633,7 +663,6 @@ def download_sbom(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Serve the CycloneDX SBOM generated for a job as a JSON attachment."""
     run = _get_owned_run(db, job_id, current_user.id)
 
     sbom = (run.run_metadata or {}).get("codesec_result", {}).get("sbom")
@@ -689,7 +718,6 @@ def get_job(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Return the persisted job state (analysis run + full orchestrator state)."""
     run = _get_owned_run(db, job_id, current_user.id)
 
     state = run.run_metadata or {}
@@ -712,7 +740,6 @@ def list_jobs(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """List the current user's analysis runs with their coarse status."""
     runs = (
         db.query(models.AnalysisRun)
         .filter(models.AnalysisRun.triggered_by == current_user.id)
@@ -736,11 +763,10 @@ def list_jobs(
 
 
 def _current_gate(state: dict) -> str | None:
-    """Return the name of the gate the run is currently paused at, if any.
+    """Return the gate the run is paused at, if any.
 
-    LangGraph signals paused human gates via the __interrupt__ key (a list of
-    interrupt payloads). Fall back to the status string, then to the
-    human_gates object (a gate marked required with approved=None is pending).
+    LangGraph signals paused gates via ``__interrupt__`` (a list of interrupt
+    payloads); fall back to the status string, then to human_gates.
     """
     interrupts = state.get("__interrupt__")
     if isinstance(interrupts, list) and interrupts:

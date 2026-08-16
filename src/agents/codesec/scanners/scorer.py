@@ -1,6 +1,5 @@
 """
 CodeSec Security Score Calculator — Refined (T-4.7)
-====================================================
 Calculates a 0-100 security score with letter grade (A-F), severity counts,
 per-category breakdown, and prioritized recommendations.
 
@@ -43,9 +42,7 @@ from ..models import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Refined defaults (override via config.py if desired)
-# ---------------------------------------------------------------------------
 DEFAULT_MAX_PENALTY_RATIO = 0.70   # A category can lose at most 70% of its max
 DEFAULT_MIN_CATEGORY_SCORE = 15    # Floor per category (avoid score=0 on lows)
 DEFAULT_PENALTY_DECAY = 0.75       # Diminishing returns per repeated finding

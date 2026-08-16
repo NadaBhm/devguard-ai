@@ -4,8 +4,8 @@ No business logic here — every decision (which compute type, its sizing,
 its cost, its Terraform, its FinOps strategy) has already been made by
 modules 1-6 and 10. This module only routes those already-computed values
 into the exact shape of ``models.output_schema.InfraCostOutput``: which of
-``aws_config``/``deployment_config``'s three blocks gets filled in (the
-other two are always ``null``, never omitted), and the one piece of real
+``aws_config``/``deployment_config``'s four blocks gets filled in (the
+other three are always ``null``, never omitted), and the one piece of real
 assembly logic it owns — the Docker image tag fallback (``commit_sha`` if
 available, else ``"latest"`` plus a warning, never silently).
 """
@@ -18,6 +18,8 @@ import re
 from core.constants import (
     DOCKER_IMAGE_NAME,
     EC2_AMI_ID,
+    EC2_HEALTH_CHECK_PATH,
+    EC2_HEALTH_CHECK_PORT,
     EC2_KEY_PAIR_NAME,
     ECS_CLUSTER_NAME,
     unique_resource_name,
@@ -28,6 +30,7 @@ from core.constants import (
     LAMBDA_HANDLER,
     LAMBDA_RUNTIME,
     LAMBDA_TIMEOUT_SECONDS,
+    S3_BUCKET_PREFIX,
 )
 from core.decision_engine import DecisionResult
 from models.input_schema import RepoAnalysisInput
@@ -38,9 +41,11 @@ from models.output_schema import (
     AwsConfigEc2,
     AwsConfigEcs,
     AwsConfigLambda,
+    AwsConfigS3,
     DeploymentConfigEc2,
     DeploymentConfigEcs,
     DeploymentConfigLambda,
+    DeploymentConfigS3,
     DockerImage,
     Ec2AwsConfig,
     Ec2DeploymentConfig,
@@ -54,6 +59,9 @@ from models.output_schema import (
     LambdaDeploymentConfig,
     LambdaInfraCostOutput,
     Money,
+    S3AwsConfig,
+    S3DeploymentConfig,
+    S3InfraCostOutput,
     TerraformArtifacts,
     TerraformFiles,
 )
@@ -106,7 +114,8 @@ def resolve_docker_artifacts(
         decision.compute_type == "lambda"
         and not analysis.stack_detection.container.detected
     )
-    if is_lambda_zip:
+    # S3 static sites ship plain files — no container to build.
+    if is_lambda_zip or decision.compute_type == "s3":
         return None, None
 
     commit_sha = analysis.repo_metadata.commit_sha
@@ -252,8 +261,38 @@ def _build_ec2_output(
         deployment_config=DeploymentConfigEc2(
             ec2=Ec2DeploymentConfig(
                 strategy="rolling",
-                health_check_path=ECS_HEALTH_CHECK_PATH,
-                health_check_port=ECS_HEALTH_CHECK_PORT,
+                health_check_path=EC2_HEALTH_CHECK_PATH,
+                health_check_port=EC2_HEALTH_CHECK_PORT,
+                timeout_minutes=5,
+            )
+        ),
+        approval=Approval(status=approval_status),
+        enrichment=enrichment,
+    )
+
+
+def _build_s3_output(
+    analysis: RepoAnalysisInput,
+    decision: DecisionResult,
+    artifacts: Artifacts,
+    cost: Money,
+    enrichment: Enrichment,
+    approval_status: ApprovalStatus,
+    region: str = "us-east-1",
+) -> S3InfraCostOutput:
+    bucket_name = f"{S3_BUCKET_PREFIX}-{analysis.job_id[:32].lower()}"
+    return S3InfraCostOutput(
+        job_id=analysis.job_id,
+        artifacts=artifacts,
+        aws_config=AwsConfigS3(
+            region=region,
+            estimated_monthly_cost=cost,
+            s3=S3AwsConfig(bucket_name=bucket_name),
+        ),
+        deployment_config=DeploymentConfigS3(
+            s3=S3DeploymentConfig(
+                strategy="static",
+                health_check_path="/",
                 timeout_minutes=5,
             )
         ),
@@ -266,6 +305,7 @@ _BUILDERS = {
     "ecs": _build_ecs_output,
     "lambda": _build_lambda_output,
     "ec2": _build_ec2_output,
+    "s3": _build_s3_output,
 }
 
 
@@ -285,31 +325,19 @@ def build_output(
     """Assemble the final contract from already-computed module outputs.
 
     Args:
-        analysis: Module 1's output.
-        decision: Module 2's output — routes which variant is built.
-        terraform_files: Module 3's output.
-        cost: Module 4's output.
-        enrichment: Module 10's output (or a fallback), never computed here.
-        dockerfile: Pre-resolved via ``resolve_docker_artifacts`` — passed
-            in rather than recomputed here, since module 3 already needed
-            the same value to render ECS/EC2 templates. If omitted, it is
-            resolved on the spot (convenient for callers, like tests, that
-            don't already have it from a prior ``generate_terraform`` call).
+        dockerfile: Pre-resolved via ``resolve_docker_artifacts`` — module 3
+            already needed the same value to render templates; if omitted,
+            resolved on the spot (convenient for tests).
         docker_image: Same as ``dockerfile``, resolved together.
         approval_status: Defaults to "pending" — module 8 owns the real
             state machine; this is just what gets stamped on assembly.
-        source_code: Where the deployable source lives for tooling that
-            consumes these artifacts (e.g. the DeployOps agent). Defaults
-            to ``"."`` — a relative build context, never a fabricated
-            ``/tmp`` checkout path that nobody created.
-        region: Deployment region, threaded through from the decided
-            deployment context so the metadata contract never diverges from
-            the rendered Terraform's ``variable "region"`` default.
-        environment: Same provenance as ``region`` — stamped into
-            ``Artifacts.variables.environment``.
+        source_code: Defaults to "." — a relative build context, never a
+            fabricated ``/tmp`` checkout path that nobody created.
+        region/environment: Threaded through so the metadata contract never
+            diverges from the rendered Terraform's defaults.
 
     Returns:
-        One of the three ``InfraCostOutput`` variants, with the other two
+        One of the four ``InfraCostOutput`` variants, with the other
         ``aws_config``/``deployment_config`` blocks explicitly ``null``.
     """
     if dockerfile is None and docker_image is None:

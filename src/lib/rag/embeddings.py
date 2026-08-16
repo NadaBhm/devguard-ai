@@ -1,8 +1,3 @@
-"""
-Embedding Generation — Hugging Face (local, free)
-==================================================
-"""
-
 from __future__ import annotations
 
 import logging
@@ -16,8 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 class EmbeddingClient:
-    """Client for generating text embeddings via Hugging Face (local)."""
-
     _model_cache: dict[str, SentenceTransformer] = {}
 
     def __init__(self, config: RAGConfig | None = None) -> None:
@@ -25,7 +18,6 @@ class EmbeddingClient:
         self.model = self._load_model()
 
     def _load_model(self) -> SentenceTransformer:
-        """Load model with caching."""
         model_name = self.config.hf_model
 
         if model_name not in EmbeddingClient._model_cache:
@@ -38,18 +30,10 @@ class EmbeddingClient:
         return EmbeddingClient._model_cache[model_name]
 
     def embed(self, texts: list[str], is_query: bool = False) -> list[list[float]]:
-        """Generate embeddings for texts.
-
-        Args:
-            texts: List of texts to embed.
-            is_query: If True, apply BGE query prefix for retrieval-optimized
-                     embedding. Documents should use is_query=False (no prefix).
-        """
+        """Generate embeddings; if is_query, apply the BGE retrieval prefix (documents stay raw)."""
         if not texts:
             return []
 
-        # BGE models: query gets prefix, documents stay raw
-        # Official BGE usage: only query uses instruction
         if is_query and "bge" in self.config.hf_model.lower():
             texts = [
                 "Represent this sentence for searching relevant passages: " + t
@@ -68,11 +52,9 @@ class EmbeddingClient:
             raise
 
     def embed_single(self, text: str, is_query: bool = False) -> list[float]:
-        """Embed single text."""
         return self.embed([text], is_query=is_query)[0]
 
 
 def get_embedding(text: str, config: RAGConfig | None = None) -> list[float]:
-    """Convenience function."""
     client = EmbeddingClient(config)
     return client.embed_single(text, is_query=True)

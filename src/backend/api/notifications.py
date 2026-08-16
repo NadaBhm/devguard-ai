@@ -13,7 +13,6 @@ def list_notifications(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user),
 ):
-    """List the current user's notifications, most recent first."""
     query = db.query(models.Notification).filter(
         models.Notification.user_id == current_user.id
     )
@@ -49,7 +48,6 @@ def mark_notification_read(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_active_user),
 ):
-    """Mark a single notification as read. Only the owning user may do this."""
     notification = (
         db.query(models.Notification)
         .filter(

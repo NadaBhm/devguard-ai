@@ -16,8 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ContainerInfo(BaseModel):
-    """Container detection details for the analyzed repository."""
-
     model_config = ConfigDict(frozen=True)
 
     detected: bool
@@ -27,8 +25,6 @@ class ContainerInfo(BaseModel):
 
 
 class StackDetection(BaseModel):
-    """Detected technology stack and the confidence associated with it."""
-
     model_config = ConfigDict(frozen=True)
 
     primary_language: str
@@ -41,8 +37,6 @@ class StackDetection(BaseModel):
 
 
 class RepoMetadata(BaseModel):
-    """Metadata about the repository that was analyzed."""
-
     model_config = ConfigDict(frozen=True)
 
     name: str
@@ -64,8 +58,6 @@ class SecurityScore(BaseModel):
 
 
 class RepoAnalysisInput(BaseModel):
-    """Top-level input contract received from the repo-analysis agent."""
-
     model_config = ConfigDict(frozen=True)
 
     job_id: str

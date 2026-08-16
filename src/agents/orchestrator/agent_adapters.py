@@ -17,25 +17,23 @@ convention or a data contract:
   | DeployOps (Oussema)  | await DeployOpsAgent().deploy(payload)        |
   |                      | -> dict (async class method)                  |
 
-On top of that, InfraCost's OUTPUT shape and DeployOps's INPUT shape do not
-line up (see translate_infracost_to_deploy_payload below for the gory
-details). Rather than smearing those mismatches across nodes.py, everything
-is isolated here: when the agents change their contracts, THIS is the only
-file that needs to change.
+InfraCost's OUTPUT shape and DeployOps's INPUT shape do not line up
+(see translate_infracost_to_deploy_payload). Rather than smearing those
+mismatches across nodes.py, everything is isolated here: when the agents
+change their contracts, THIS is the only file that needs to change.
 
 MOCK MODE
 ---------
-Until all four feature branches are merged onto master, the real agent
-modules simply don't exist in this branch. Every call_* function therefore
-falls back to the Sprint 1 mock payloads unless explicitly switched on:
+Until all feature branches are merged, real agent modules don't exist.
+Every call_* function falls back to Sprint 1 mocks unless switched on:
 
     DEVGUARD_REAL_CODESEC=1
     DEVGUARD_REAL_INFRACOST=1
     DEVGUARD_REAL_DEPLOYOPS=1
     DEVGUARD_REAL_AGENTS=1      # turns on all three at once
 
-Imports of the real agents are LAZY (inside the functions), so this module
-imports cleanly even when none of the agent packages are present.
+Imports of the real agents are LAZY (inside functions), so this module
+imports cleanly even when no agent packages are present.
 
 CDC Reference: T-2.17 (wire orchestrator to real CodeSec/DeployOps),
                T-3.16 (integrate InfraCost into orchestrator workflow)
@@ -62,7 +60,6 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 def _flag(name: str) -> bool:
-    """Read a DEVGUARD_REAL_* env flag (also honours the global switch)."""
     if os.getenv("DEVGUARD_REAL_AGENTS", "").strip() in ("1", "true", "True"):
         return True
     return os.getenv(name, "").strip() in ("1", "true", "True")
@@ -98,20 +95,13 @@ def run_sync(coro: "Any") -> Any:
     """
     Drive an async agent call from a synchronous LangGraph node.
 
-    Why this exists: two of the three agents are async, but the graph itself
-    must stay synchronous. `graph.invoke()` cannot execute async nodes
-    (LangGraph raises InvalidUpdateError: "Expected dict, got coroutine"),
-    and switching the graph to `ainvoke()` would force run_workflow() /
-    resume_workflow() to become async too — which would break the backend,
-    where they are called from ordinary sync FastAPI endpoints
-    (src/backend/api/jobs.py). The public API is a contract with Oussema's
-    code; the async-ness of the agents is an implementation detail. So the
-    bridge lives here.
-
-    If no event loop is running (the normal case: a sync FastAPI endpoint is
-    executed in a threadpool), asyncio.run() is enough. If one IS already
-    running, asyncio.run() would raise, so the coroutine is handed to a
-    dedicated thread with its own loop.
+    The graph must stay synchronous: `graph.invoke()` cannot run async nodes
+    (LangGraph raises InvalidUpdateError: "Expected dict, got coroutine"), and
+    making it async would force run_workflow()/resume_workflow() async too,
+    breaking the backend's sync FastAPI endpoints (src/backend/api/jobs.py).
+    If no event loop is running, asyncio.run() suffices; otherwise the
+    coroutine runs on a dedicated thread with its own loop (asyncio.run()
+    would raise).
     """
     try:
         asyncio.get_running_loop()
@@ -174,21 +164,13 @@ async def call_codesec(repo_url: str, job_id: str) -> dict[str, Any]:
 # =============================================================================
 # CDC Reference: T-3.16 (integrate InfraCost into orchestrator workflow)
 #
-# NOTE ON API CHURN: this module has been rewritten twice against two
-# different InfraCost APIs seen on master at different times:
-#   - run_pipeline_with_context() + core.orchestrator_adapter.to_orchestrator_result()
-#     (models/output_schema.py) -- what THIS version targets, matching the
-#     master snapshot merged 2026-08-08.
-#   - a plain run_pipeline() with no adapter module (models/output_models.py)
-#     -- seen on an earlier master snapshot; that version never provided
-#     Dockerfile CONTENT, only a path into CodeSec's already-deleted clone
-#     (a real, unresolved integration gap flagged to the team).
-# THIS version's output_builder.py generates the Dockerfile content itself
-# (resolve_docker_artifacts -> f"FROM {base_image}\nCOPY . /app\n"), so that
-# specific blocker does not apply here. If InfraCost's API changes again,
-# check artifacts.dockerfile in the raw output first - if it's back to being
-# empty/path-only, translate_infracost_to_deploy_payload's dockerfile check
-# below will fail loudly rather than silently, which is the point.
+# InfraCost's API has churned twice on master: this targets
+# run_pipeline_with_context() + core.orchestrator_adapter.to_orchestrator_result().
+# An earlier run_pipeline() version never produced Dockerfile CONTENT, only a
+# source_code path into CodeSec's already-deleted clone. This build's
+# output_builder.py generates the Dockerfile itself (f"FROM {base_image}\nCOPY
+# . /app\n"), so if the API changes again, watch artifacts.dockerfile - the
+# translator below fails loudly if it regresses to empty/path-only.
 
 def _infracost_package_dir() -> Path:
     """Absolute path to src/agents/agentInfraCost, regardless of cwd."""
@@ -199,31 +181,20 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
     """
     Import and run Karim's pipeline using ITS OWN import convention.
 
-    core/*.py here import each other with flat names (`from core.decision_engine
-    import ...`, `from models.output_schema import ...`), which only resolve if
-    agentInfraCost/ itself - not src/ - is on sys.path.
+    agentInfraCost/core/*.py import each other with flat names (`from
+    core.decision_engine import ...`), which only resolve if agentInfraCost/
+    itself - not src/ - is on sys.path. Merely inserting it into the path
+    failed on Windows ("No module named 'core.orchestrator_adapter'"): with
+    '.', 'src' and agentInfraCost/ all on sys.path, PEP 420 namespace packages
+    could assemble a bare `core` from more than one entry, and which portion
+    won depended on path order.
 
-    An earlier version of this function merely INSERTED agentInfraCost/ into
-    the existing sys.path (leaving '.' and 'src' in place too) before
-    importing with Karim's flat names. That worked in testing here, but
-    reproducibly failed on Windows with "No module named
-    'core.orchestrator_adapter'" - 'core' resolving to *something*, just not
-    the right thing. The likely cause: with '.', 'src' AND agentInfraCost/
-    all on sys.path simultaneously, Python's implicit namespace-package
-    mechanism (PEP 420) can assemble a bare `core` package out of portions
-    from more than one of those entries, and Windows' path/caching behavior
-    made a different portion win than what happened to work on Linux here -
-    a fragile, order-dependent outcome either way.
-
-    This version removes the ambiguity instead of hoping insertion order
-    resolves it: for the duration of this call ONLY, sys.path is replaced
-    with agentInfraCost/ plus whatever isn't part of this project's own
-    source tree (stdlib, site-packages, installed dependencies stay
-    reachable; '.', 'src', and their absolute-path equivalents do not). No
-    other sys.path entry can contribute a competing `core` or `models`
-    portion during this import, on any platform. Restored exactly afterwards
-    - this runs off the main thread (via run_in_executor in call_infracost),
-    so mutating sys.path here can't race the rest of the app.
+    So for this call ONLY, sys.path is replaced with agentInfraCost/ plus
+    everything outside this project's source tree (stdlib and site-packages
+    stay reachable; '.', 'src' and their absolute-path equivalents do not).
+    No other entry can contribute a competing `core` or `models` portion, on
+    any platform. Restored afterwards; runs off the main thread (via
+    run_in_executor), so mutating sys.path here can't race the app.
     """
     import sys as _sys
     from pathlib import Path as _Path
@@ -405,21 +376,15 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
     """
     Defensive normalization on top of Karim's to_orchestrator_result().
 
-    to_orchestrator_result() renames 6 of the orchestrator's 7 InfraCostResult
-    fields correctly, but passes cost_estimate through as a raw Money dump
-    (output.aws_config.estimated_monthly_cost.model_dump() ->
-    {amount, currency, range_min, range_max}) rather than the schema's
-    documented {monthly_cost_usd, currency, breakdown, range_min, range_max}.
-    The nested arrays have the same problem: load_scenarios/region_comparison
-    carry Money objects under ``estimated_monthly_cost`` (not the documented
-    ``estimated_monthly_cost_usd`` / ``monthly_cost_usd``) and optimizations
-    use the FinOps ``name``/``reason``/``projected_monthly_savings`` (not the
-    documented ``strategy``/``description``/``projected_savings_usd``), so the
-    report's cost tables render blank for real runs. Caught by
-    test_schema_conformance.py, which is exactly what that suite is for.
-    Idempotent: already-normalized input (the documented field names present)
-    passes through unchanged, so this is safe to call even if Karim fixes
-    this upstream later.
+    It renames 6 of the 7 InfraCostResult fields correctly but passes
+    cost_estimate through as a raw Money dump ({amount, currency, range_min,
+    range_max}) rather than the documented {monthly_cost_usd, currency,
+    breakdown, ...}; load_scenarios/region_comparison nest Money under
+    estimated_monthly_cost, and optimizations uses FinOps naming (name /
+    reason / projected_monthly_savings). Unnormalized, the report's cost
+    tables render blank for real runs (caught by test_schema_conformance.py).
+    Idempotent: already-normalized input passes through unchanged, so this is
+    safe to call even if Karim fixes the mapping upstream later.
     """
     result = dict(result)
     cost = dict(result.get("cost_estimate") or {})
@@ -485,16 +450,11 @@ def normalize_infracost_result(result: dict[str, Any]) -> dict[str, Any]:
 # =============================================================================
 # 3. INFRACOST -> DEPLOYOPS TRANSLATION
 # =============================================================================
-# This is the messiest part of the integration. The two contracts diverge in
-# four separate ways, and — critically — Pydantic does NOT reject the
-# mismatch. DeployOps's Artifacts model declares
-#     docker_images: List[DockerImageConfig] = Field(default_factory=list)
-# so a payload carrying InfraCost's singular `dockerfile` + `docker_image`
-# validates cleanly, silently yielding docker_images == []. deploy() then
-# loops over zero images, builds/pushes nothing to ECR, and terraform apply
-# later references an image tag that was never published. The failure
-# surfaces deep inside AWS, far from its real cause. Hence this explicit,
-# loud translation step.
+# The two contracts diverge in four ways, and Pydantic does NOT reject the
+# mismatch: DeployOps's Artifacts.docker_images defaults to [], so a payload
+# with InfraCost's singular `dockerfile` + `docker_image` validates cleanly
+# and deploys zero images - the failure surfaces deep inside AWS, far from
+# its cause. Hence this explicit, loud translation step.
 #
 #   (a) docker_image (singular obj) + dockerfile (str)  ->  docker_images (list)
 #   (b) `context` and `platform` don't exist upstream   ->  defaulted here
@@ -540,27 +500,25 @@ def translate_infracost_to_deploy_payload(
     deployment_config = deploy_inputs.get("deployment_config") or {}
 
     # ---- compute type ------------------------------------------------------
-    # DeployOps's AWSConfig (src/agents/deployops/models.py) only has
-    # ecs_cluster / service_name - no lambda or ec2 fields exist there at
-    # all. Real, unresolved scope gap between the two agents, not something
-    # this function can paper over.
-    ecs_block = aws_config.get("ecs")
-    if compute_type != "ecs" or not ecs_block:
+    # DeployOps's AWSConfig (src/agents/deployops/models.py) has ecs_cluster /
+    # service_name for ECS, and bucket_name for S3. EC2 deployments reuse the
+    # ECS-style Docker image path (the instance runs the same container pulled
+    # from ECR), so they only need region. Lambda still has no deploy path in
+    # DeployOps, so it must fail loudly here rather than silently no-op later.
+    if compute_type not in ("ecs", "ec2", "s3"):
         raise ValueError(
-            f"DeployOps currently only supports ECS deployments, but InfraCost "
-            f"recommended compute_type={compute_type!r}. No lambda/ec2 mapping "
-            f"exists in DeployOps's AWSConfig model yet."
+            f"DeployOps currently only supports ecs, ec2, and s3 deployments, "
+            f"but InfraCost recommended compute_type={compute_type!r}. No "
+            f"{compute_type!r} mapping exists in DeployOps's AWSConfig model yet."
         )
 
-    # ---- Dockerfile content --------------------------------------------------
-    # This InfraCost build (output_builder.resolve_docker_artifacts) GENERATES
-    # the Dockerfile content itself (f"FROM {base_image}\nCOPY . /app\n") -
-    # unlike an earlier API seen on a different master snapshot, which only
-    # pointed at a source_code path (CodeSec's already-deleted clone). Still
-    # failing loudly if this ever regresses, rather than silently sending an
-    # empty image.
+    # This InfraCost build GENERATES the Dockerfile content itself
+    # (output_builder.resolve_docker_artifacts -> f"FROM {base_image}\nCOPY
+    # . /app\n"), unlike an earlier API that only pointed at a source_code
+    # path into CodeSec's already-deleted clone. Keep failing loudly if this
+    # ever regresses. S3 static sites ship plain files and carry no image.
     dockerfile_content = artifacts.get("dockerfile")
-    if not dockerfile_content:
+    if compute_type != "s3" and not dockerfile_content:
         raise ValueError(
             "artifacts.dockerfile is empty - InfraCost produced no Dockerfile "
             "content (e.g. a Lambda deployment, which doesn't use one) or its "
@@ -568,27 +526,55 @@ def translate_infracost_to_deploy_payload(
             "an image build with no Dockerfile."
         )
 
-    docker_image = artifacts.get("docker_image") or {}
-    docker_images = [{
-        "name": docker_image.get("name") or f"devguard-{job_id[:8]}",
-        "dockerfile": dockerfile_content,
-        # Neither field exists upstream; InfraCost never emits them.
-        "context": artifacts.get("source_code") or _DEFAULT_CONTEXT,
-        "tag": docker_image.get("tag") or "latest",
-        "platform": _DEFAULT_PLATFORM,
-    }]
+    docker_images: list[dict[str, Any]] = []
+    if compute_type != "s3":
+        docker_image = artifacts.get("docker_image") or {}
+        docker_images = [{
+            "name": docker_image.get("name") or f"devguard-{job_id[:8]}",
+            "dockerfile": dockerfile_content,
+            # Neither field exists upstream; InfraCost never emits them.
+            "context": artifacts.get("source_code") or _DEFAULT_CONTEXT,
+            "tag": docker_image.get("tag") or "latest",
+            "platform": _DEFAULT_PLATFORM,
+        }]
 
-    # ---- terraform files ---------------------------------------------------
     terraform = artifacts.get("terraform") or {}
     tf_files = dict(terraform.get("files") or {})
     if not tf_files:
         raise ValueError("InfraCost produced no Terraform files; nothing to deploy.")
 
-    # ---- deployment_config ---------------------------------------------------
-    ecs_deploy = deployment_config.get("ecs") or {}
-    strategy = ecs_deploy.get("strategy", "rolling")
+    dep_block = deployment_config.get(compute_type) or {}
+    strategy = dep_block.get("strategy", "rolling")
     if strategy == "blue-green":
         strategy = "blue_green"
+
+    ecs_block = aws_config.get("ecs") or {}
+    ec2_block = aws_config.get("ec2") or {}
+    s3_block = aws_config.get("s3") or {}
+    if compute_type == "ecs":
+        if not ecs_block.get("cluster") or not ecs_block.get("service_name"):
+            raise ValueError(
+                "InfraCost's aws_config.ecs is missing cluster/service_name; "
+                "DeployOps.rollback() would raise KeyError on these later."
+            )
+        flat_aws = {
+            "region": aws_config.get("region", "us-east-1"),
+            "ecs_cluster": ecs_block.get("cluster"),
+            "service_name": ecs_block.get("service_name"),
+        }
+    elif compute_type == "ec2":
+        flat_aws = {
+            "region": aws_config.get("region", "us-east-1"),
+            "ecs_cluster": None,
+            "service_name": None,
+        }
+    else:  # s3
+        flat_aws = {
+            "region": aws_config.get("region", "us-east-1"),
+            "ecs_cluster": None,
+            "service_name": None,
+            "bucket_name": s3_block.get("bucket_name"),
+        }
 
     payload = {
         "job_id": job_id,
@@ -599,18 +585,14 @@ def translate_infracost_to_deploy_payload(
             },
             "docker_images": docker_images,
         },
-        "aws_config": {
-            "region": aws_config.get("region", "us-east-1"),
-            "ecs_cluster": ecs_block.get("cluster"),
-            "service_name": ecs_block.get("service_name"),
-        },
+        "aws_config": flat_aws,
         "deployment_config": {
             "strategy": strategy,
-            "health_check_path": ecs_deploy.get("health_check_path", "/health"),
-            "health_check_port": ecs_deploy.get("health_check_port", 80),
-            "min_healthy_percent": ecs_deploy.get("min_healthy_percent", 50),
-            "max_percent": ecs_deploy.get("max_percent", 200),
-            "timeout_minutes": ecs_deploy.get("timeout_minutes", 15),
+            "health_check_path": dep_block.get("health_check_path", "/health"),
+            "health_check_port": dep_block.get("health_check_port", 80),
+            "min_healthy_percent": dep_block.get("min_healthy_percent", 50),
+            "max_percent": dep_block.get("max_percent", 200),
+            "timeout_minutes": dep_block.get("timeout_minutes", 15),
             "auto_rollback": True,
         },
         "approval": {
@@ -619,13 +601,8 @@ def translate_infracost_to_deploy_payload(
             "approved_at": datetime.now(timezone.utc).isoformat(),
         },
         "metadata": {"repo_url": repo_url} if repo_url else {},
+        "compute_type": compute_type,
     }
-
-    if not payload["aws_config"]["ecs_cluster"] or not payload["aws_config"]["service_name"]:
-        raise ValueError(
-            "InfraCost's aws_config.ecs is missing cluster/service_name; "
-            "DeployOps.rollback() would raise KeyError on these later."
-        )
 
     return payload
 
@@ -652,7 +629,7 @@ async def call_deployops(deploy_payload: dict[str, Any], job_id: str) -> dict[st
         logger.info("[%s] DeployOps: MOCK mode (set DEVGUARD_REAL_DEPLOYOPS=1 for real)", job_id)
         return build_mock_deployops_result(job_id)
 
-    from src.agents.deployops.agent import DeployOpsAgent  # lazy
+    from src.agents.deployops.agent import DeployOpsAgent
 
     logger.info("[%s] DeployOps: REAL agent", job_id)
     agent = DeployOpsAgent()
@@ -662,7 +639,6 @@ async def call_deployops(deploy_payload: dict[str, Any], job_id: str) -> dict[st
 
 
 def translate_deployops_result(raw: dict[str, Any], job_id: str) -> dict[str, Any]:
-    """Map DeployOps's flat return dict onto the orchestrator's DeployOpsResult."""
     succeeded = raw.get("status") == "success"
     outputs = raw.get("resources") or {}
 
@@ -679,13 +655,21 @@ def translate_deployops_result(raw: dict[str, Any], job_id: str) -> dict[str, An
         "deployment_status": "success" if succeeded else "failed",
         "deployed_url": raw.get("deployed_url"),
         "health_check": {
-            # Preserve the real measured metrics when DeployOps reports them
-            # (deploy() runs the health check internally); fall back to
-            # inferred values only when the raw payload carries none.
-            "passed": hc.get("passed", succeeded),
-            "response_time_ms": hc.get("response_time_ms", 0),
-            "status_code": hc.get("status_code", 200 if succeeded else 0),
-            "checked_at": hc.get("checked_at", datetime.now(timezone.utc).isoformat()),
+            # Prefer explicit health_check details from DeployOps when they
+            # are provided (measured latency, status code, timestamp). If
+            # the agent only reports overall status, fall back to inferred
+            # defaults to keep the orchestrator shape stable.
+            **({
+                "passed": bool(raw.get("health_check", {}).get("passed")),
+                "response_time_ms": raw.get("health_check", {}).get("response_time_ms", 0),
+                "status_code": raw.get("health_check", {}).get("status_code", (200 if succeeded else 0)),
+                "checked_at": raw.get("health_check", {}).get("checked_at", datetime.now(timezone.utc).isoformat()),
+            } if isinstance(raw.get("health_check"), dict) else {
+                "passed": succeeded,
+                "response_time_ms": 0,
+                "status_code": 200 if succeeded else 0,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            })
         },
         "rollback_triggered": raw.get("error") == "health check failed",
         "rollback_reason": raw.get("error") if not succeeded else None,

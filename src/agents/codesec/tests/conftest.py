@@ -1,8 +1,3 @@
-"""CodeSec Test Fixtures
-======================
-Shared pytest fixtures for all CodeSec scanner tests.
-"""
-
 from __future__ import annotations
 
 import json
@@ -14,15 +9,12 @@ import pytest
 
 @pytest.fixture
 def temp_repo():
-    """Create a temporary repository directory for testing."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
 
 
 @pytest.fixture
 def sample_python_repo(temp_repo: Path) -> Path:
-    """Create a sample Python FastAPI repository structure."""
-    # requirements.txt
     (temp_repo / "requirements.txt").write_text(
         "fastapi==0.110.0\nsqlalchemy==2.0.0\npsycopg2-binary==2.9.9\nrequests==2.25.0\n"
     )
@@ -44,7 +36,6 @@ def get_user(user_id: str):
 """
     (temp_repo / "main.py").write_text(main_py_content)
 
-    # db.py with SQL injection
     (temp_repo / "app").mkdir()
     db_py_content = """
 import os
@@ -57,7 +48,6 @@ def get_user_raw(user_id):
 """
     (temp_repo / "app" / "db.py").write_text(db_py_content)
 
-    # .env with fake secret
     env_content = """
 DATABASE_URL=postgresql://user:pass@localhost/db
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
@@ -65,7 +55,6 @@ AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 """
     (temp_repo / ".env").write_text(env_content)
 
-    # Dockerfile
     dockerfile_content = """
 FROM python:latest
 WORKDIR /app
@@ -78,7 +67,6 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0"]
 """
     (temp_repo / "Dockerfile").write_text(dockerfile_content)
 
-    # docker-compose.yml
     compose_content = """
 version: '3.8'
 services:
@@ -98,7 +86,6 @@ services:
 
 @pytest.fixture
 def sample_node_repo(temp_repo: Path) -> Path:
-    """Create a sample Node.js/Express repository structure."""
     (temp_repo / "package.json").write_text(json.dumps({
         "name": "sample-api",
         "version": "1.0.0",
@@ -142,7 +129,6 @@ CMD ["node", "server.js"]
 
 @pytest.fixture
 def mock_codesec_result():
-    """Return a mock CodeSecResult dictionary for testing."""
     return {
         "job_id": "550e8400-e29b-41d4-a716-446655440000",
         "status": "completed",

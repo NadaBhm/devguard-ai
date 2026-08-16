@@ -1,5 +1,3 @@
-"""Tests for core.cost_estimator."""
-
 import json
 from pathlib import Path
 
@@ -22,11 +20,6 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 def _load_analysis(filename: str) -> RepoAnalysisInput:
     raw = json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
     return RepoAnalysisInput.model_validate(raw)
-
-
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -76,11 +69,6 @@ def test_estimate_cost_ecs_matches_hand_computed_formula() -> None:
     assert money.amount == expected
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
-
-
 def test_arch_selection_reads_ec2_instance_family() -> None:
     graviton_decision = DecisionResult(
         compute_type="ec2",
@@ -125,11 +113,6 @@ def test_pricing_data_is_loaded_once_and_cached() -> None:
     first = _load_pricing_data()
     second = _load_pricing_data()
     assert first is second
-
-
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
 
 
 def test_unknown_ec2_instance_type_raises_named_error() -> None:

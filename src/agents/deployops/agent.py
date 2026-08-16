@@ -658,8 +658,35 @@ class DeployOpsAgent:
                     self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
-    async def _run_docker_cmd(self, cmd: list[str], timeout: float = 300.0) -> tuple[int, str, str]:
-        """Run a docker command with a temporary DOCKER_CONFIG to avoid macOS credential helper hangs."""
+    async def _run_docker_cmd(
+        self, cmd: list[str], timeout: float = 300.0, docker_config: str | None = None
+    ) -> tuple[int, str, str]:
+        """Run a docker command with a DOCKER_CONFIG (avoids macOS credential
+        helper hangs). Pass the same ``docker_config`` dir across a
+        login/build/push sequence -- each call previously got its own
+        throwaway TemporaryDirectory, so `docker login`'s credentials were
+        gone (directory deleted) by the time `docker push` ran, failing with
+        'no basic auth credentials' on any host without a working global
+        Docker credential store (e.g. Windows/Docker Desktop locally)."""
+        if docker_config is not None:
+            config_path = Path(docker_config) / "config.json"
+            if not config_path.exists():
+                config_path.write_text('{"credsStore": ""}')
+            env = os.environ.copy()
+            env["DOCKER_CONFIG"] = docker_config
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                return -1, "", f"timed out after {timeout}s"
+            return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             config_path.write_text('{"credsStore": ""}')
@@ -709,31 +736,44 @@ class DeployOpsAgent:
         decoded_token = base64.b64decode(token).decode("utf-8")
         password = decoded_token.split(":", 1)[1]
 
-        # ECR login with temporary DOCKER_CONFIG to avoid macOS credential helper hangs
-        login_cmd = ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint]
-        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint], timeout=60.0)
-        if returncode != 0:
-            self.logger.error(f"ECR login failed: {stderr}")
-            return None
+        # login/build/push must share ONE DOCKER_CONFIG dir: each was
+        # previously calling _run_docker_cmd with its own throwaway
+        # TemporaryDirectory, so the credentials `docker login` just wrote
+        # were gone (directory already deleted) by the time `docker push`
+        # ran -- failed with "no basic auth credentials" on any host without
+        # a working global Docker credential store (confirmed on Windows /
+        # Docker Desktop locally; masked on the EC2 box by a pre-existing
+        # manual `docker login` in the real ~/.docker/config.json).
+        with tempfile.TemporaryDirectory() as docker_config_dir:
+            returncode, stdout, stderr = await self._run_docker_cmd(
+                ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint],
+                timeout=60.0, docker_config=docker_config_dir,
+            )
+            if returncode != 0:
+                self.logger.error(f"ECR login failed: {stderr}")
+                return None
 
-        # ECR repository URI
-        ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
-        image_uri = f"{ecr_repo}:{image_tag}"
+            # ECR repository URI
+            ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
+            image_uri = f"{ecr_repo}:{image_tag}"
 
-        # Build Docker image with platform for Fargate compatibility
-        build_context = self._workspace_dir(job_id) / docker_image.context
-        build_cmd = ["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)]
-        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)], timeout=600.0)
-        if returncode != 0:
-            self.logger.error(f"Docker build failed: {stderr}")
-            return None
+            # Build Docker image with platform for Fargate compatibility
+            build_context = self._workspace_dir(job_id) / docker_image.context
+            returncode, stdout, stderr = await self._run_docker_cmd(
+                ["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)],
+                timeout=600.0, docker_config=docker_config_dir,
+            )
+            if returncode != 0:
+                self.logger.error(f"Docker build failed: {stderr}")
+                return None
 
-        # Push to ECR
-        push_cmd = ["docker", "push", image_uri]
-        returncode, stdout, stderr = await self._run_docker_cmd(["docker", "push", image_uri], timeout=300.0)
-        if returncode != 0:
-            self.logger.error(f"Docker push failed: {stderr}")
-            return None
+            # Push to ECR
+            returncode, stdout, stderr = await self._run_docker_cmd(
+                ["docker", "push", image_uri], timeout=300.0, docker_config=docker_config_dir,
+            )
+            if returncode != 0:
+                self.logger.error(f"Docker push failed: {stderr}")
+                return None
 
         self.logger.info(f"Image pushed: {image_uri}")
         return image_uri

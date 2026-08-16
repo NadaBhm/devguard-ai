@@ -237,10 +237,21 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         # (agent.payload["dockerfile_content"]), never a synthesized stand-in.
         if raw.get("dockerfile_content"):
             dockerfile = raw["dockerfile_content"]
+        # Extract the app's real listen port from its own Dockerfile's
+        # EXPOSE line, instead of always wiring the ECS template's fixed
+        # default (8080) into both the container's containerPort and the
+        # ALB target group. Confirmed mismatch in practice: a FastAPI app
+        # on port 8000 got 8080 wired in, nothing ever answered there, and
+        # every health check failed with 502 -> full rollback. Fail-soft:
+        # None (no EXPOSE line, e.g. the generic synthesized Dockerfile)
+        # falls back to ECS_HEALTH_CHECK_PORT in terraform_generator.py.
+        expose_match = re.search(r"^\s*EXPOSE\s+(\d+)", dockerfile, re.MULTILINE) if dockerfile else None
+        detected_port = int(expose_match.group(1)) if expose_match else None
         terraform_context = decide_deployment_context(
             analysis,
             job_id=analysis.job_id,
             docker_image=f"{docker_image.name}:{docker_image.tag}" if docker_image else None,
+            health_check_port=detected_port,
         )
         # A bare "name:tag" resolves against Docker Hub by default, not our
         # ECR repo, so ECS fails with CannotPullContainerError. Qualify it

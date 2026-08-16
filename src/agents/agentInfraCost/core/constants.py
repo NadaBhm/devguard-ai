@@ -41,6 +41,25 @@ REFINER_RETRY_DELAY_SECONDS: Final[float] = float(
     os.getenv("REFINER_RETRY_DELAY_SECONDS", "1.0")
 )
 
+def unique_resource_name(base: str, job_id: str) -> str:
+    """Suffix a base AWS resource name with a short, deterministic slice of
+    ``job_id`` so concurrent deployments never collide on the same fixed
+    name (cluster, service, IAM role, ALB, target group, log group -- the
+    ALB/target group/log-group names are all DERIVED from service_name in
+    the Terraform template, so suffixing service_name here is enough to
+    make those unique too, without touching main.tf.j2).
+    Confirmed colliding in practice: two people (or even one person running
+    two jobs) hit ELBv2 Target Group / IAM Role / CloudWatch Log Group
+    "already exists" on `terraform apply`, because every job used to reuse
+    the exact same fixed names. 8 hex chars keeps every AWS name-length
+    limit involved (ALB/target group: 32 chars, IAM role: 64 chars) with
+    comfortable room to spare.
+    Must be called with the SAME job_id from both output_builder.py (what
+    DeployOps is told the service is named) and terraform_generator.py
+    (what Terraform actually creates) -- same job_id in, same suffix out,
+    so the two never drift apart.
+    """
+    return f"{base}-{job_id[:8]}"
 # ECS
 ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
 ECS_SERVICE_NAME: Final[str] = "app-service"

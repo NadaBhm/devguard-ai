@@ -105,6 +105,7 @@ def decide_deployment_context(
     job_id: str,
     docker_image: str | None,
     source_code_path: str | None = None,
+    health_check_port: int | None = None,
 ) -> TerraformContext:
     """Build a TerraformContext, letting an LLM pick region/environment when
     available and valid, otherwise using today's fixed defaults.
@@ -151,5 +152,6 @@ def decide_deployment_context(
         environment=environment,
         docker_image=docker_image,
         source_code_path=source_code_path,
+        health_check_port=health_check_port,
         database=analysis.stack_detection.database,
     )

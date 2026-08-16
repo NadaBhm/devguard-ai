@@ -23,6 +23,7 @@ from core.constants import (
     EC2_INSTANCE_NAME,
     EC2_KEY_PAIR_NAME,
     ECS_CLUSTER_NAME,
+    unique_resource_name,
     ECS_HEALTH_CHECK_PATH,
     ECS_HEALTH_CHECK_PORT,
     ECS_SERVICE_NAME,
@@ -68,6 +69,15 @@ class TerraformContext(BaseModel):
     environment: str = "dev"
     docker_image: str | None = None
     source_code_path: str | None = None
+    health_check_port: int | None = None
+    """The real container port, extracted from the repo's own Dockerfile
+    (EXPOSE line) by pipeline.py. None falls back to ECS_HEALTH_CHECK_PORT
+    (8080) -- the ECS template's fixed default, which does not necessarily
+    match what the app actually listens on (confirmed mismatch: a FastAPI
+    app on port 8000 got ECS_HEALTH_CHECK_PORT=8080 wired into both the
+    container's containerPort and the ALB target group, so nothing ever
+    answered on 8080 and the health check failed with 502 on every
+    attempt, triggering a full rollback)."""
     database: str | None = None
     """The database engine module 1 detected (e.g. "postgresql"), if any —
     ``analysis.stack_detection.database`` passed straight through. Only used
@@ -77,19 +87,24 @@ class TerraformContext(BaseModel):
 
 
 def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
+    # Suffixed with job_id (see constants.unique_resource_name) so concurrent
+    # deployments never collide on the same fixed cluster/service/role name
+    # -- confirmed colliding in practice (ELBv2 Target Group / IAM Role /
+    # CloudWatch Log Group "already exists" on a second `terraform apply`).
+    service_name = unique_resource_name(ECS_SERVICE_NAME, context.job_id)
     return {
         "region": context.region,
         "environment": context.environment,
-        "cluster_name": ECS_CLUSTER_NAME,
-        "service_name": ECS_SERVICE_NAME,
+        "cluster_name": unique_resource_name(ECS_CLUSTER_NAME, context.job_id),
+        "service_name": service_name,
         "task_cpu": decision.sizing["task_cpu"],
         "task_memory": decision.sizing["task_memory"],
         "docker_image": context.docker_image or "devguard-app:latest",
-        "health_check_port": ECS_HEALTH_CHECK_PORT,
+        "health_check_port": context.health_check_port or ECS_HEALTH_CHECK_PORT,
         "health_check_path": ECS_HEALTH_CHECK_PATH,
         "database": context.database,
-        "execution_role_name": ECS_TASK_EXECUTION_ROLE_NAME,
-        "log_group_name": f"/ecs/{ECS_SERVICE_NAME}",
+        "execution_role_name": unique_resource_name(ECS_TASK_EXECUTION_ROLE_NAME, context.job_id),
+        "log_group_name": f"/ecs/{service_name}",
     }
 
 

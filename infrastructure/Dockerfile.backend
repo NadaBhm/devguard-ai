@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && tar -xzf gitleaks.tar.gz gitleaks \
     && install -m 0755 gitleaks /usr/local/bin/gitleaks \
     && rm -f gitleaks.tar.gz gitleaks \
-    && curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.73.0_$TRIVY.tar.gz -o trivy.tar.gz \
+    && curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.74.0_$TRIVY.tar.gz -o trivy.tar.gz \
     && tar -xzf trivy.tar.gz trivy \
     && install -m 0755 trivy /usr/local/bin/trivy \
     && rm -f trivy.tar.gz trivy \

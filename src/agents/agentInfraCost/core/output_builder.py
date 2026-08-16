@@ -20,6 +20,7 @@ from core.constants import (
     EC2_AMI_ID,
     EC2_KEY_PAIR_NAME,
     ECS_CLUSTER_NAME,
+    unique_resource_name,
     ECS_HEALTH_CHECK_PATH,
     ECS_HEALTH_CHECK_PORT,
     ECS_SERVICE_NAME,
@@ -159,9 +160,13 @@ def _build_ecs_output(
         aws_config=AwsConfigEcs(
             region=region,
             estimated_monthly_cost=cost,
+            # Suffixed with job_id -- must match terraform_generator.py's
+            # _ecs_render_context exactly, or DeployOps would be told the
+            # wrong (unsuffixed) cluster/service name for a real resource
+            # Terraform created under the suffixed one.
             ecs=EcsAwsConfig(
-                cluster=ECS_CLUSTER_NAME,
-                service_name=ECS_SERVICE_NAME,
+                cluster=unique_resource_name(ECS_CLUSTER_NAME, analysis.job_id),
+                service_name=unique_resource_name(ECS_SERVICE_NAME, analysis.job_id),
                 task_cpu=str(sizing["task_cpu"]),
                 task_memory=str(sizing["task_memory"]),
             ),

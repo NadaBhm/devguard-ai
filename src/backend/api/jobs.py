@@ -33,6 +33,7 @@ from ..persistence import (
 )
 from ..redis_client import publish_gate, publish_progress, publish_results_ready
 from src.agents.orchestrator.agent_adapters import report_mode
+from src.lib.aws.client import AWSClient, RETRY_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -548,6 +549,120 @@ def list_deployment_revisions(
             status_code=400,
             detail="Deployment has no ECS cluster/service info to list versions for",
         )
+
+
+@router.get("/{job_id}/monitoring")
+def get_deployment_monitoring(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Live status of a job's deployed AWS resources -- ECS service health,
+    ALB target health, and current monthly cost estimate. Queries AWS
+    directly rather than relying on what Terraform reported at apply time,
+    since a service can drift (tasks crash-looping, targets going
+    unhealthy) long after a successful deploy with no visibility into it
+    from inside DevGuard today -- confirmed the hard way multiple times
+    this session, having to manually run aws-cli commands to find out
+    whether a "Completed" run was actually still healthy.
+    """
+    _get_owned_run(db, job_id, current_user.id)
+    deployment = (
+        db.query(models.Deployment)
+        .filter(models.Deployment.run_id == job_id)
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if not deployment:
+        raise HTTPException(status_code=404, detail="No deployment found for this job")
+
+    infra = deployment.infrastructure_json or {}
+    tf_outputs = infra.get("terraform_outputs") or {}
+    region = deployment.aws_region or "us-east-1"
+    service_name = tf_outputs.get("service_name")
+    ecs_cluster = tf_outputs.get("ecs_cluster_name")
+    if not ecs_cluster and service_name and "-" in service_name:
+        # ecs_cluster_name has been observed empty in stored
+        # terraform_outputs (DeployOps bug, separate from this feature) --
+        # fall back to deriving it, since both names share the same job_id
+        # suffix (see agentInfraCost/core/constants.py
+        # unique_resource_name): "app-service-<suffix>" implies
+        # "devguard-cluster-<suffix>".
+        suffix = service_name.rsplit("-", 1)[-1]
+        ecs_cluster = f"devguard-cluster-{suffix}"
+    if not ecs_cluster or not service_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment has no ECS cluster/service info to monitor",
+        )
+
+    try:
+        aws = AWSClient(region=region)
+        ecs = aws.session.client("ecs", config=RETRY_CONFIG)
+        svc_resp = ecs.describe_services(cluster=ecs_cluster, services=[service_name])
+        services = svc_resp.get("services") or []
+        if not services:
+            return {
+                "job_id": job_id,
+                "ecs_cluster": ecs_cluster,
+                "service_name": service_name,
+                "status": "not_found",
+                "detail": "Service no longer exists in AWS (possibly rolled back or destroyed).",
+            }
+        svc = services[0]
+
+        target_health = []
+        target_health_error = None
+        elbv2 = aws.session.client("elbv2", config=RETRY_CONFIG)
+        for lb in svc.get("loadBalancers", []):
+            tg_arn = lb.get("targetGroupArn")
+            if not tg_arn:
+                continue
+            try:
+                health_resp = elbv2.describe_target_health(TargetGroupArn=tg_arn)
+                for entry in health_resp.get("TargetHealthDescriptions", []):
+                    target_health.append({
+                        "target_id": entry.get("Target", {}).get("Id"),
+                        "port": entry.get("Target", {}).get("Port"),
+                        "state": entry.get("TargetHealth", {}).get("State"),
+                        "reason": entry.get("TargetHealth", {}).get("Reason"),
+                    })
+            except Exception as tg_exc:
+                # The ECS service can outlive its target group (e.g. a
+                # partial rollback that destroyed the ALB/target group but
+                # left the service running -- observed twice this session).
+                # Still return the ECS-level status we already have rather
+                # than failing the whole endpoint over a missing target
+                # group.
+                target_health_error = str(tg_exc)
+
+        return {
+            "job_id": job_id,
+            "ecs_cluster": ecs_cluster,
+            "service_name": service_name,
+            "status": svc.get("status"),
+            "desired_count": svc.get("desiredCount"),
+            "running_count": svc.get("runningCount"),
+            "pending_count": svc.get("pendingCount"),
+            "deployments": [
+                {
+                    "status": d.get("status"),
+                    "rollout_state": d.get("rolloutState"),
+                    "rollout_state_reason": d.get("rolloutStateReason"),
+                    "desired_count": d.get("desiredCount"),
+                    "running_count": d.get("runningCount"),
+                }
+                for d in svc.get("deployments", [])
+            ],
+            "target_health": target_health,
+            "target_health_error": target_health_error,
+            "estimated_monthly_cost_usd": (
+                float(deployment.cost_total_monthly) if deployment.cost_total_monthly else None
+            ),
+        }
+    except Exception as exc:
+        logging.getLogger(__name__).warning(f"[{job_id}] Monitoring fetch failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"Could not fetch live AWS status: {exc}")
 
     try:
         from src.agents.orchestrator.agent_adapters import use_real_deployops

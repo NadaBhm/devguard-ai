@@ -14,10 +14,11 @@ import { CodeSecTab } from "../components/findings/CodeSecTabContent"
 import { InfraCostTab } from "../components/cost/InfraCostTabContent"
 import { TerraformTab } from "../components/terraform/TerraformTabContent"
 import { DeployTab } from "../components/deploy/DeployTabContent"
+import { MonitoringTab } from "../components/monitoring/MonitoringTabContent"
 import { formatCurrency, formatDate, formatDuration, shortId } from "../lib/format"
 import type { GateContext, JobDetail, JobState, RunState } from "../types/jobs"
 
-const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "artifacts", "deploy"]
+const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "artifacts", "deploy", "monitoring"]
 
 // Legacy: pre-rename URLs used ?tab=terraform.
 const LEGACY_TAB_ALIASES: Record<string, RunTab> = { terraform: "artifacts" }
@@ -287,6 +288,11 @@ export function RunDetailPage() {
       {activeTab === "deploy" && (
         <div className="overflow-hidden rounded-lg border border-border bg-surface">
           <DeployTab deployments={results?.deployments ?? []} jobId={jobId} />
+        </div>
+      )}
+      {activeTab === "monitoring" && (
+        <div className="overflow-hidden rounded-lg border border-border bg-surface">
+          <MonitoringTab jobId={jobId} />
         </div>
       )}
     </div>

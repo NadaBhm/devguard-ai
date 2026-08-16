@@ -47,6 +47,33 @@ export interface ArtifactsEditResponse {
   written: number
   terraform_artifacts: TerraformArtifact[]
 }
+export interface MonitoringDeployment {
+  status: string | null
+  rollout_state: string | null
+  rollout_state_reason: string | null
+  desired_count: number | null
+  running_count: number | null
+}
+export interface MonitoringTargetHealth {
+  target_id: string | null
+  port: number | null
+  state: string | null
+  reason: string | null
+}
+export interface MonitoringResponse {
+  job_id: string
+  ecs_cluster: string
+  service_name: string
+  status: string
+  desired_count?: number | null
+  running_count?: number | null
+  pending_count?: number | null
+  deployments?: MonitoringDeployment[]
+  target_health?: MonitoringTargetHealth[]
+  target_health_error?: string | null
+  estimated_monthly_cost_usd?: number | null
+  detail?: string
+}
 
 export const jobsApi = {
   create: (body: JobCreate) => client.post<JobResponse>("/jobs/", body),
@@ -79,4 +106,6 @@ export const jobsApi = {
     client.post<RollbackResponse>(`/jobs/${jobId}/rollback`, body),
   deploymentRevisions: (jobId: string) =>
     client.get<DeploymentRevisionsResponse>(`/jobs/${jobId}/deployments/revisions`),
+  monitoring: (jobId: string) =>
+    client.get<MonitoringResponse>(`/jobs/${jobId}/monitoring`),
 }

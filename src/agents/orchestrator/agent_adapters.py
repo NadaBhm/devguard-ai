@@ -601,7 +601,19 @@ def translate_infracost_to_deploy_payload(
             "approved_at": datetime.now(timezone.utc).isoformat(),
         },
         "metadata": {"repo_url": repo_url} if repo_url else {},
-        "compute_type": compute_type,
+        # NOTE: compute_type is deliberately NOT included here.
+        # This payload is already DeployOps-native (see the field
+        # translations documented above this function). DeployOps.
+        # _normalize_payload() re-derives docker_images from a
+        # *different*, older InfraCost-raw shape (singular
+        # artifacts.docker_image) the moment it sees a top-level
+        # "compute_type" key -- so a payload that already has the
+        # correct docker_images list (plural) gets silently
+        # overwritten with an empty one, failing later with
+        # "artifacts.docker_images is required and must be a list".
+        # Confirmed regression: this payload used to omit
+        # compute_type and deployed correctly; adding it broke
+        # every real deployment through this path.
     }
 
     return payload

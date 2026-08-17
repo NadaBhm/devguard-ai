@@ -10,6 +10,7 @@ class DeploymentStrategy(str, Enum):
     ROLLING = "rolling"
     BLUE_GREEN = "blue_green"
     CANARY = "canary"
+    STATIC = "static"
 
 
 class HealthCheckConfig(BaseModel):

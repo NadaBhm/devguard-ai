@@ -64,6 +64,13 @@ def _terraform_env_vars() -> Dict[str, Any]:
             except ValueError:
                 continue
         tf_vars[tf_name] = value
+
+    # The EC2 template declares a single required `subnet_id` (singular) while
+    # the ECS/S3 templates take `subnet_ids` (plural). DeployOps only knows the
+    # plural env var, so derive the singular value from the first subnet when
+    # the EC2 var isn't set explicitly.
+    if "subnet_id" not in tf_vars and tf_vars.get("subnet_ids"):
+        tf_vars["subnet_id"] = tf_vars["subnet_ids"][0]
     return tf_vars
 
 
@@ -707,6 +714,27 @@ class DeployOpsAgent:
                     self.logger.info(f"Copied source files from {src_context} to {context_dir}")
 
 
+    def _prepare_docker_config(self, docker_config: str) -> str:
+        """Provision a DOCKER_CONFIG directory.
+
+        Writes an empty-credsStore config.json (avoids macOS credential-helper
+        hangs / `osxkeychain` prompts) and, critically, symlinks the real
+        ``~/.docker/cli-plugins`` (buildx et al.) into it. Pointing
+        DOCKER_CONFIG at a throwaway directory hides the CLI plugin directory —
+        ``docker buildx`` then fails with "unknown command: docker buildx"
+        (reproduced: ``docker buildx build --load`` runs fine from an
+        interactive shell but errors identically from the backend subprocess
+        before this fix). Returns the config dir.
+        """
+        config_path = Path(docker_config) / "config.json"
+        if not config_path.exists():
+            config_path.write_text('{"credsStore": ""}')
+        real_plugins = Path.home() / ".docker" / "cli-plugins"
+        local_plugins = Path(docker_config) / "cli-plugins"
+        if real_plugins.is_dir() and not local_plugins.exists():
+            local_plugins.symlink_to(real_plugins, target_is_directory=True)
+        return docker_config
+
     async def _run_docker_cmd(
         self, cmd: list[str], timeout: float = 300.0, docker_config: str | None = None
     ) -> tuple[int, str, str]:
@@ -716,13 +744,23 @@ class DeployOpsAgent:
         throwaway TemporaryDirectory, so `docker login`'s credentials were
         gone (directory deleted) by the time `docker push` ran, failing with
         'no basic auth credentials' on any host without a working global
-        Docker credential store (e.g. Windows/Docker Desktop locally)."""
+        Docker credential store (e.g. Windows/Docker Desktop locally).
+
+        Also forces BuildKit (DOCKER_BUILDKIT=1) for every command. The
+        legacy builder cannot pull multi-arch images for a
+        multi-stage Dockerfile built with ``--platform linux/amd64`` when a
+        base image (e.g. node:20-alpine, composer:2) is already cached for
+        another platform (e.g. arm64 on an Apple Silicon dev box): the build
+        dies with "image with reference sha256:... was found but does not
+        provide the specified platform (linux/amd64)". BuildKit handles the
+        cross-platform multi-stage pull/build correctly (confirmed live: the
+        same Dockerfile the legacy builder rejected built cleanly with
+        DOCKER_BUILDKIT=1)."""
         if docker_config is not None:
-            config_path = Path(docker_config) / "config.json"
-            if not config_path.exists():
-                config_path.write_text('{"credsStore": ""}')
+            self._prepare_docker_config(docker_config)
             env = os.environ.copy()
             env["DOCKER_CONFIG"] = docker_config
+            env["DOCKER_BUILDKIT"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -737,10 +775,10 @@ class DeployOpsAgent:
                 return -1, "", f"timed out after {timeout}s"
             return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         with tempfile.TemporaryDirectory() as tmpdir:
-            config_path = Path(tmpdir) / "config.json"
-            config_path.write_text('{"credsStore": ""}')
+            self._prepare_docker_config(tmpdir)
             env = os.environ.copy()
             env["DOCKER_CONFIG"] = tmpdir
+            env["DOCKER_BUILDKIT"] = "1"
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -802,19 +840,29 @@ class DeployOpsAgent:
             ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
             image_uri = f"{ecr_repo}:{image_tag}"
 
-            # Build Docker image with platform for Fargate compatibility
+            # Build Docker image with platform for Fargate compatibility.
+            # Use `docker buildx build` (BuildKit) directly: plain `docker build`
+            # on a host whose default builder is BuildKit-first, and the legacy
+            # builder both misbehave with cross-platform multi-stage builds
+            # (legacy chokes reusing an image cached for another platform, and
+            # DOCKER_BUILDKIT=1 via `docker build` errors "BuildKit is enabled
+            # but the buildx component is missing or broken"). `--load` lands the
+            # image in the local image store so `docker push` can find it.
             build_context = self._workspace_dir(job_id) / docker_image.context
             returncode, stdout, stderr = await self._run_docker_cmd(
-                ["docker", "build", "--platform", docker_image.platform, "-t", image_uri, str(build_context)],
+                ["docker", "buildx", "build", "--load", "--platform", docker_image.platform, "-t", image_uri, str(build_context)],
                 timeout=600.0, docker_config=docker_config_dir,
             )
             if returncode != 0:
                 self.logger.error(f"Docker build failed: {stderr}")
                 return None
 
-            # Push to ECR
+            # Push to ECR. A php-ext image with a compiled mysqli/pdo layer can
+            # exceed 400MB compressed across a modest uplink; the 300s default
+            # (which used to be the push timeout) killed a 240MB image at ~534s
+            # (measured live), so push gets a generous 900s budget.
             returncode, stdout, stderr = await self._run_docker_cmd(
-                ["docker", "push", image_uri], timeout=300.0, docker_config=docker_config_dir,
+                ["docker", "push", image_uri], timeout=900.0, docker_config=docker_config_dir,
             )
             if returncode != 0:
                 self.logger.error(f"Docker push failed: {stderr}")
@@ -833,7 +881,7 @@ class DeployOpsAgent:
             self.logger.warning(f"Backend Dockerfile not found at {backend_dockerfile}")
             return False
         
-        build_cmd = ["docker", "build", "--platform", "linux/amd64", "-t", backend_image_uri, str(backend_dockerfile.parent)]
+        build_cmd = ["docker", "buildx", "build", "--load", "--platform", "linux/amd64", "-t", backend_image_uri, str(backend_dockerfile.parent)]
         result = await asyncio.create_subprocess_exec(
             *build_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -904,10 +952,13 @@ class DeployOpsAgent:
                 "service_name": None,
             }
             flat_dep = {
-                "strategy": ec2_dep.get("strategy", "rolling"),
-                "health_check_path": ec2_dep.get("health_check_path", "/health"),
-                "health_check_port": ec2_dep.get("health_check_port", 8080),
-                "timeout_minutes": ec2_dep.get("timeout_minutes", 15),
+                "strategy": ec2_dep.get("strategy") or dep_config.get("strategy", "rolling"),
+                "health_check_path": ec2_dep.get("health_check_path")
+                    or dep_config.get("health_check_path", "/health"),
+                "health_check_port": ec2_dep.get("health_check_port")
+                    or dep_config.get("health_check_port", 8080),
+                "timeout_minutes": ec2_dep.get("timeout_minutes")
+                    or dep_config.get("timeout_minutes", 15),
                 "auto_rollback": True,
                 "rollback_on_alarm": True,
             }
@@ -945,8 +996,14 @@ class DeployOpsAgent:
             }
 
         docker_images: List[Dict[str, Any]] = []
+        # Preserve an already-correct plural docker_images list (DeployOps-native
+        # payloads) instead of rebuilding from the older singular docker_image
+        # shape, which silently emptied it and broke every real deployment.
+        existing = artifacts.get("docker_images")
+        if isinstance(existing, list) and existing:
+            docker_images = existing
         image = artifacts.get("docker_image")
-        if image:
+        if image and not docker_images:
             dockerfile = artifacts.get("dockerfile")
             if not dockerfile:
                 # CodeScan deletes its clone after extracting artifacts; never fabricate an image.
@@ -966,6 +1023,9 @@ class DeployOpsAgent:
             )
 
         status = approval.get("status", "pending")
+        deploy_approved = approval.get("deploy_approved")
+        if deploy_approved is None:
+            deploy_approved = status == "approved"
         return {
             "job_id": payload.get("job_id"),
             "artifacts": {
@@ -979,7 +1039,7 @@ class DeployOpsAgent:
             },
             "deployment_config": flat_dep,
             "approval": {
-                "deploy_approved": status == "approved",
+                "deploy_approved": deploy_approved,
                 "approved_by": approval.get("approved_by"),
             },
             "metadata": payload.get("metadata", {}) or {},
@@ -1033,7 +1093,7 @@ class DeployOpsAgent:
         # s3 static sites ship plain files and carry no container images.
         compute_type = payload.get("compute_type", "ecs")
         docker_images = artifacts.get("docker_images")
-        if not docker_images or not isinstance(docker_images, list):
+        if not isinstance(docker_images, list):
             raise ValueError("artifacts.docker_images is required and must be a list")
         if compute_type != "s3" and len(docker_images) == 0:
             raise ValueError("artifacts.docker_images must contain at least one image")
@@ -1061,19 +1121,25 @@ class DeployOpsAgent:
         aws_config = payload["aws_config"]
         if not isinstance(aws_config, dict):
             raise ValueError("aws_config must be a dict")
-        required_aws = ["region", "ecs_cluster", "service_name"]
-        for field in required_aws:
-            if field not in aws_config:
-                raise ValueError(f"Missing required aws_config field: {field}")
-            if not isinstance(aws_config[field], str) or not aws_config[field].strip():
-                raise ValueError(f"aws_config.{field} must be a non-empty string")
+        if "region" not in aws_config:
+            raise ValueError("Missing required aws_config field: region")
+        if not isinstance(aws_config["region"], str) or not aws_config["region"].strip():
+            raise ValueError("aws_config.region must be a non-empty string")
         region_pattern = r'^[a-z]{2}-[a-z]+-\d$'
         if not re.match(region_pattern, aws_config["region"]):
             raise ValueError(f"Invalid AWS region: {aws_config['region']}")
-        if not re.match(r'^[a-zA-Z0-9_-]+$', aws_config["ecs_cluster"]):
-            raise ValueError("Invalid ecs_cluster name")
-        if not re.match(r'^[a-zA-Z0-9_-]+$', aws_config["service_name"]):
-            raise ValueError("Invalid service_name")
+        # ecs_cluster / service_name are only meaningful for ECS deployments;
+        # EC2 (instance) and S3 (static site) payloads carry null by design.
+        if compute_type == "ecs":
+            for field in ["ecs_cluster", "service_name"]:
+                if field not in aws_config:
+                    raise ValueError(f"Missing required aws_config field: {field}")
+                if not isinstance(aws_config[field], str) or not aws_config[field].strip():
+                    raise ValueError(f"aws_config.{field} must be a non-empty string")
+            if not re.match(r'^[a-zA-Z0-9_-]+$', aws_config["ecs_cluster"]):
+                raise ValueError("Invalid ecs_cluster name")
+            if not re.match(r'^[a-zA-Z0-9_-]+$', aws_config["service_name"]):
+                raise ValueError("Invalid service_name")
         task_cpu = aws_config.get("task_cpu", "256")
         task_memory = aws_config.get("task_memory", "512")
         if not isinstance(task_cpu, str) or not task_cpu.isdigit():
@@ -1085,8 +1151,8 @@ class DeployOpsAgent:
         if not isinstance(dep_config, dict):
             raise ValueError("deployment_config must be a dict")
         strategy = dep_config.get("strategy", "rolling")
-        if strategy not in ["rolling", "blue-green", "canary"]:
-            raise ValueError("deployment_config.strategy must be rolling, blue-green, or canary")
+        if strategy not in ["rolling", "blue-green", "canary", "static"]:
+            raise ValueError("deployment_config.strategy must be rolling, blue-green, canary, or static")
         health_path = dep_config.get("health_check_path", "/health")
         if not isinstance(health_path, str) or not health_path.startswith("/"):
             raise ValueError("health_check_path must start with '/'")
@@ -1133,10 +1199,13 @@ class DeployOpsAgent:
             },
             "aws_config": {
                 "region": aws_config["region"],
-                "ecs_cluster": aws_config["ecs_cluster"],
-                "service_name": aws_config["service_name"],
+                "ecs_cluster": aws_config.get("ecs_cluster") if compute_type == "ecs" else None,
+                "service_name": aws_config.get("service_name") if compute_type == "ecs" else None,
                 "task_cpu": task_cpu,
-                "task_memory": task_memory
+                "task_memory": task_memory,
+                "bucket_name": aws_config.get("bucket_name") if compute_type == "s3" else None,
+                "assume_role_arn": aws_config.get("assume_role_arn"),
+                "target_account_id": aws_config.get("target_account_id"),
             },
             "deployment_config": {
                 "strategy": strategy,
@@ -1150,7 +1219,8 @@ class DeployOpsAgent:
                 "deploy_approved": deploy_approved,
                 "approved_by": approved_by
             },
-            "metadata": payload.get("metadata", {}) or {}
+            "metadata": payload.get("metadata", {}) or {},
+            "compute_type": compute_type
         }
         
         self.logger.info(f"Payload validated and sanitized for job {job_id}")

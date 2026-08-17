@@ -114,6 +114,104 @@ def test_sanitize_and_validate_invalid_docker_context(agent, sample_payload):
         agent.sanitize_and_validate(payload)
 
 
+def test_sanitize_and_validate_ec2_skips_ecs_requirements(agent, sample_payload):
+    payload = sample_payload.copy()
+    payload["compute_type"] = "ec2"
+    payload["aws_config"] = {
+        "region": "us-east-1",
+        "ecs_cluster": None,
+        "service_name": None,
+    }
+    result = agent.sanitize_and_validate(payload)
+    assert result["compute_type"] == "ec2"
+    assert result["aws_config"]["ecs_cluster"] is None
+    assert result["aws_config"]["service_name"] is None
+
+
+def test_sanitize_and_validate_s3_skips_ecs_requirements(agent, sample_payload):
+    payload = sample_payload.copy()
+    payload["compute_type"] = "s3"
+    payload["aws_config"] = {
+        "region": "us-east-1",
+        "ecs_cluster": None,
+        "service_name": None,
+        "bucket_name": "devguard-static-abc",
+    }
+    payload["artifacts"]["docker_images"] = []
+    result = agent.sanitize_and_validate(payload)
+    assert result["compute_type"] == "s3"
+    assert result["aws_config"]["ecs_cluster"] is None
+    assert result["aws_config"]["service_name"] is None
+
+
+def test_sanitize_and_validate_ecs_still_requires_cluster(agent, sample_payload):
+    payload = sample_payload.copy()
+    payload["aws_config"]["ecs_cluster"] = None
+    with pytest.raises(ValueError, match="aws_config.ecs_cluster must be a non-empty string"):
+        agent.sanitize_and_validate(payload)
+
+
+def test_normalize_payload_preserves_deploy_approved(agent, sample_payload):
+    payload = sample_payload.copy()
+    payload["compute_type"] = "ec2"
+    payload["approval"] = {"deploy_approved": True, "approved_by": "test@example.com"}
+    payload["aws_config"] = {
+        "region": "us-east-1",
+        "ecs_cluster": None,
+        "service_name": None,
+    }
+    result = agent.sanitize_and_validate(payload)
+    assert result["approval"]["deploy_approved"] is True
+
+
+def test_normalize_payload_ec2_preserves_flat_health_check(agent, sample_payload):
+    """Regression (live rakcha14): translate_infracost_to_deploy_payload emits a
+    FLAT deployment_config (health_check_path="/", health_check_port=8000) that
+    the refiner already corrected to match the app. _normalize_payload must not
+    clobber it with the nested-ec2 default of 8080 + "/health", or DeployOps
+    probes the wrong port/path, times out, and rolls back a healthy deploy."""
+    payload = sample_payload.copy()
+    payload["compute_type"] = "ec2"
+    payload["aws_config"] = {
+        "region": "us-east-1",
+        "ecs_cluster": None,
+        "service_name": None,
+    }
+    payload["deployment_config"] = {
+        "strategy": "rolling",
+        "health_check_path": "/",
+        "health_check_port": 8000,
+        "timeout_minutes": 5,
+        "auto_rollback": True,
+    }
+    result = agent.sanitize_and_validate(payload)
+    assert result["deployment_config"]["health_check_path"] == "/"
+    assert result["deployment_config"]["health_check_port"] == 8000
+
+
+def test_normalize_payload_ec2_nested_config_still_works(agent, sample_payload):
+    """Nested deployment_config.ec2 shape (the older raw InfraCost contract)
+    must still override the flat defaults."""
+    payload = sample_payload.copy()
+    payload["compute_type"] = "ec2"
+    payload["aws_config"] = {
+        "region": "us-east-1",
+        "ecs_cluster": None,
+        "service_name": None,
+    }
+    payload["deployment_config"] = {
+        "ec2": {
+            "strategy": "rolling",
+            "health_check_path": "/healthz",
+            "health_check_port": 9000,
+            "timeout_minutes": 7,
+        }
+    }
+    result = agent.sanitize_and_validate(payload)
+    assert result["deployment_config"]["health_check_path"] == "/healthz"
+    assert result["deployment_config"]["health_check_port"] == 9000
+
+
 @pytest.mark.asyncio
 async def test_write_artifacts(agent, sample_payload, workspace):
     from src.agents.deployops.models import Artifacts
@@ -161,6 +259,7 @@ def test_terraform_env_vars_mapping(monkeypatch):
     assert mapped == {
         "vpc_id": "vpc-0123456789abcdef0",
         "subnet_ids": ["subnet-a", "subnet-b"],
+        "subnet_id": "subnet-a",
         "db_host": "db.devguard.internal",
         "db_port": 5432,
         "db_name": "devguard",
@@ -186,6 +285,7 @@ async def test_write_artifacts_merges_env_tfvars(agent, sample_payload, workspac
     assert vars_content["region"] == "us-east-1"
     assert vars_content["vpc_id"] == "vpc-0abcdef1234567890"
     assert vars_content["subnet_ids"] == ["subnet-1", "subnet-2"]
+    assert vars_content["subnet_id"] == "subnet-1"
 
 
 @pytest.mark.asyncio
@@ -604,3 +704,53 @@ async def test_moto_rollback_uses_prior_revision(agent, moto_ecs, sample_payload
 
     assert result["status"] == "success"
     assert "Rolled back to" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_run_docker_cmd_forces_buildkit(agent, monkeypatch, tmp_path):
+    """Every docker command must run with BuildKit enabled. The legacy builder
+    cannot pull multi-arch images for a multi-stage Dockerfile built with
+    --platform linux/amd64 when a base image is already cached for another
+    platform (e.g. arm64 on Apple Silicon) — it dies with "image ... does not
+    provide the specified platform". DOCKER_BUILDKIT=1 fixes the cross-platform
+    multi-stage pull/build (confirmed live with the exact DeployOps
+    Dockerfile)."""
+    docker_config = str(tmp_path / "docker-config")
+    Path(docker_config).mkdir(parents=True, exist_ok=True)
+    captured_env = {}
+
+    async def fake_exec(*cmd, env=None, **kwargs):
+        captured_env.update(env or {})
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+
+    code, out, err = await agent._run_docker_cmd(
+        ["docker", "build", "-t", "x:y", "."],
+        docker_config=docker_config,
+    )
+
+    assert code == 0
+    assert captured_env.get("DOCKER_BUILDKIT") == "1"
+    assert captured_env.get("DOCKER_CONFIG") == docker_config
+    # The throwaway DOCKER_CONFIG dir must expose the real cli-plugins (buildx).
+    # Otherwise `docker buildx build --load` fails from the backend subprocess
+    # with "unknown command: docker buildx" while working fine interactively.
+    plugins = Path(docker_config) / "cli-plugins"
+    assert plugins.is_symlink(), "cli-plugins must be symlinked into DOCKER_CONFIG"
+    assert plugins.resolve().exists(), "cli-plugins symlink must point at the real dir"
+    assert plugins.resolve().name == "cli-plugins"
+
+
+def test_prepare_docker_config_creates_config_and_links_plugins(tmp_path):
+    from src.agents.deployops.agent import DeployOpsAgent
+    cfg_dir = tmp_path / "docker-config"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    config_json = cfg_dir / "config.json"
+    assert not config_json.exists()
+    DeployOpsAgent()._prepare_docker_config(str(cfg_dir))
+    assert config_json.exists()
+    assert (cfg_dir / "cli-plugins").is_symlink()

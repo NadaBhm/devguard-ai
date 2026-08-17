@@ -85,6 +85,10 @@ _NAME_PATTERNS: Final[tuple[str, ...]] = (
 
 _DIGEST_HEADER: Final[str] = "Faits extraits du dépôt (pertinents pour l'infrastructure) :"
 
+_FILE_TREE_LABEL: Final[str] = (
+    "STRUCTURE COMPLÈTE DU DÉPÔT (arborescence exacte des fichiers lus) :"
+)
+
 _SYSTEM_INSTRUCTION: Final[str] = (
     "Tu es un ingénieur d'infrastructure AWS. On te donne un fragment de code "
     "d'un dépôt. Extrais UNIQUEMENT les faits pertinents pour dimensionner ou "
@@ -180,6 +184,26 @@ def read_all_text_files(repo_path: Path) -> list[dict[str, str]]:
 def _file_block(path: str, content: str, *, part: str | None = None) -> str:
     label = f"{path} (partie {part})" if part else path
     return f"=== {label} ===\n{content}"
+
+
+def _file_tree(files: list[dict[str, str]]) -> str:
+    """A deterministic, indented listing of every file that will be digested.
+
+    The LLM-extracted facts (``_DIGEST_HEADER``) summarize *meaning*, but they
+    can silently drop the repo's *layout* — e.g. a monorepo whose PHP backend
+    lives in ``server/`` (composer.json + index.php) and a React front in
+    ``front/``. Without the tree, the Terraform/Dockerfile refiner assumes a
+    flat repo and generates a Dockerfile that references ``composer.json`` at
+    the root, which then fails the build ("COPY failed: composer.json: file
+    does not exist"). The tree is cheap (paths only, no content) and makes the
+    layout impossible to miss.
+    """
+    if not files:
+        return ""
+    parts: list[str] = []
+    for entry in files:
+        parts.append(f"- {entry['path']}")
+    return "\n".join(parts)
 
 
 def chunk_files(files: list[dict[str, str]], chunk_bytes: int = REPO_CHUNK_BYTES) -> list[str]:
@@ -298,6 +322,7 @@ def ingest_repo(
         return None
 
     digest = (
+        f"{_FILE_TREE_LABEL}\n{_file_tree(files)}\n\n"
         f"{_DIGEST_HEADER}\n" + "\n".join(f"- {fact}" for fact in all_facts)
     )
     if commit_sha and commit_sha not in ("", "unknown"):

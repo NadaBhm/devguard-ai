@@ -124,6 +124,37 @@ def test_ec2_decision_builds_ec2_variant() -> None:
     assert output.aws_config.lambda_ is None
 
 
+def test_ec2_health_check_reads_refined_terraform() -> None:
+    """The EC2 deployment health check must come from the actual rendered
+    (possibly refiner-edited) Terraform — the constants (8080 + "/health")
+    are only the template default. Reproduces the ECS contract: DeployOps
+    probes what the instance really serves, not a hardcoded port/path."""
+    analysis = _load_analysis("sample_input_variant_lambda_candidate.json")
+    decision = DecisionResult(
+        compute_type="ec2",
+        sizing={"instance_type": "t3.medium"},
+        score_breakdown={"ecs": 0.0, "lambda": 0.0, "ec2": 1.0},
+    )
+    context = TerraformContext(job_id=analysis.job_id, docker_image="devguard-app:sha-abc1234")
+    terraform_files = generate_terraform(decision, context)
+
+    # The Gate-2 refiner legitimately rewrites the rendered locals block to
+    # match the app (e.g. a Node server on 3000 with /api/health).
+    refined = terraform_files.main_tf.replace(
+        'health_check_path = "/health"', 'health_check_path = "/api/health"'
+    ).replace("health_check_port = 8080", "health_check_port = 3000")
+    terraform_files.main_tf = refined
+
+    cost = estimate_cost(decision)
+    output = build_output(
+        analysis, decision, terraform_files, cost, _FALLBACK_ENRICHMENT
+    )
+
+    assert output.deployment_config.ec2 is not None
+    assert output.deployment_config.ec2.health_check_port == 3000
+    assert output.deployment_config.ec2.health_check_path == "/api/health"
+
+
 def test_approval_status_defaults_to_pending_and_can_be_overridden() -> None:
     analysis = _load_analysis("sample_input.json")
     decision = decide_architecture(analysis)

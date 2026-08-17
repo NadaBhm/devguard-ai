@@ -67,6 +67,26 @@ _HIDDEN_FIRST_REGEN_FIX: Final[str] = (
     "other resource and setting strictly identical."
 )
 
+# On the FIRST try (no user feedback yet), the refiner gets this instruction
+# instead: the deterministic artifacts are a stub -- a bare "FROM python:3.12-
+# slim COPY . /app" Dockerfile with no CMD and the template's hardcoded
+# 8080/"/health" -- that cannot run a real app. This tells the LLM to generate
+# a complete, runnable Dockerfile and correct port/health from the repo
+# context on the first pass, so the first deployment isn't guaranteed to fail
+# its health check and wait for a regen to fix it. Same fail-soft contract:
+# if the refiner can't run, the deterministic stub ships unchanged.
+_FIRST_TRY_ARTIFACT_FIX: Final[str] = (
+    "Generate a complete, runnable Dockerfile for the application described in "
+    "the repo context: choose the correct base image for the detected stack "
+    "(e.g. node for React/Next.js, php for PHP, python for Python), install "
+    "the real dependencies found in the repo context (only referencing "
+    "manifest files that actually exist there), expose the actual listen "
+    "port, and set the correct CMD/ENTRYPOINT to start the server. Also "
+    "correct the container port and health-check path to match the real "
+    "server configuration (the actual listen port and the health route the "
+    "app exposes). Keep every other resource and setting strictly identical."
+)
+
 # The refiner may change sizing in main.tf when the user asks for cost changes
 # ("use 512MB / 0.25 vCPU"). It renders these as Terraform variables —
 # `cpu = var.task_cpu` with the real value as a `default` in variables.tf —
@@ -208,12 +228,15 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
     """
     analysis = validate_input(raw)  # not wrapped: already typed + carries job_id
 
-    # Gate-2 regeneration: digest the whole repository so the OpenRouter LLM
-    # advisors and the Terraform refiner see the real code, not just the
-    # stack-detection metadata module 1 carries. Fail-soft by design: no
-    # repo_path, no digest, or any failure -> the pipeline proceeds exactly
-    # as before (repo_context stays None).
-    if raw.get("repo_path") and analysis.user_feedback:
+    # Whole-repo digestion for the OpenRouter LLM advisors and the Terraform
+    # refiner, so they see the real code -- on EVERY pass, not just Gate-2
+    # regeneration. The orchestrator re-clones the repo for InfraCost and
+    # threads repo_path through; on the first try that lets the LLM generate
+    # a runnable Dockerfile / correct port / health path from the actual app
+    # instead of shipping the deterministic stub and waiting for a regen.
+    # Fail-soft by design: no repo_path, no digest, or any failure -> the
+    # pipeline proceeds exactly as before (repo_context stays None).
+    if raw.get("repo_path"):
         try:
             repo_context = ingest_repo(
                 Path(raw["repo_path"]),
@@ -222,7 +245,7 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             )
         except Exception as exc:
             logger.warning(
-                "[%s] Repo digestion failed; regenerating without repo context: %s",
+                "[%s] Repo digestion failed; proceeding without repo context: %s",
                 analysis.job_id, exc,
             )
             repo_context = None
@@ -267,10 +290,13 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             ecr_registry = f"{analysis.account_id}.dkr.ecr.{terraform_context.region}.amazonaws.com"
             terraform_context.docker_image = f"{ecr_registry}/{terraform_context.docker_image}"
         terraform_files = generate_terraform(decision, terraform_context)
-        # Gate-2 feedback: let the LLM edit the rendered files (and the
-        # effective Dockerfile, when the user asked for Docker changes) to
-        # honor the request. Fail-soft — unchanged files if the refiner
-        # can't run.
+        # LLM artifact pass: let the LLM edit the rendered files (and the
+        # effective Dockerfile) so they match the real app. Runs on the FIRST
+        # try too -- not just Gate-2 feedback -- so the artifacts aren't the
+        # deterministic stub (bare "FROM python:3.12-slim COPY . /app", hard
+        # coded 8080/"/health") that can't run the app. Fail-soft: unchanged
+        # files if the refiner can't run.
+        force_dockerfile = False
         if analysis.user_feedback:
             feedback = analysis.user_feedback
             # First regen only: append the hidden repo-conformance fix so the
@@ -279,11 +305,22 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             # exactly what the user typed — their prompts own the artifacts.
             if int(raw.get("regen_iteration") or 0) == 1:
                 feedback = f"{feedback}\n\n{_HIDDEN_FIRST_REGEN_FIX}"
+        elif raw.get("repo_path"):
+            # First try (no feedback yet): drive a repo-conformant Dockerfile
+            # and correct port/health from the whole-repo digest instead of
+            # shipping the stub and waiting for a regen.
+            feedback = _FIRST_TRY_ARTIFACT_FIX
+            force_dockerfile = True
+        else:
+            feedback = None
+
+        if feedback:
             terraform_files, dockerfile = refine_terraform(
                 terraform_files,
                 feedback,
                 dockerfile=dockerfile,
                 repo_context=analysis.repo_context,
+                force_dockerfile=force_dockerfile,
             )
     except Exception as exc:
         raise PipelineStageError("terraform_generator", exc) from exc

@@ -1,6 +1,6 @@
-"""Fallback mode ONLY: no real GEMINI_API_KEY, no network call, ever. Tests
-either unset the key (forcing the fallback path deterministically) or
-monkeypatch the Gemini client itself so nothing leaves the process.
+"""Fallback mode ONLY: no real OPENROUTER_API_KEY, no network call, ever.
+Tests either unset the key (forcing the fallback path deterministically) or
+monkeypatch the LLM provider itself so nothing leaves the process.
 """
 
 import pytest
@@ -8,7 +8,7 @@ import pytest
 from core.decision_engine import DecisionResult
 from core.finops_optimizer import FinOpsRecommendation, OptimizationOption
 from core.llm_enrichment import (
-    _call_gemini,
+    _call_llm,
     build_enrichment,
     explain_architecture_decision,
     explain_finops_choice,
@@ -30,8 +30,8 @@ _FINOPS = FinOpsRecommendation(
 
 
 @pytest.fixture(autouse=True)
-def _no_gemini_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+def _no_llm_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
 
 def test_explain_architecture_decision_falls_back_without_key() -> None:
@@ -82,38 +82,37 @@ def test_build_enrichment_assembles_all_three_as_fallback() -> None:
     assert "spot" in enrichment.finops_justification
 
 
-def test_call_gemini_returns_none_without_key() -> None:
-    assert _call_gemini("prompt", "system") is None
+def test_call_llm_returns_none_without_key() -> None:
+    assert _call_llm("prompt", "system") is None
 
 
-def test_call_gemini_falls_back_on_any_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A key IS present here, but the client itself is monkeypatched to
-    raise — proving the try/except covers real failures too, never just
-    the missing-key case. No real network call happens."""
-    monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
+def test_call_llm_falls_back_on_any_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key IS present here, but the provider is monkeypatched to raise —
+    proving the fallback covers real failures too, never just the
+    missing-key case. No real network call happens."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-real-key")
 
-    class _ExplodingClient:
-        def __init__(self, api_key: str) -> None:
-            raise RuntimeError("simulated Gemini outage")
+    def _exploding_call_llm(*args, **kwargs):
+        raise RuntimeError("simulated LLM outage")
 
-    monkeypatch.setattr("shared.llm.gemini.gemini_client.GeminiClient", _ExplodingClient)
+    monkeypatch.setattr("core.llm_enrichment.call_llm", _exploding_call_llm)
 
-    assert _call_gemini("prompt", "system") is None
+    assert _call_llm("prompt", "system") is None
 
 
 def test_enrichment_source_is_fallback_even_if_only_one_of_three_would_succeed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """enrichment_source must never claim "gemini" unless ALL three texts
+    """enrichment_source must never claim "llm" unless ALL three texts
     really came from it — simulate one real success and two fallbacks."""
-    monkeypatch.setenv("GEMINI_API_KEY", "dummy-not-a-real-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-real-key")
     calls = {"n": 0}
 
-    def _fake_call_gemini(prompt: str, system_instruction: str) -> str | None:
+    def _fake_call_llm(prompt: str, system_instruction: str) -> str | None:
         calls["n"] += 1
-        return "a real gemini answer" if calls["n"] == 1 else None
+        return "a real llm answer" if calls["n"] == 1 else None
 
-    monkeypatch.setattr("core.llm_enrichment._call_gemini", _fake_call_gemini)
+    monkeypatch.setattr("core.llm_enrichment._call_llm", _fake_call_llm)
 
     enrichment = build_enrichment(_DECISION, _COST, _FINOPS)
 
@@ -121,7 +120,7 @@ def test_enrichment_source_is_fallback_even_if_only_one_of_three_would_succeed(
 
 
 def test_malformed_score_breakdown_raises_not_silently_swallowed() -> None:
-    """The try/except only shields the Gemini call itself — our own
+    """The try/except only shields the LLM call itself — our own
     fallback-text formatting must still fail loudly on bad input."""
     broken_decision = DecisionResult(
         compute_type="ecs",

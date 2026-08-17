@@ -195,6 +195,54 @@ def test_gate2_without_repo_path_never_digests(
     assert called["n"] == 0
 
 
+def test_first_try_with_repo_path_digests_and_refines_dockerfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The LLM artifact pass now runs on the FIRST try too (not just Gate-2
+    feedback): with a repo_path present the pipeline digests the repo and
+    drives the refiner with the first-try instruction that forces a real
+    Dockerfile — so a first deployment doesn't ship the bare stub Dockerfile
+    and hardcoded 8080/"/health" that can't run the app."""
+    raw = _load_raw("sample_input.json")
+    raw["repo_path"] = "/tmp/some-cloned-repo"
+
+    captured: dict = {}
+
+    def _fake_ingest(repo_path, job_id, *, commit_sha=None):
+        captured["digested"] = True
+        return "Node/Express app listening on 3000 with /api/health"
+
+    def _fake_arch_llm(*args, **kwargs):
+        return json.dumps({"compute_type": "ecs", "reasoning": "repo facts say so"})
+
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None, force_dockerfile=False):
+        captured["feedback"] = feedback
+        captured["force_dockerfile"] = force_dockerfile
+        return terraform_files, dockerfile
+
+    monkeypatch.setattr("core.pipeline.ingest_repo", _fake_ingest)
+    monkeypatch.setattr("core.llm_architecture_advisor.call_llm", _fake_arch_llm)
+    monkeypatch.setattr("core.pipeline.refine_terraform", _fake_refiner)
+
+    run_pipeline(raw)
+
+    assert captured["digested"] is True
+    assert captured["force_dockerfile"] is True
+    assert "runnable Dockerfile" in captured["feedback"]
+    assert captured["feedback"] != raw.get("user_feedback")
+
+
+def test_first_try_without_repo_path_skips_refiner() -> None:
+    """No repo_path, no first-try refinement — the deterministic artifacts
+    ship unchanged (fail-soft, backward compatible)."""
+    raw = _load_raw("sample_input.json")
+    output = run_pipeline(raw)
+
+    assert isinstance(output, EcsInfraCostOutput)
+    assert output.artifacts.dockerfile is not None
+    assert "COPY . /app" in output.artifacts.dockerfile
+
+
 # --------------------------------------------------------------------------
 # Cost follows the refiner's actual sizing (option 1)
 # --------------------------------------------------------------------------
@@ -313,7 +361,7 @@ def test_cost_reflects_refined_sizing_after_regen(monkeypatch: pytest.MonkeyPatc
     raw = _load_raw("sample_input.json")
     raw["user_feedback"] = "utilise 512MB et 0.5 vCPU pour réduire le coût"
 
-    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None, force_dockerfile=False):
         refined_main = (
             'resource "aws_ecs_task_definition" "t" {\n'
             '  cpu = "512"\n'
@@ -347,7 +395,7 @@ def test_cost_rises_with_var_referenced_sizing_and_desired_count(
     baseline = run_pipeline_with_context(_load_raw("sample_input.json"))
     baseline_cost = baseline.output.aws_config.estimated_monthly_cost.amount
 
-    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None, force_dockerfile=False):
         refined_main = (
             'resource "aws_ecs_task_definition" "t" {\n'
             "  cpu   = var.task_cpu\n"
@@ -391,7 +439,7 @@ def test_hidden_first_regen_fix_appended_only_on_first_regen(
 
     seen: list[str] = []
 
-    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None, force_dockerfile=False):
         seen.append(feedback)
         return terraform_files, dockerfile
 
@@ -423,7 +471,7 @@ def test_hidden_fix_not_applied_without_regen_iteration(
 
     seen: list[str] = []
 
-    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None):
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None, force_dockerfile=False):
         seen.append(feedback)
         return terraform_files, dockerfile
 

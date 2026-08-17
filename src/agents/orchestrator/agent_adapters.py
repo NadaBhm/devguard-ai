@@ -274,34 +274,37 @@ async def call_infracost(
                         "Terraform will be generated with a bare image name.", job_id)
 
     repo_path: str | None = None
+    # InfraCost's RepoAnalysisInput carries this optional field; threading
+    # it through the raw dict lets the pipeline's LLM advisors and the
+    # Terraform refiner act on the user's request.
     if feedback:
-        # InfraCost's RepoAnalysisInput carries this optional field; threading
-        # it through the raw dict lets the pipeline's LLM advisors and the
-        # new Terraform refiner act on the user's request.
         raw_input["user_feedback"] = feedback
         if iteration_number is not None:
             # 1-based regeneration round; the pipeline uses it to gate the
             # hidden first-regen auto-fix (correct container port / health
             # check to match the repo) to exactly one run.
             raw_input["regen_iteration"] = iteration_number
-        # CodeSec deletes its clone the moment analysis finishes, so at
-        # Gate 2 we re-clone the repo and let the pipeline digest the whole
-        # codebase for the OpenRouter LLM (see core.repo_ingestor). Fail-soft:
-        # if the clone fails, the regeneration proceeds exactly as before,
-        # without repo context.
-        try:
-            from src.lib.repo import clone_repo  # lazy: shared clone helper
-            repo_path = tempfile.mkdtemp(prefix=f"devguard-repo-{job_id[:8]}-")
-            clone_repo(codesec_result.get("repo_url", ""), repo_path)
-            raw_input["repo_path"] = repo_path
-        except Exception as exc:
-            logger.warning(
-                "[%s] Could not re-clone repo for Gate-2 regeneration; "
-                "regenerating without repo context: %s", job_id, exc,
-            )
-            if repo_path:
-                shutil.rmtree(repo_path, ignore_errors=True)
-                repo_path = None
+    # CodeSec deletes its clone the moment analysis finishes, so we re-clone
+    # the repo and let the pipeline digest the whole codebase for the
+    # OpenRouter LLM (see core.repo_ingestor) on EVERY pass -- first try
+    # included, not just Gate-2 regeneration. That way the LLM generates the
+    # artifacts (Dockerfile, port, health path) from the real code instead of
+    # shipping the deterministic stub and waiting for a regen to fix it.
+    # Fail-soft: if the clone fails, the pipeline proceeds exactly as before,
+    # without repo context.
+    try:
+        from src.lib.repo import clone_repo  # lazy: shared clone helper
+        repo_path = tempfile.mkdtemp(prefix=f"devguard-repo-{job_id[:8]}-")
+        clone_repo(codesec_result.get("repo_url", ""), repo_path)
+        raw_input["repo_path"] = repo_path
+    except Exception as exc:
+        logger.warning(
+            "[%s] Could not re-clone repo for InfraCost; "
+            "generating without repo context: %s", job_id, exc,
+        )
+        if repo_path:
+            shutil.rmtree(repo_path, ignore_errors=True)
+            repo_path = None
 
     try:
         result = await asyncio.get_event_loop().run_in_executor(
@@ -601,19 +604,16 @@ def translate_infracost_to_deploy_payload(
             "approved_at": datetime.now(timezone.utc).isoformat(),
         },
         "metadata": {"repo_url": repo_url} if repo_url else {},
-        # NOTE: compute_type is deliberately NOT included here.
-        # This payload is already DeployOps-native (see the field
-        # translations documented above this function). DeployOps.
-        # _normalize_payload() re-derives docker_images from a
-        # *different*, older InfraCost-raw shape (singular
-        # artifacts.docker_image) the moment it sees a top-level
-        # "compute_type" key -- so a payload that already has the
-        # correct docker_images list (plural) gets silently
-        # overwritten with an empty one, failing later with
-        # "artifacts.docker_images is required and must be a list".
-        # Confirmed regression: this payload used to omit
-        # compute_type and deployed correctly; adding it broke
-        # every real deployment through this path.
+        # compute_type IS included: sanitize_and_validate() uses it to skip the
+        # ECS-only ecs_cluster/service_name checks for EC2/S3. DeployOps's
+        # _normalize_payload() re-derives docker_images from the *older*,
+        # singular InfraCost-raw shape (artifacts.docker_image) whenever it sees
+        # a top-level "compute_type" key -- so a payload that already carries
+        # the correct docker_images list (plural) must be preserved, which
+        # _normalize_payload() now does. Omitting compute_type (the old
+        # workaround) made every EC2/S3 deploy fail validation because the
+        # payload silently defaulted to compute_type="ecs".
+        "compute_type": compute_type,
     }
 
     return payload

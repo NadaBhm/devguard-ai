@@ -215,7 +215,7 @@ class Approval(BaseModel):
     approved_by: Optional[str] = None
 
 
-EnrichmentSource = Literal["gemini", "fallback"]
+EnrichmentSource = Literal["llm", "fallback"]
 
 
 class Enrichment(BaseModel):

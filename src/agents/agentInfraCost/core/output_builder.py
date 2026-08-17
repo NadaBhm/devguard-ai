@@ -96,6 +96,29 @@ def _health_check_from_terraform(main_tf: str) -> tuple[int, str]:
     return port, path
 
 
+def _ec2_health_check_from_terraform(main_tf: str) -> tuple[int, str]:
+    """Read the container port and health-check path out of the rendered
+    (and possibly refiner-edited) EC2 ``locals`` block.
+
+    Same contract as ``_health_check_from_terraform`` but for the EC2 path,
+    which has no ALB target group — the template renders
+    ``health_check_port`` / ``health_check_path`` into a ``locals`` block
+    that the Gate-2 refiner can correct to match the app, and this reads
+    back what actually ships so DeployOps' post-deploy health check probes
+    the right port/path. Fail-soft: falls back to the constants if the block
+    is unreadable.
+    """
+    block = re.search(r"locals\s*\{.*?\n\}", main_tf, re.DOTALL)
+    if block is None:
+        return EC2_HEALTH_CHECK_PORT, EC2_HEALTH_CHECK_PATH
+    body = block.group(0)
+    port_match = re.search(r"health_check_port\s*=\s*(\d+)", body)
+    path_match = re.search(r'health_check_path\s*=\s*"([^"]+)"', body)
+    port = int(port_match.group(1)) if port_match else EC2_HEALTH_CHECK_PORT
+    path = path_match.group(1) if path_match else EC2_HEALTH_CHECK_PATH
+    return port, path
+
+
 def resolve_docker_artifacts(
     analysis: RepoAnalysisInput, decision: DecisionResult
 ) -> tuple[str | None, DockerImage | None]:
@@ -261,8 +284,17 @@ def _build_ec2_output(
         deployment_config=DeploymentConfigEc2(
             ec2=Ec2DeploymentConfig(
                 strategy="rolling",
-                health_check_path=EC2_HEALTH_CHECK_PATH,
-                health_check_port=EC2_HEALTH_CHECK_PORT,
+                # Read from the actual rendered/refined Terraform so the
+                # post-deploy health check DeployOps performs hits the same
+                # port/path the instance ships with — the constants
+                # (8080 + "/health") are only the template's starting point,
+                # and the refiner corrects them to match the app.
+                health_check_path=_ec2_health_check_from_terraform(
+                    artifacts.terraform.files.main_tf
+                )[1],
+                health_check_port=_ec2_health_check_from_terraform(
+                    artifacts.terraform.files.main_tf
+                )[0],
                 timeout_minutes=5,
             )
         ),

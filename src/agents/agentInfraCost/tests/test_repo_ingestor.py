@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from core.repo_ingestor import (
     _DIGEST_HEADER,
+    _FILE_TREE_LABEL,
     chunk_files,
     clear_digest_cache,
     ingest_repo,
@@ -140,6 +141,30 @@ class TestIngestRepo:
         assert _DIGEST_HEADER in digest
         assert "- port 8000" in digest
         assert "- uses Postgres" in digest
+
+    def test_digest_includes_exact_file_tree(self, monkeypatch, tmp_path) -> None:
+        """The digest must carry the repo's exact layout (monorepo dirs
+        included) so the Terraform/Dockerfile refiner never assumes a flat
+        repo — a root-referenced composer.json in a `server/`-style monorepo
+        silently breaks the build ("COPY failed: file does not exist")."""
+        repo = tmp_path / "repo"
+        (repo / "server").mkdir(parents=True)
+        (repo / "front").mkdir(parents=True)
+        (repo / "server" / "composer.json").write_text('{"name": "api"}')
+        (repo / "server" / "index.php").write_text("<?php echo 'ok';")
+        (repo / "front" / "package.json").write_text('{"name": "front"}')
+        _patch_call_llm(
+            monkeypatch,
+            json.dumps({"facts": ["PHP backend in server/"]}),
+        )
+
+        digest = ingest_repo(repo, "job-1", commit_sha="tree-abc")
+
+        assert digest is not None
+        assert _FILE_TREE_LABEL in digest
+        assert "- server/composer.json" in digest
+        assert "- server/index.php" in digest
+        assert "- front/package.json" in digest
 
     def test_fail_soft_on_none_reply(self, monkeypatch, tmp_path) -> None:
         repo = _make_repo(tmp_path)

@@ -11,5 +11,5 @@ output "public_ip" {
 }
 
 output "url" {
-  value = try("http://${aws_instance.this[0].public_ip}:{{ instance_port }}", null)
+  value = try("http://${aws_instance.this[0].public_ip}:${local.health_check_port}", null)
 }

@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from core.constants import (
     EC2_AMI_ID,
+    EC2_HEALTH_CHECK_PATH,
     EC2_INSTANCE_COUNT,
     EC2_INSTANCE_NAME,
     EC2_INSTANCE_PORT,
@@ -125,6 +126,19 @@ def _lambda_render_context(decision: DecisionResult, context: TerraformContext) 
 
 
 def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
+    # Same job_id suffixing as ECS (constants.unique_resource_name): the IAM
+    # role, instance profile and security group are all derived from
+    # instance_name, so a fixed name collides across jobs -- and worse, a
+    # retried job finds the partial-apply leftovers and dies on
+    # EntityAlreadyExists. Confirmed colliding in practice on the EC2 path.
+    instance_name = unique_resource_name(EC2_INSTANCE_NAME, context.job_id)
+    # The instance's real listen port: pipeline.py extracts it from the repo's
+    # own Dockerfile EXPOSE line and threads it through health_check_port
+    # (same as ECS). The instance runs the same container image the pipeline
+    # built, so instance_port must match what the app actually listens on, or
+    # the SG / docker run / url output all point at a dead port. Fail-soft:
+    # None falls back to the template default 8080.
+    instance_port = context.health_check_port or EC2_INSTANCE_PORT
     return {
         "region": context.region,
         "environment": context.environment,
@@ -132,8 +146,13 @@ def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> 
         "instance_type": decision.sizing["instance_type"],
         "instance_count": EC2_INSTANCE_COUNT,
         "key_pair_name": EC2_KEY_PAIR_NAME,
-        "instance_name": EC2_INSTANCE_NAME,
-        "instance_port": EC2_INSTANCE_PORT,
+        "instance_name": instance_name,
+        "instance_port": instance_port,
+        # Rendered into a locals block so the Gate-2 refiner can correct it to
+        # match the app (e.g. "/api/health") and output_builder's EC2 health
+        # check reads it back from the actual refined Terraform — same
+        # contract as the ECS target group path.
+        "health_check_path": EC2_HEALTH_CHECK_PATH,
         "docker_image": context.docker_image or "devguard-app:latest",
         "ecr_registry_host": _ecr_registry_host(context),
     }

@@ -73,7 +73,12 @@ LAMBDA_RUNTIME: Final[str] = "python3.12"
 LAMBDA_TIMEOUT_SECONDS: Final[int] = 30
 
 EC2_AMI_ID: Final[str] = "ami-0000000000000000"
-EC2_KEY_PAIR_NAME: Final[str] = "devguard-key"
+# Optional SSH key pair for the EC2 instance. Defaults to empty (no key): the
+# instance is provisioned entirely through user_data and needs no SSH access.
+# Set DEVGUARD_KEY_PAIR_NAME to an existing key pair (e.g. for debugging).
+# Hardcoding a fixed name here broke real applies with InvalidKeyPair.NotFound
+# when that pair didn't exist in the target account.
+EC2_KEY_PAIR_NAME: Final[str] = os.getenv("DEVGUARD_KEY_PAIR_NAME", "")
 EC2_INSTANCE_COUNT: Final[int] = 1
 EC2_INSTANCE_NAME: Final[str] = "devguard-app"
 EC2_HEALTH_CHECK_PORT: Final[int] = 8080

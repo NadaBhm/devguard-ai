@@ -161,6 +161,48 @@ def test_generate_terraform_for_ec2() -> None:
     assert "aws_instance" in files.main_tf
     assert 'instance_type = "t3.small"' in files.main_tf
     assert "aws_instance.this[*].id" in files.outputs_tf
+    # AL2's bundled Docker 25.x (installed via amazon-linux-extras) handles the
+    # mixed Docker/OCI manifests this pipeline pushes. Docker CE from the
+    # official centos/7 repo is unusable on AL2: it needs container-selinux /
+    # slirp4netns / fuse-overlayfs that no longer resolve (EL7 EPEL archived).
+    assert "amazon-linux-extras install -y docker" in files.main_tf
+    assert "docker-ce" not in files.main_tf
+    assert "yum install -y -q amazon-linux-extras jq yum-utils" in files.main_tf
+
+
+def test_ec2_template_omits_key_name_when_no_key_pair_configured() -> None:
+    """The EC2 template must NOT hardcode a key pair that may not exist in the
+    target account (InvalidKeyPair.NotFound broke real applies). With the
+    default empty DEVGUARD_KEY_PAIR_NAME, no key_name attribute is rendered.
+    """
+    decision = DecisionResult(
+        compute_type="ec2",
+        sizing={"instance_type": "t3.small"},
+        score_breakdown={"ecs": -3.0, "lambda": 0.0, "ec2": 5.0},
+    )
+    context = TerraformContext(job_id="job-ec2-test")
+
+    files = generate_terraform(decision, context)
+
+    assert "key_name" not in files.main_tf
+    assert "devguard-key" not in files.main_tf
+
+
+def test_ec2_resource_names_are_suffixed_with_job_id() -> None:
+    """EC2 IAM role/profile/SG names derive from instance_name, which must be
+    job-suffixed like ECS so retries and concurrent jobs never collide on
+    EntityAlreadyExists from partial-apply leftovers.
+    """
+    decision = DecisionResult(
+        compute_type="ec2",
+        sizing={"instance_type": "t3.small"},
+        score_breakdown={"ecs": -3.0, "lambda": 0.0, "ec2": 5.0},
+    )
+    files = generate_terraform(decision, TerraformContext(job_id="job-ec2-test"))
+
+    assert "devguard-app-job-ec2" in files.main_tf
+    assert 'resource "aws_iam_role" "instance"' in files.main_tf
+    assert 'resource "aws_security_group" "instance"' in files.main_tf
 
 
 # --------------------------------------------------------------------------

@@ -85,6 +85,7 @@ class DeploymentStatus(str, PyEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     ROLLED_BACK = "rolled_back"
+    DESTROYED = "destroyed"
 
 
 class NotificationType(str, PyEnum):
@@ -317,7 +318,7 @@ class Deployment(Base):
             name="ck_deployments_environment"
         ),
         CheckConstraint(
-            "status IN ('pending', 'applying', 'succeeded', 'failed', 'rolled_back')",
+            "status IN ('pending', 'applying', 'succeeded', 'failed', 'rolled_back', 'destroyed')",
             name="ck_deployments_status"
         ),
         Index("idx_deployments_run_id", "run_id"),

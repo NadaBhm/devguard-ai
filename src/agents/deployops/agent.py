@@ -471,6 +471,130 @@ class DeployOpsAgent:
             self.logger.error(f"Rollback failed: {e}")
             return {"status": "failed", "error": str(e)}
 
+    @xray_recorder.capture("destroy_deployment")  # type: ignore[reportCallIssue]
+    async def destroy_deployment(
+        self,
+        job_id: str,
+        aws_config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Destroy a job's deployed infrastructure via `terraform destroy`,
+        reusing the persisted remote state in TF_STATE_BUCKET (see
+        _write_remote_state_backend). Falls back to reporting "no state" for
+        deployments made before remote state was enabled, rather than
+        pretending to succeed. On failure, describes what's still live in
+        AWS (mirrors rollback()/the /monitoring endpoint) so the caller can
+        tell the user precisely what to clean up manually -- per the
+        feature/destroy-deployment design decisions.
+        """
+        workspace_dir = self._workspace_dir(job_id)
+        tf_dir = workspace_dir / "terraform"
+        tf_dir.mkdir(parents=True, exist_ok=True)
+        self._write_remote_state_backend(tf_dir, job_id=job_id)
+
+        if not (tf_dir / "backend.tf").exists():
+            self.logger.warning(f"[{job_id}] Destroy: TF_STATE_BUCKET not configured, cannot recover state")
+            return {
+                "status": "no_state",
+                "job_id": job_id,
+                "message": (
+                    "TF_STATE_BUCKET is not configured; this deployment has no "
+                    "recoverable Terraform state. Manual AWS cleanup required."
+                ),
+                "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
+            }
+
+        tf_runner = TerraformRunner(tf_dir)
+
+        if not tf_runner.init():
+            self.logger.error(f"[{job_id}] Destroy: terraform init failed")
+            return {
+                "status": "failed",
+                "job_id": job_id,
+                "error": "terraform_init_failed",
+                "message": "Could not initialize Terraform with the remote state backend.",
+                "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
+            }
+
+        # A job with no prior real `apply` (or one applied before
+        # TF_STATE_BUCKET existed) has no state key in S3 -- init() still
+        # succeeds against an empty backend, so check for an actual state
+        # explicitly rather than trusting init() alone.
+        state_output = tf_runner.output()
+        if not state_output:
+            self.logger.info(f"[{job_id}] Destroy: no Terraform state found in remote backend")
+            return {
+                "status": "no_state",
+                "job_id": job_id,
+                "message": (
+                    "No Terraform state found for this job (deployed before "
+                    "remote state was enabled, or state was lost). Nothing to "
+                    "destroy via Terraform -- check AWS directly for leftover "
+                    "resources."
+                ),
+                "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
+            }
+
+        try:
+            destroyed = tf_runner.destroy()
+        except Exception as exc:
+            self.logger.error(f"[{job_id}] terraform destroy failed after retries: {exc}")
+            return {
+                "status": "partial_failure",
+                "job_id": job_id,
+                "error": str(exc),
+                "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
+            }
+
+        if not destroyed:
+            return {
+                "status": "partial_failure",
+                "job_id": job_id,
+                "error": "terraform destroy did not report success",
+                "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
+            }
+
+        self.logger.info(f"[{job_id}] Destroy successful")
+        return {"status": "success", "job_id": job_id}
+
+    async def _describe_remaining_resources(
+        self, job_id: str, aws_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Best-effort snapshot of what's still live in AWS after a failed,
+        partial, or unrecoverable-state destroy -- so the caller can tell the
+        user precisely what to clean up manually and where (mirrors the read
+        pattern already used by rollback() and the /monitoring endpoint)."""
+        region = aws_config.get("region") or "us-east-1"
+        cluster = aws_config.get("ecs_cluster")
+        service_name = aws_config.get("service_name")
+        remaining: Dict[str, Any] = {
+            "ecs_service": None,
+            "target_groups": [],
+            "error": None,
+        }
+        if not cluster or not service_name:
+            remaining["error"] = "no ecs_cluster/service_name available to check"
+            return remaining
+        try:
+            aws = AWSClient(region=region)
+            ecs = aws.ecs()
+            desc = ecs.describe_services(cluster=cluster, services=[service_name])
+            services = desc.get("services") or []
+            if services and services[0].get("status") != "INACTIVE":
+                svc = services[0]
+                remaining["ecs_service"] = {
+                    "cluster": cluster,
+                    "service_name": service_name,
+                    "status": svc.get("status"),
+                    "running_count": svc.get("runningCount"),
+                }
+                elbv2 = aws.session.client("elbv2", region_name=region, config=RETRY_CONFIG)
+                for lb in svc.get("loadBalancers", []):
+                    tg_arn = lb.get("targetGroupArn")
+                    if tg_arn:
+                        remaining["target_groups"].append(tg_arn)
+        except Exception as exc:  # noqa: BLE001 - best-effort diagnostic, never raise
+            remaining["error"] = str(exc)
+        return remaining
     @xray_recorder.capture("rollback_deployment")  # type: ignore[reportCallIssue]
     async def rollback_deployment(
         self,
@@ -720,7 +844,7 @@ class DeployOpsAgent:
         Writes an empty-credsStore config.json (avoids macOS credential-helper
         hangs / `osxkeychain` prompts) and, critically, symlinks the real
         ``~/.docker/cli-plugins`` (buildx et al.) into it. Pointing
-        DOCKER_CONFIG at a throwaway directory hides the CLI plugin directory —
+        DOCKER_CONFIG at a throwaway directory hides the CLI plugin directory â€”
         ``docker buildx`` then fails with "unknown command: docker buildx"
         (reproduced: ``docker buildx build --load`` runs fine from an
         interactive shell but errors identically from the backend subprocess

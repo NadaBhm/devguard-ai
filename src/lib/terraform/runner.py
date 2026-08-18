@@ -12,7 +12,13 @@ class TerraformRunner:
         self.working_dir = working_dir
         self.working_dir.mkdir(parents=True, exist_ok=True)
 
-    def _retry_with_backoff(self, func: Callable[[], Any], max_attempts: int = 3, base_delay: float = 2.0) -> Any:
+    def _retry_with_backoff(
+        self,
+        func: Callable[[], Any],
+        max_attempts: int = 3,
+        base_delay: float = 2.0,
+        delays: Optional[List[float]] = None,
+    ) -> Any:
         last_exception = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -20,7 +26,10 @@ class TerraformRunner:
             except Exception as e:
                 last_exception = e
                 if attempt < max_attempts:
-                    delay = base_delay * (2 ** (attempt - 1))
+                    if delays:
+                        delay = delays[min(attempt - 1, len(delays) - 1)]
+                    else:
+                        delay = base_delay * (2 ** (attempt - 1))
                     logger.warning(f"Attempt {attempt} failed: {e}. Retrying in {delay}s...")
                     time.sleep(delay)
                 else:
@@ -60,7 +69,18 @@ class TerraformRunner:
 
     def init(self) -> bool:
         def _init():
-            result = self._run(["init"])
+            # -input=false: a backend change (e.g. first init against the new
+            # S3 remote state) prompts interactively to migrate existing
+            # state; under a non-interactive docker exec that has no stdin,
+            # the prompt just hangs forever instead of erroring -- confirmed
+            # live during feature/destroy-deployment testing.
+            # -migrate-state -force-copy: a workspace with pre-existing local
+            # state (DEPLOYOPS_WORKSPACE_ROOT is a persisted volume, so state
+            # from before TF_STATE_BUCKET was configured can still be on disk)
+            # triggers a migration prompt when the backend changes to S3;
+            # -force-copy auto-approves it non-interactively instead of
+            # hanging or erroring under -input=false.
+            result = self._run(["init", "-input=false", "-migrate-state", "-force-copy"])
             if result.returncode != 0:
                 raise RuntimeError(f"init failed: {result.stderr}")
             return True
@@ -110,7 +130,12 @@ class TerraformRunner:
             if result.returncode != 0:
                 raise RuntimeError(f"destroy failed: {result.stderr}")
             return True
-        return self._retry_with_backoff(_destroy)
+        # Destroy failures are often AWS eventual-consistency issues (e.g. a
+        # lingering ENI blocking security-group deletion with
+        # DependencyViolation) that clear on the order of tens of seconds,
+        # not the 2s/4s/8s used for apply/init/plan -- so destroy gets a
+        # slower, explicit backoff (feature/destroy-deployment decision).
+        return self._retry_with_backoff(_destroy, max_attempts=4, delays=[10.0, 30.0, 60.0])
 
     def output(self) -> Dict:
         result = self._run(["output", "-json"])

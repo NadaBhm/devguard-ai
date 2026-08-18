@@ -346,7 +346,7 @@ def edit_artifacts(
             ),
         )
 
-    # Validate every edit up front so a batch fails atomically — never a
+    # Validate every edit up front so a batch fails atomically â€” never a
     # partial write of broken files.
     for edit in body.files:
         if not allowed_file_path(edit.file_path):
@@ -519,6 +519,101 @@ def rollback_job(
         "result": result,
     }
 
+
+class DestroyRequest(BaseModel):
+    confirm_service_name: str
+
+
+def _extract_aws_config(deployment: models.Deployment) -> dict:
+    """Resolve ecs_cluster/service_name/region from a deployment's
+    infrastructure_json, trying the DeployOps-native `aws_config` shape
+    first and falling back to the `terraform_outputs` shape (with the same
+    suffix-derivation workaround as the /monitoring endpoint) for older
+    deployments where ecs_cluster_name was stored empty."""
+    infra = deployment.infrastructure_json or {}
+    aws_config = infra.get("aws_config") or {}
+    region = aws_config.get("region") or deployment.aws_region or "us-east-1"
+    ecs_cluster = aws_config.get("ecs_cluster")
+    service_name = aws_config.get("service_name")
+
+    if not ecs_cluster or not service_name:
+        tf_outputs = infra.get("terraform_outputs") or {}
+        service_name = service_name or tf_outputs.get("service_name")
+        ecs_cluster = ecs_cluster or tf_outputs.get("ecs_cluster_name")
+        if not ecs_cluster and service_name and "-" in service_name:
+            suffix = service_name.rsplit("-", 1)[-1]
+            ecs_cluster = f"devguard-cluster-{suffix}"
+
+    return {
+        "region": region,
+        "ecs_cluster": ecs_cluster,
+        "service_name": service_name,
+    }
+
+
+@router.post("/{job_id}/destroy")
+def destroy_job(
+    job_id: str,
+    body: DestroyRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Destroy a job's deployed infrastructure. Requires the caller to type
+    the exact service_name as confirmation (feature/destroy-deployment
+    decision #2) -- enforced server-side, not just via a disabled UI button.
+    """
+    run = _get_owned_run(db, job_id, current_user.id)
+
+    deployment = (
+        db.query(models.Deployment)
+        .filter(models.Deployment.run_id == job_id)
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if not deployment:
+        raise HTTPException(status_code=404, detail="No deployment found for this job")
+
+    aws_config = _extract_aws_config(deployment)
+    service_name = aws_config.get("service_name")
+
+    if not service_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment has no service_name on record; cannot confirm destroy target.",
+        )
+
+    if body.confirm_service_name != service_name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Confirmation text does not match. Expected the service name '{service_name}'.",
+        )
+
+    try:
+        from src.agents.deployops.agent import DeployOpsAgent
+
+        agent = DeployOpsAgent()
+        result = asyncio.run(agent.destroy_deployment(job_id=job_id, aws_config=aws_config))
+    except Exception as exc:
+        logger.error(f"Destroy failed for {job_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Destroy failed: {exc}") from exc
+
+    status = result.get("status")
+    if status == "success":
+        deployment.status = "destroyed"
+        db.commit()
+        if run.status not in ("completed", "failed", "rejected"):
+            run.status = "destroyed"
+            run.completed_at = datetime.utcnow()
+            db.commit()
+        publish_results_ready(job_id)
+        return {"job_id": job_id, "status": "destroyed", "result": result}
+
+    # no_state / failed / partial_failure: don't touch deployment.status --
+    # leaving it as-is is more honest than silently marking it destroyed
+    # when resources may still be live. remaining_resources lets the UI
+    # show exactly what's left and where (feature/destroy-deployment
+    # decision #3).
+    return {"job_id": job_id, "status": status, "result": result}
 
 @router.get("/{job_id}/deployments/revisions")
 def list_deployment_revisions(

@@ -48,6 +48,23 @@ export interface ArtifactsEditResponse {
   terraform_artifacts: TerraformArtifact[]
 }
 
+export interface DestroyRequest {
+  confirm_service_name: string
+}
+export interface DestroyResponse {
+  job_id: string
+  status: string
+  result: {
+    status: string
+    message?: string
+    error?: string
+    remaining_resources?: {
+      ecs_service: { cluster: string; service_name: string; status?: string; running_count?: number } | null
+      target_groups: string[]
+      error: string | null
+    }
+  }
+}
 export const jobsApi = {
   create: (body: JobCreate) => client.post<JobResponse>("/jobs/", body),
   upload: (formData: FormData) => fetch(`/api/jobs/upload`, {
@@ -77,6 +94,8 @@ export const jobsApi = {
     client.put<ArtifactsEditResponse>(`/jobs/${jobId}/artifacts`, { files }),
   rollback: (jobId: string, body: RollbackRequest) =>
     client.post<RollbackResponse>(`/jobs/${jobId}/rollback`, body),
+  destroy: (jobId: string, body: DestroyRequest) =>
+    client.post<DestroyResponse>(`/jobs/${jobId}/destroy`, body),
   deploymentRevisions: (jobId: string) =>
     client.get<DeploymentRevisionsResponse>(`/jobs/${jobId}/deployments/revisions`),
 }

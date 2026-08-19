@@ -13,6 +13,7 @@ const statusMeta: Record<DeploymentStatus, { label: string; tone: "accent" | "ne
   succeeded: { label: "Succeeded", tone: "success" },
   failed: { label: "Failed", tone: "danger" },
   rolled_back: { label: "Rolled back", tone: "danger" },
+  destroyed: { label: "Destroyed", tone: "neutral" },
 }
 
 const envMeta = {
@@ -87,6 +88,10 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
   const versions = revisionsQuery.data?.versions ?? []
   const currentRevision = versions.find((v) => v.is_current)?.revision ?? null
 
+  const destroyTargetDeployment =
+    deployments.find((d) => d.status === "succeeded") ?? deployments.find((d) => d.status === "destroyed")
+  const destroyExpectedServiceName = getTerraformOutputs(destroyTargetDeployment?.infrastructure_json ?? null).serviceName
+
   const rollback = useMutation({
     mutationFn: () =>
       jobsApi.rollback(jobId!, {
@@ -105,6 +110,25 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
     },
     onError: (err) => {
       setRollbackError(err instanceof Error ? err.message : "Rollback failed.")
+    },
+  })
+
+  const [destroyConfirmText, setDestroyConfirmText] = useState("")
+  const [destroyError, setDestroyError] = useState<string | null>(null)
+  const [destroyResult, setDestroyResult] = useState<{ status: string; message?: string } | null>(null)
+
+  const destroy = useMutation({
+    mutationFn: (serviceName: string) =>
+      jobsApi.destroy(jobId!, { confirm_service_name: serviceName }),
+    onSuccess: (res) => {
+      setDestroyResult({ status: res.result?.status, message: res.result?.message })
+      setDestroyError(null)
+      setDestroyConfirmText("")
+      void queryClient.invalidateQueries({ queryKey: ["job-results", jobId] })
+      void queryClient.invalidateQueries({ queryKey: ["job", jobId] })
+    },
+    onError: (err) => {
+      setDestroyError(err instanceof Error ? err.message : "Destroy failed.")
     },
   })
 
@@ -138,7 +162,7 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
                 disabled={revisionsQuery.isLoading}
                 className="h-8 flex-1 rounded-md border border-border bg-surface-2 px-2.5 text-[13px] text-foreground outline-none focus:border-accent disabled:opacity-45"
               >
-                {revisionsQuery.isLoading && <option>Loading versions…</option>}
+                {revisionsQuery.isLoading && <option>Loading versionsÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦</option>}
                 {!revisionsQuery.isLoading && versions.length === 0 && (
                   <option value="">No versions available</option>
                 )}
@@ -163,7 +187,7 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
 
           {rollbackResult && (
             <p className="text-[12px] text-accent">
-              Rollback succeeded{rollbackResult.message ? ` · ${rollbackResult.message}` : ""}
+              Rollback succeeded{rollbackResult.message ? ` ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â· ${rollbackResult.message}` : ""}
               {rollbackResult.task_definition ? ` (${rollbackResult.task_definition})` : ""}
             </p>
           )}
@@ -173,6 +197,56 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
               {revisionsQuery.error instanceof Error ? revisionsQuery.error.message : "Failed to load versions."}
             </p>
           )}
+        </div>
+      )}
+
+      {jobId && destroyTargetDeployment && (
+        <div className="space-y-3 rounded-lg border border-critical/30 bg-surface px-4 py-3">
+          <div>
+            <p className="text-[13px] font-medium text-foreground">Danger zone</p>
+            <p className="text-[12px] text-muted">
+              Permanently destroy the deployed infrastructure for this job. This cannot be undone.
+            </p>
+            {destroyExpectedServiceName && (
+              <p className="text-[12px] text-muted">
+                Type <span className="font-mono text-foreground">{destroyExpectedServiceName}</span> to confirm.
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              aria-label="Type the service name to confirm"
+              placeholder={destroyExpectedServiceName ?? "Type the service name to confirm"}
+              value={destroyConfirmText}
+              onChange={(e) => setDestroyConfirmText(e.target.value)}
+              disabled={destroy.isPending}
+              className="h-8 min-w-[220px] flex-1 rounded-md border border-border bg-surface-2 px-2.5 text-[13px] text-foreground outline-none focus:border-accent disabled:opacity-45"
+            />
+            <Button
+              variant="danger"
+              size="sm"
+              onClick={() => destroy.mutate(destroyConfirmText)}
+              loading={destroy.isPending}
+              disabled={
+                destroy.isPending ||
+                destroyConfirmText.trim().length === 0 ||
+                (!!destroyExpectedServiceName && destroyConfirmText !== destroyExpectedServiceName)
+              }
+            >
+              Destroy deployment
+            </Button>
+          </div>
+
+          {destroyResult && (
+            <p className={destroyResult.status === "success" ? "text-[12px] text-accent" : "text-[12px] text-warning"}>
+              {destroyResult.status === "success"
+                ? "Deployment destroyed successfully."
+                : destroyResult.message ?? `Status: ${destroyResult.status}`}
+            </p>
+          )}
+          {destroyError && <p className="text-[12px] text-critical">{destroyError}</p>}
         </div>
       )}
 
@@ -196,19 +270,19 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
             <dl className="grid grid-cols-2 border-t border-border px-4 py-2.5 text-[12.5px] gap-x-6 gap-y-1.5">
               <div className="flex justify-between">
                 <dt className="text-faint">Applied</dt>
-                <dd className="font-medium text-foreground">{d.applied_at ? formatDate(d.applied_at) : "—"}</dd>
+                <dd className="font-medium text-foreground">{d.applied_at ? formatDate(d.applied_at) : "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-faint">Cost / mo</dt>
-                <dd className="font-medium tabular text-foreground">{d.cost_total_monthly != null ? formatCurrency(d.cost_total_monthly) : "—"}</dd>
+                <dd className="font-medium tabular text-foreground">{d.cost_total_monthly != null ? formatCurrency(d.cost_total_monthly) : "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-faint">Terraform</dt>
-                <dd className="font-mono text-muted">{d.terraform_version ?? "—"}</dd>
+                <dd className="font-mono text-muted">{d.terraform_version ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-faint">State ID</dt>
-                <dd className="max-w-[180px] truncate font-mono text-muted">{d.terraform_state_id ?? "—"}</dd>
+                <dd className="max-w-[180px] truncate font-mono text-muted">{d.terraform_state_id ?? "ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â"}</dd>
               </div>
               {tfOutputs.ecsClusterName && (
                 <div className="col-span-2 flex justify-between">

@@ -1,7 +1,7 @@
 export type Severity = "critical" | "high" | "medium" | "low"
 export type Scanner = "semgrep" | "gitleaks" | "trivy" | "bandit"
 export type AgentTaskStatus = "pending" | "started" | "success" | "failure" | "retrying"
-export type DeploymentStatus = "pending" | "applying" | "succeeded" | "failed" | "rolled_back"
+export type DeploymentStatus = "pending" | "applying" | "succeeded" | "failed" | "rolled_back" | "destroyed"
 export type Environment = "dev" | "staging" | "prod"
 
 export interface CodeSecFinding {

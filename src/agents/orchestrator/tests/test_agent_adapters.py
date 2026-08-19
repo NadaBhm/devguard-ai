@@ -154,6 +154,53 @@ class TestInfraCostToDeployPayload:
         assert images[0]["dockerfile"] == "FROM python:3.12-slim\nCOPY . /app\n"
         assert images[0]["tag"] == "sha-abc123"
 
+    def test_multi_container_payload_keeps_all_images(self, deploy_inputs):
+        deploy_inputs["artifacts"]["docker_images"] = [
+            {
+                "name": "devguard-app",
+                "dockerfile": "FROM python:3.12-slim\nEXPOSE 8000\n",
+                "context": "backend",
+                "tag": "sha-abc123",
+                "platform": "linux/amd64",
+            },
+            {
+                "name": "devguard-app-frontend",
+                "dockerfile": "FROM nginx:1.27\nEXPOSE 80\n",
+                "context": "frontend",
+                "tag": "sha-abc123",
+                "platform": "linux/amd64",
+            },
+        ]
+        payload = translate_infracost_to_deploy_payload(
+            "job-abc", deploy_inputs, approved_by="hbib@test.com"
+        )
+        images = payload["artifacts"]["docker_images"]
+        assert len(images) == 2
+        assert images[0]["name"] == "devguard-app"
+        assert images[0]["context"] == "backend"
+        assert images[1]["name"] == "devguard-app-frontend"
+        assert images[1]["context"] == "frontend"
+        assert images[1]["dockerfile"] == "FROM nginx:1.27\nEXPOSE 80\n"
+
+    def test_multi_container_entry_missing_dockerfile_is_rejected(self, deploy_inputs):
+        deploy_inputs["artifacts"]["docker_images"] = [
+            {
+                "name": "devguard-app",
+                "dockerfile": "FROM python:3.12-slim\nEXPOSE 8000\n",
+                "context": "backend",
+                "tag": "sha-abc123",
+            },
+            {
+                "name": "devguard-app-frontend",
+                "context": "frontend",
+                "tag": "sha-abc123",
+            },
+        ]
+        with pytest.raises(ValueError, match="has no dockerfile content"):
+            translate_infracost_to_deploy_payload(
+                "job-abc", deploy_inputs, approved_by="hbib@test.com"
+            )
+
     def test_platform_is_defaulted(self, deploy_inputs):
         payload = translate_infracost_to_deploy_payload(
             "job-abc", deploy_inputs, approved_by="hbib@test.com"

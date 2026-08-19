@@ -87,6 +87,111 @@ _FIRST_TRY_ARTIFACT_FIX: Final[str] = (
     "app exposes). Keep every other resource and setting strictly identical."
 )
 
+
+# The ECS template hardcodes the health path to "/health" (constants.py), which
+# is wrong for most apps: a Next.js server serves "/" (or "/api/health"), a
+# FastAPI app serves "/docs", etc. The LLM refiner is asked to correct it but
+# is not reliable on this (confirmed: it left "/health" on a Next.js blog that
+# has no health route at all -> 503 on every attempt -> rollback). This is the
+# deterministic fallback: look at the primary Dockerfile's CMD/EXPOSE and the
+# repo for an actual health route, and only then fix the path. Fail-soft —
+# never raises, and only changes the path when the app clearly exposes one.
+_HEALTH_PATH_PATTERNS: Final[tuple[str, ...]] = (
+    "/health",
+    "/api/health",
+    "/healthz",
+    "/api/healthz",
+    "/ready",
+    "/api/ready",
+    "/api",
+    "/",
+)
+_HEALTH_PATH_HINTS: Final[tuple[str, ...]] = (
+    "health",
+    "ready",
+    "status",
+    "ping",
+    "alive",
+)
+
+
+def _infer_health_path(primary_dockerfile: str | None, repo_path: str | None) -> str | None:
+    """Pick a health-check path the app actually serves.
+
+    The ECS template hardcodes "/health" (constants.py), which most apps do
+    not expose -- a Next.js server serves "/" (or "/api/health"), a FastAPI
+    app serves "/docs", etc. The LLM refiner is asked to correct it but is
+    unreliable on this (confirmed: it left "/health" on a Next.js blog with no
+    health route at all -> 503 on every attempt -> rollback).
+
+    Order of evidence:
+      1. A route file/dir named for health/ready/status/ping in the repo.
+      2. A health route mentioned in the primary Dockerfile's CMD/ENTRYPOINT.
+      3. "/" -- the app's root. Any web server answers on its root when it is
+         up, so it is a valid liveness signal for the majority of web apps
+         that have no dedicated health route. This is the whole point: the
+         pipeline must work for projects that don't bother with /health.
+    """
+    candidates: list[str] = list(_HEALTH_PATH_PATTERNS)
+
+    # Strongest evidence first: the repo itself declares a health route.
+    if repo_path:
+        try:
+            for p in Path(repo_path).rglob("*"):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(repo_path).as_posix().lower()
+                if any(h in rel for h in _HEALTH_PATH_HINTS):
+                    for pat in ("/health", "/api/health", "/healthz", "/api/healthz"):
+                        if pat in candidates:
+                            return pat
+                    return "/"
+        except Exception:
+            pass
+
+    # Dockerfile evidence: only the CMD/ENTRYPOINT line -- scanning the whole
+    # file is wrong (e.g. "COPY . /app" would match "/"). Skip the stub
+    # "FROM python:3.12-slim COPY . /app" too: it has no CMD.
+    if primary_dockerfile:
+        cmd = ""
+        for line in primary_dockerfile.splitlines():
+            upper = line.strip().upper()
+            if upper.startswith("CMD") or upper.startswith("ENTRYPOINT"):
+                cmd = line
+                break
+        if cmd:
+            for hint in _HEALTH_PATH_HINTS:
+                for pat in candidates:
+                    if pat in cmd and hint in cmd:
+                        return pat
+            for pat in candidates:
+                if pat in cmd:
+                    return pat
+
+    return "/"
+
+
+def _apply_inferred_health_path(
+    terraform_files: TerraformFiles, primary_dockerfile: str | None, repo_path: str | None
+) -> None:
+    """Rewrite the ECS target group's health-check path in place when the app
+    clearly exposes one. Idempotent and fail-soft."""
+    try:
+        main_tf = terraform_files.main_tf
+        inferred = _infer_health_path(primary_dockerfile, repo_path)
+        if inferred is None:
+            return
+        new_tf, n = re.subn(
+            r'(path\s*=\s*")[^"]*(")',
+            rf'\g<1>{inferred}\g<2>',
+            main_tf,
+        )
+        if n:
+            terraform_files.main_tf = new_tf
+            logger.info("Inferred health-check path %s from the app", inferred)
+    except Exception as exc:
+        logger.warning("Health-path inference failed: %s", exc)
+
 # The refiner may change sizing in main.tf when the user asks for cost changes
 # ("use 512MB / 0.25 vCPU"). It renders these as Terraform variables —
 # `cpu = var.task_cpu` with the real value as a `default` in variables.tf —
@@ -408,6 +513,16 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
                     primary_image.dockerfile = primary_dockerfile
     except Exception as exc:
         raise PipelineStageError("terraform_generator", exc) from exc
+
+    # Deterministic health-path inference: the refiner is asked to correct the
+    # path but is unreliable on it, so fall back to reading the app itself.
+    # Runs on every render (first try and regens) so the path is right even
+    # when the LLM leaves the template's "/health" in place.
+    _apply_inferred_health_path(
+        terraform_files,
+        primary_image.dockerfile if primary_image else None,
+        raw.get("repo_path"),
+    )
 
     # After Gate-2 feedback the refiner may have rewritten sizing in main.tf;
     # cost must reflect what actually ships, not the pre-regen decision.

@@ -243,6 +243,71 @@ def test_first_try_without_repo_path_skips_refiner() -> None:
     assert "COPY . /app" in output.artifacts.dockerfile
 
 
+def test_health_path_inferred_to_root_when_app_has_no_health_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Apps without a /health endpoint must not get the template's hardcoded
+    /health (which 404s -> rollback). A plain Next.js Dockerfile (npm run dev,
+    no health route in the repo) should be probed at "/" instead."""
+    raw = _load_raw("sample_input.json")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Dockerfile").write_text(
+        "FROM node:18-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\n"
+        'CMD ["npm", "run", "dev"]\n'
+    )
+    raw["repo_path"] = str(repo)
+
+    # Keep the refiner from touching the files; the deterministic inference
+    # is what we're testing.
+    monkeypatch.setattr("core.pipeline.ingest_repo", lambda *a, **k: "Next.js app on 3000")
+    monkeypatch.setattr(
+        "core.llm_architecture_advisor.call_llm",
+        lambda *a, **k: json.dumps({"compute_type": "ecs", "reasoning": "test"}),
+    )
+    monkeypatch.setattr(
+        "core.pipeline.refine_terraform",
+        lambda tf, feedback, **k: (tf, None),
+    )
+
+    output = run_pipeline(raw)
+    main = output.artifacts.terraform.files.main_tf
+    assert 'path                = "/"' in main
+    assert 'path                = "/health"' not in main
+
+
+def test_health_path_kept_when_app_exposes_health_route(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the repo has an explicit health route, that path is kept (not
+    overridden by the root fallback)."""
+    raw = _load_raw("sample_input.json")
+    repo = tmp_path / "repo"
+    (repo / "src" / "app" / "health").mkdir(parents=True)
+    (repo / "src" / "app" / "health" / "route.ts").write_text(
+        'export async function GET() { return new Response("ok"); }\n'
+    )
+    (repo / "Dockerfile").write_text(
+        "FROM node:18-alpine\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\n"
+        'CMD ["npm", "run", "dev"]\n'
+    )
+    raw["repo_path"] = str(repo)
+
+    monkeypatch.setattr("core.pipeline.ingest_repo", lambda *a, **k: "Next.js app with health")
+    monkeypatch.setattr(
+        "core.llm_architecture_advisor.call_llm",
+        lambda *a, **k: json.dumps({"compute_type": "ecs", "reasoning": "test"}),
+    )
+    monkeypatch.setattr(
+        "core.pipeline.refine_terraform",
+        lambda tf, feedback, dockerfile=None, **k: (tf, dockerfile),
+    )
+
+    output = run_pipeline(raw)
+    main = output.artifacts.terraform.files.main_tf
+    assert 'path                = "/health"' in main
+
+
 def test_multi_container_pipeline_qualifies_each_image_with_ecr() -> None:
     """Multi-container E2E: plural containers resolve to plural docker_images,
     each rendered as its own container_definition with an ECR-qualified URI.

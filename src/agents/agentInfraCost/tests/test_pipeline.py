@@ -9,6 +9,7 @@ from core.input_validator import LowConfidenceError
 from core.pipeline import (
     PipelineStageError,
     _recompute_decision_from_refined,
+    _required_env_vars,
     _sizing_from_refined_terraform,
     run_pipeline,
     run_pipeline_with_context,
@@ -306,6 +307,46 @@ def test_health_path_kept_when_app_exposes_health_route(
     output = run_pipeline(raw)
     main = output.artifacts.terraform.files.main_tf
     assert 'path                = "/health"' in main
+
+
+def test_required_env_vars_detected_from_boot_gate() -> None:
+    """A Dockerfile that hard-exits unless secrets are set surfaces those vars,
+    minus conventional ones and vars it defines itself via ENV."""
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        'ENV NODE_ENV=production\n'
+        'CMD sh -c "if [ -z \\"$MONGODB_URI\\" ] || [ -z \\"$JWT_TOKEN\\" ]; '
+        'then echo missing; exit 1; fi; npm start"\n'
+    )
+    assert _required_env_vars(dockerfile) == ["JWT_TOKEN", "MONGODB_URI"]
+
+
+def test_required_env_vars_ignore_defined_and_conventional() -> None:
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        'ENV PORT=3000\n'
+        'CMD ["sh", "-c", "node server.js $PORT"]\n'
+    )
+    assert _required_env_vars(dockerfile) == []
+
+
+def test_required_env_vars_none_when_no_dockerfile() -> None:
+    assert _required_env_vars(None) == []
+
+
+def test_required_env_vars_across_multiline_cmd_continuation() -> None:
+    """Backslash-continued CMD blocks must keep collecting env refs past the
+    line that opened the block (the Animetrix pattern)."""
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        'CMD sh -c "\\\n'
+        'if [ -z \\"$MONGODB_URI\\" ] || \\\n'
+        '   [ -z \\"$JWT_TOKEN\\" ]; then \\\n'
+        '  echo missing; exit 1; \\\n'
+        'fi; \\\n'
+        ' npm run dev"\n'
+    )
+    assert _required_env_vars(dockerfile) == ["JWT_TOKEN", "MONGODB_URI"]
 
 
 def test_multi_container_pipeline_qualifies_each_image_with_ecr() -> None:

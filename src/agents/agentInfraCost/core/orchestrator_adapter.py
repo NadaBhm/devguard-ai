@@ -50,6 +50,7 @@ class OrchestratorInfraCostResult(TypedDict):
     load_scenarios: list[dict]
     optimizations: list[dict]
     region_comparison: list[dict]
+    warnings: list[str]
 
 
 # "hybrid" is part of the orchestrator's Literal but this agent never
@@ -98,4 +99,5 @@ def to_orchestrator_result(
         load_scenarios=[scenario.model_dump() for scenario in scenarios],
         optimizations=optimizations,
         region_comparison=[region.model_dump() for region in regions],
+        warnings=[],
     )

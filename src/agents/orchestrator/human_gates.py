@@ -102,6 +102,7 @@ def human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
     monthly_cost = cost_estimate.get("monthly_cost_usd", 0)
     architecture = infracost.get("architecture_recommendation", "unknown")
     breakdown = cost_estimate.get("breakdown", [])
+    warnings = infracost.get("warnings", [])
 
     iterations_done = len(state.get("infracost_iterations", []))
     can_regenerate = iterations_done < MAX_INFRACOST_ITERATIONS
@@ -114,6 +115,7 @@ def human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
             "monthly_cost_usd": monthly_cost,
             "architecture": architecture,
             "breakdown": breakdown,
+            "warnings": warnings,
             "iteration": iterations_done,
             "max_iterations": MAX_INFRACOST_ITERATIONS,
         },

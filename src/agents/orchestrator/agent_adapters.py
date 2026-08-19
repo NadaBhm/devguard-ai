@@ -213,6 +213,7 @@ def _run_infracost_pipeline(codesec_result: dict[str, Any]) -> Any:
 
         ctx = run_pipeline_with_context(codesec_result)
         result = dict(to_orchestrator_result(ctx.output, ctx.decision, ctx.finops))
+        result["warnings"] = ctx.warnings
         # Stash the raw artifacts DeployOps needs (Dockerfile content,
         # terraform files, aws_config/deployment_config) - the orchestrator's
         # InfraCostResult TypedDict has no field for these, so without

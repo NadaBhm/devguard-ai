@@ -45,7 +45,7 @@ from core.output_builder import build_output, resolve_docker_artifacts
 from core.repo_ingestor import ingest_repo
 from core.terraform_generator import generate_terraform
 from models.output_schema import InfraCostOutput, TerraformFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,51 @@ def _apply_inferred_health_path(
     except Exception as exc:
         logger.warning("Health-path inference failed: %s", exc)
 
+
+# Env vars that are conventionally harmless / auto-provisioned by the runtime
+# (port, NODE_ENV, path, ...) — never worth a Gate-2 warning.
+_IGNORED_ENV_VARS: Final[frozenset[str]] = frozenset({
+    "PORT", "HOST", "NODE_ENV", "ENV", "PATH", "HOME", "PWD", "LANG", "TZ",
+    "USER", "SHELL", "TERM", "DEBUG", "LOG_LEVEL", "NODE_OPTIONS",
+})
+_ENV_REF_PATTERN: Final[re.Pattern[str]] = re.compile(r"\$\{?([A-Z][A-Z0-9_]*)\}?")
+
+
+def _required_env_vars(primary_dockerfile: str | None) -> list[str]:
+    """Extract env vars the app hard-requires at boot.
+
+    Scans the primary Dockerfile's CMD/ENTRYPOINT for ``$VAR`` / ``${VAR}``
+    references and drops vars the Dockerfile itself sets via ``ENV`` (they
+    have a value already) plus the conventional safe set. These are the vars
+    a deployment must provide or the container exits and the health check
+    rolls back — surfaced at Gate 2 so the user knows before approving.
+    Fail-soft: returns [] on any parse hiccup.
+    """
+    if not primary_dockerfile:
+        return []
+    defined: set[str] = set()
+    for line in primary_dockerfile.splitlines():
+        m = re.match(r"^\s*ENV\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|\s)", line)
+        if m:
+            defined.add(m.group(1).upper())
+    required: set[str] = set()
+    in_run_block = False
+    for line in primary_dockerfile.splitlines():
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("CMD") or upper.startswith("ENTRYPOINT"):
+            in_run_block = True
+        elif not in_run_block:
+            continue
+        for match in _ENV_REF_PATTERN.finditer(line):
+            var = match.group(1).upper()
+            if var in _IGNORED_ENV_VARS or var in defined:
+                continue
+            required.add(var)
+        if not stripped.endswith("\\"):
+            in_run_block = False
+    return sorted(required)
+
 # The refiner may change sizing in main.tf when the user asks for cost changes
 # ("use 512MB / 0.25 vCPU"). It renders these as Terraform variables —
 # `cpu = var.task_cpu` with the real value as a `default` in variables.tf —
@@ -218,6 +263,7 @@ class PipelineContext(BaseModel):
     output: InfraCostOutput
     decision: DecisionResult
     finops: FinOpsRecommendation
+    warnings: list[str] = Field(default_factory=list)
 
 
 def _content_for_image(
@@ -524,6 +570,22 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         raw.get("repo_path"),
     )
 
+    # Boot-blocking env vars: apps like Animetrix hard-exit unless secrets
+    # (MONGODB_URI, JWT_TOKEN) are set, so the container never reaches healthy.
+    # Can't conjure the values, but must surface them at Gate 2 rather than
+    # let the deploy silently roll back.
+    required_env_vars = _required_env_vars(
+        primary_image.dockerfile if primary_image else None
+    )
+    warnings = (
+        [
+            f"App requires env var(s) at boot: {', '.join(required_env_vars)}. "
+            "Deployment will not go healthy until these are provided."
+        ]
+        if required_env_vars
+        else []
+    )
+
     # After Gate-2 feedback the refiner may have rewritten sizing in main.tf;
     # cost must reflect what actually ships, not the pre-regen decision.
     # Fail-soft: if the refined Terraform carries no readable sizing, this
@@ -560,7 +622,7 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
     except Exception as exc:
         raise PipelineStageError("output_builder", exc) from exc
 
-    return PipelineContext(output=output, decision=refined_decision, finops=finops)
+    return PipelineContext(output=output, decision=refined_decision, finops=finops, warnings=warnings)
 
 
 def run_pipeline(raw: dict) -> InfraCostOutput:

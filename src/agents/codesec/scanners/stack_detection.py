@@ -55,6 +55,119 @@ LANGUAGE_EXTENSIONS: dict[str, str] = {
     ".tfvars": "terraform",
 }
 
+# Service names / image tags that indicate a public web entrypoint. Used as a
+# tiebreaker when a compose file maps host ports on several services (e.g. a
+# gateway + separate API services all published on the host).
+_ENTRYPOINT_NAME_HINTS = (
+    "gateway", "proxy", "front", "web", "app", "ui", "nginx", "caddy", "traefik",
+)
+# Host ports most commonly bound by a public-facing web service. Used to rank
+# compose services that expose host ports before picking the primary.
+_ENTRYPOINT_PORT_PRIORITY = (80, 443, 8080, 3000, 8000)
+
+
+def _parse_compose(repo_path: Path, compose_files: list[str]) -> dict[str, Any] | None:
+    """Parse the first docker-compose file found; returns the services map."""
+    try:
+        import yaml  # local import: only needed for compose-aware primaries
+    except ImportError:
+        return None
+    for path in compose_files:
+        raw = read_file_safe(repo_path / path, max_size_mb=1)
+        if not raw:
+            continue
+        try:
+            data = yaml.safe_load(raw)
+        except Exception:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("services"), dict):
+            return data["services"]
+    return None
+
+
+def _dockerfile_path_for_service(
+    compose_dir: str, service_name: str, service: dict[str, Any]
+) -> str | None:
+    """Best-effort map of a compose service to its Dockerfile path.
+
+    Handles both ``build: ./dir`` and ``build: {context, dockerfile}`` forms.
+    Returns a repo-relative path, or None if it can't be derived.
+    """
+    build = service.get("build")
+    if isinstance(build, str):
+        context = build.strip("./") or "."
+        return f"{context}/Dockerfile" if context != "." else "Dockerfile"
+    if isinstance(build, dict):
+        context = (build.get("context") or ".").strip("./") or "."
+        df_rel = build.get("dockerfile")
+        base = f"{compose_dir}/{context}".strip("/") if compose_dir else context
+        if df_rel:
+            return f"{base}/{df_rel.lstrip('./')}" if base != "." else df_rel.lstrip("./")
+        return f"{base}/Dockerfile" if base != "." else "Dockerfile"
+    # No build context: match by service dir name (common convention).
+    return f"{service_name}/Dockerfile"
+
+
+def _primary_dockerfile_from_compose(
+    repo_path: Path, compose_files: list[str], dockerfile_files: list[str]
+) -> str | None:
+    """Pick the primary Dockerfile from compose host-port mappings.
+
+    Compose services with host ``ports:`` are candidates for the public
+    entrypoint. Rank them by conventional web ports, then entrypoint-name
+    hints, then first-match. Returns None when there's no useful signal so the
+    caller keeps scan order.
+    """
+    services = _parse_compose(repo_path, compose_files)
+    if not services:
+        return None
+
+    compose_path = compose_files[0]
+    compose_dir = str(Path(compose_path).parent).lstrip(".")
+    candidates: list[tuple[tuple[int, int], str]] = []  # ((port_rank, hint_rank), dockerfile)
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        ports = service.get("ports")
+        if not ports:
+            continue
+        host_port: int | None = None
+        for entry in ports:
+            if not isinstance(entry, str):
+                continue
+            # "3000:3000" or "127.0.0.1:3000:3000" or "3000"
+            pieces = entry.split(":")
+            try:
+                candidate = int(pieces[-2] if len(pieces) >= 2 else pieces[0])
+            except (ValueError, IndexError):
+                continue
+            if 1 <= candidate <= 65535:
+                host_port = candidate
+                break
+        if host_port is None:
+            continue
+        df_path = _dockerfile_path_for_service(compose_dir, service_name, service)
+        if not df_path or df_path not in dockerfile_files:
+            continue
+        try:
+            port_rank = _ENTRYPOINT_PORT_PRIORITY.index(host_port)
+        except ValueError:
+            port_rank = len(_ENTRYPOINT_PORT_PRIORITY)
+        name_lower = service_name.lower()
+        try:
+            hint_rank = next(
+                i for i, hint in enumerate(_ENTRYPOINT_NAME_HINTS) if hint in name_lower
+            )
+        except StopIteration:
+            hint_rank = len(_ENTRYPOINT_NAME_HINTS)
+        candidates.append(((port_rank, hint_rank), df_path))
+
+    if not candidates:
+        return None
+    # Stable sort: lower (port_rank, hint_rank) wins; tie keeps scan order.
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
 
 def detect_stack(repo_path: Path) -> StackDetection:
     """
@@ -149,20 +262,40 @@ def detect_stack(repo_path: Path) -> StackDetection:
 
     # --- Container Detection ---
     container = ContainerInfo(detected=False)
+    containers: list[ContainerInfo] = []
     dockerfile_files = [p for p in rel_paths if "dockerfile" in p.lower() or p.lower().endswith(".dockerfile")]
     compose_files = [p for p in rel_paths if "docker-compose" in p.lower() or "compose.yaml" in p.lower()]
 
     if dockerfile_files:
-        container.detected = True
-        container.dockerfile_path = dockerfile_files[0]
-        # Try to extract base image from Dockerfile
-        df_content = read_file_safe(repo_path / dockerfile_files[0], max_size_mb=1)
-        if df_content:
-            match = re.search(r"^FROM\s+(\S+)", df_content, re.MULTILINE | re.IGNORECASE)
-            if match:
-                container.base_image = match.group(1)
-    if compose_files:
-        container.compose_detected = True
+        for df_path in dockerfile_files:
+            df_container = ContainerInfo(detected=True, dockerfile_path=df_path)
+            df_content = read_file_safe(repo_path / df_path, max_size_mb=1)
+            if df_content:
+                df_container.dockerfile_content = df_content
+                match = re.search(r"^FROM\s+(\S+)", df_content, re.MULTILINE | re.IGNORECASE)
+                if match:
+                    df_container.base_image = match.group(1)
+            containers.append(df_container)
+        if compose_files:
+            for c in containers:
+                c.compose_detected = True
+        # Multi-container apps: the first container is the ALB primary, so it
+        # must be the public entrypoint, not whatever sorts first on disk. Use
+        # docker-compose host port mappings to find it (falling back to a
+        # name-based heuristic, then scan order). Ordering here flows into the
+        # singular ``container`` alias and the InfraCost primary image.
+        primary_path = _primary_dockerfile_from_compose(
+            repo_path, compose_files, dockerfile_files
+        )
+        if primary_path:
+            for i, c in enumerate(containers):
+                if c.dockerfile_path == primary_path:
+                    containers.insert(0, containers.pop(i))
+                    logger.info(
+                        "Primary container selected from compose: %s", primary_path
+                    )
+                    break
+        container = containers[0]
 
     # --- Confidence Calculation ---
     # Confidence is a heuristic based on how many signals we found
@@ -180,7 +313,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
                 if len(detected_files) >= 5:
                     break
     if dockerfile_files:
-        detected_files.extend(dockerfile_files[:1])
+        detected_files.extend(dockerfile_files[:5])
     if compose_files:
         detected_files.extend(compose_files[:1])
 
@@ -191,6 +324,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
         database=database,
         build_tool=build_tool,
         container=container,
+        containers=containers,
         confidence=round(confidence, 2),
         detected_files=detected_files[:10],
     )

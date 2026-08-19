@@ -61,20 +61,28 @@ logger = logging.getLogger(__name__)
 _MAX_DOCKERFILE_BYTES = 256 * 1024
 
 
-def _capture_dockerfile_content(repo_path: Path, stack_result: Any) -> str | None:
-    """Read the repository's Dockerfile content for downstream agents.
+def _capture_dockerfile_contents(repo_path: Path, stack_result: Any) -> dict[str, str]:
+    """Read every Dockerfile in the repository, keyed by repo-relative path.
 
-    Prefers the exact Dockerfile the stack detector identified
-    (``stack_detection.container.dockerfile_path``), falling back to scanning
-    for ``Dockerfile*`` / ``*.dockerfile`` across the clone so variants like
-    ``Dockerfile.backend`` are still captured. Returns ``None`` (never raises)
-    when no readable, size-safe Dockerfile exists.
+    Prefers the exact Dockerfiles the stack detector identified
+    (``stack_detection.containers[*].dockerfile_path``), falling back to
+    scanning for ``Dockerfile*`` / ``*.dockerfile`` across the clone so
+    variants like ``Dockerfile.backend`` are still captured. Multi-container
+    repos get one entry per file. Returns ``{}`` (never raises) when no
+    readable, size-safe Dockerfile exists.
     """
+    contents: dict[str, str] = {}
     try:
         candidates: list[Path] = []
 
         detected = getattr(getattr(stack_result, "container", None), "dockerfile_path", None)
-        if detected:
+        for cont in getattr(stack_result, "containers", None) or []:
+            df = getattr(cont, "dockerfile_path", None)
+            if df:
+                df_path = repo_path / df
+                if df_path.is_file():
+                    candidates.append(df_path)
+        if not candidates and detected:
             detected_path = repo_path / detected
             if detected_path.is_file():
                 candidates.append(detected_path)
@@ -87,16 +95,29 @@ def _capture_dockerfile_content(repo_path: Path, stack_result: Any) -> str | Non
                 if candidate.is_file() and candidate.stat().st_size <= _MAX_DOCKERFILE_BYTES:
                     content = candidate.read_text(encoding="utf-8", errors="replace")
                     if content:
-                        logger.info(
-                            "Captured Dockerfile for downstream agents: %s",
-                            candidate.relative_to(repo_path).as_posix(),
-                        )
-                        return content
+                        rel = candidate.relative_to(repo_path).as_posix()
+                        contents[rel] = content
             except OSError:
                 continue
     except Exception:
         pass
-    return None
+    return contents
+
+
+def _capture_dockerfile_content(repo_path: Path, stack_result: Any) -> str | None:
+    """Read the repository's primary Dockerfile content for downstream agents.
+
+    Backward-compatible single-string view over ``_capture_dockerfile_contents``
+    — returns the first captured Dockerfile, preferring the one the stack
+    detector identified. Returns ``None`` (never raises) when none exists.
+    """
+    contents = _capture_dockerfile_contents(repo_path, stack_result)
+    if not contents:
+        return None
+    detected = getattr(getattr(stack_result, "container", None), "dockerfile_path", None)
+    if detected and detected in contents:
+        return contents[detected]
+    return next(iter(contents.values()))
 
 
 class CodeSecAgent:
@@ -453,8 +474,11 @@ class CodeSecAgent:
 
         results["sbom"].download_url = f"/api/jobs/{job_id}/sbom/download"
 
-        # Capture Dockerfile for downstream agents (the clone is removed below)
-        dockerfile_content = _capture_dockerfile_content(repo_path, stack_result)
+        # Capture Dockerfiles for downstream agents (the clone is removed below)
+        dockerfile_contents = _capture_dockerfile_contents(repo_path, stack_result)
+        dockerfile_content = next(iter(dockerfile_contents.values())) if dockerfile_contents else None
+        for df_rel in dockerfile_contents:
+            logger.info("Captured Dockerfile for downstream agents: %s", df_rel)
 
         try:
             shutil.rmtree(repo_path, ignore_errors=True)
@@ -477,6 +501,7 @@ class CodeSecAgent:
             sbom=results["sbom"],
             security_score=security_score,
             dockerfile_content=dockerfile_content,
+            dockerfile_contents=dockerfile_contents,
         )
 
         logger.info(

@@ -22,9 +22,21 @@ from typing import Any
 
 from ..config import STACK_INDICATORS
 from ..models import ContainerInfo, StackDetection
-from . import ScannerError, find_files, read_file_safe
+from . import ScannerError, find_dockerfiles, find_files, is_dockerfile_rel_path, read_file_safe
 
 logger = logging.getLogger(__name__)
+
+
+def _is_dockerfile_path(rel_path: str) -> bool:
+    """True when a repo-relative path is an actual Dockerfile.
+
+    Accepts ``Dockerfile``, ``Dockerfile.prod``, ``app.Dockerfile``, etc. —
+    the basename must be (case-insensitively) exactly ``dockerfile``, start
+    with ``dockerfile.`` (variant suffix), or end with ``.dockerfile``.
+    Rejects templates and docs that merely contain the word, e.g.
+    ``nginx.dockerfile.twig`` (a Twig template) or ``Dockerfile.example.txt``.
+    """
+    return is_dockerfile_rel_path(rel_path)
 
 
 # File extensions that contribute to language LOC counting
@@ -263,7 +275,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
     # --- Container Detection ---
     container = ContainerInfo(detected=False)
     containers: list[ContainerInfo] = []
-    dockerfile_files = [p for p in rel_paths if "dockerfile" in p.lower() or p.lower().endswith(".dockerfile")]
+    dockerfile_files = [p for p in rel_paths if _is_dockerfile_path(p)]
     compose_files = [p for p in rel_paths if "docker-compose" in p.lower() or "compose.yaml" in p.lower()]
 
     if dockerfile_files:

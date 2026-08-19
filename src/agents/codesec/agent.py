@@ -47,7 +47,7 @@ from .models import (
     StackDetection,
     Summary,
 )
-from .scanners import find_files
+from .scanners import find_dockerfiles
 from .scanners.dependencies import run_dependency_scan
 from .scanners.dockerfile_scanner import run_dockerfile_scan
 from .scanners.sast import run_sast
@@ -88,7 +88,7 @@ def _capture_dockerfile_contents(repo_path: Path, stack_result: Any) -> dict[str
                 candidates.append(detected_path)
 
         if not candidates:
-            candidates = find_files(repo_path, ("Dockerfile*", "*.dockerfile"))
+            candidates = find_dockerfiles(repo_path)
 
         for candidate in candidates:
             try:

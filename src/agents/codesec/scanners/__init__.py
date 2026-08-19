@@ -83,6 +83,19 @@ def find_files(repo_path: Path, patterns: tuple[str, ...], exclude: tuple[str, .
     return matched
 
 
+def find_dockerfiles(repo_path: Path) -> list[Path]:
+    """Recursively find real Dockerfiles, rejecting templates/docs whose name
+    merely contains the word (e.g. ``nginx.dockerfile.twig``)."""
+    matched: list[Path] = []
+    for root, _dirs, files in os.walk(repo_path):
+        root_path = Path(root)
+        for filename in files:
+            rel_path = root_path.joinpath(filename).relative_to(repo_path).as_posix()
+            if is_dockerfile_rel_path(rel_path):
+                matched.append(root_path / filename)
+    return matched
+
+
 def read_file_safe(file_path: Path, max_size_mb: int = 10) -> str | None:
     """
     Safely read a file with size limits. Returns None if unreadable.
@@ -98,6 +111,27 @@ def read_file_safe(file_path: Path, max_size_mb: int = 10) -> str | None:
     except (OSError, UnicodeDecodeError) as exc:
         logger.debug("Could not read file %s: %s", file_path, exc)
         return None
+
+
+def is_dockerfile_rel_path(rel_path: str) -> bool:
+    """True when a repo-relative path is an actual Dockerfile.
+
+    Accepts ``Dockerfile``, ``Dockerfile.prod``, ``app.Dockerfile`` — the
+    basename must be (case-insensitively) exactly ``dockerfile``, start with
+    ``dockerfile.`` followed by a single variant token (no extra dots, so
+    ``Dockerfile.example.txt`` stays a doc), or end with ``.dockerfile``.
+    Rejects templates/docs that merely contain the word, e.g.
+    ``nginx.dockerfile.twig``.
+    """
+    basename = Path(rel_path).name.lower()
+    if basename == "dockerfile":
+        return True
+    if basename.startswith("dockerfile."):
+        suffix = basename[len("dockerfile."):]
+        return bool(suffix) and "." not in suffix
+    if basename.endswith(".dockerfile") and len(basename) > len(".dockerfile"):
+        return True
+    return False
 
 
 def hash_file(file_path: Path) -> str:
@@ -116,6 +150,8 @@ __all__ = [
     "run_subprocess",
     "ScannerError",
     "find_files",
+    "find_dockerfiles",
+    "is_dockerfile_rel_path",
     "read_file_safe",
     "hash_file",
 ]

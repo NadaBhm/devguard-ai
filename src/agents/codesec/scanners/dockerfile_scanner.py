@@ -23,7 +23,7 @@ from typing import Any
 
 from ..config import TOOLS
 from ..models import DockerfileFinding, Severity
-from . import ScannerError, find_files, read_file_safe, run_subprocess
+from . import ScannerError, find_dockerfiles, find_files, is_dockerfile_rel_path, read_file_safe, run_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +34,13 @@ def _run_trivy_config(repo_path: Path) -> list[DockerfileFinding]:
     if not tool.enabled:
         return []
 
-    dockerfile_paths = find_files(
-        repo_path,
-        patterns=("Dockerfile*", "*.dockerfile", "docker-compose*.yml", "docker-compose*.yaml"),
-    )
+    dockerfile_paths = [
+        p for p in find_files(
+            repo_path,
+            patterns=("Dockerfile*", "*.dockerfile", "docker-compose*.yml", "docker-compose*.yaml"),
+        )
+        if is_dockerfile_rel_path(p.relative_to(repo_path).as_posix())
+    ]
     if not dockerfile_paths:
         logger.info("No Dockerfiles found for Trivy config scan.")
         return []
@@ -109,7 +112,7 @@ def _run_hadolint(repo_path: Path) -> list[DockerfileFinding]:
     if not tool.enabled:
         return []
 
-    dockerfile_paths = find_files(repo_path, patterns=("Dockerfile*", "*.dockerfile"))
+    dockerfile_paths = find_dockerfiles(repo_path)
     if not dockerfile_paths:
         return []
 
@@ -153,7 +156,7 @@ def _run_hadolint(repo_path: Path) -> list[DockerfileFinding]:
 def _run_builtin_checks(repo_path: Path) -> list[DockerfileFinding]:
     """Built-in Dockerfile security checks when no external tools are available. Covers critical security rules that every Dockerfile should pass."""
     findings: list[DockerfileFinding] = []
-    dockerfile_paths = find_files(repo_path, patterns=("Dockerfile*", "*.dockerfile"))
+    dockerfile_paths = find_dockerfiles(repo_path)
 
     for df_path in dockerfile_paths:
         content = read_file_safe(df_path, max_size_mb=1)

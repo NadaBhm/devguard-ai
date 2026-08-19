@@ -9,7 +9,7 @@ from codesec.scanners.stack_detection import (
     get_language_breakdown,
 )
 from codesec.models import StackDetection, ContainerInfo
-from codesec.scanners import ScannerError
+from codesec.scanners import ScannerError, is_dockerfile_rel_path
 
 
 class TestDetectStack:
@@ -166,6 +166,29 @@ class TestDetectStack:
             (p / "Dockerfile").write_text(f"FROM nginx:alpine\nEXPOSE {port}\n")
         result = detect_stack(tmp_path)
         assert result.container.dockerfile_path == "services/web/Dockerfile"
+
+    def test_dockerfile_predicate_rejects_templates(self):
+        """Files that merely contain the word 'dockerfile' (templates, docs)
+        must not be treated as containers."""
+        assert is_dockerfile_rel_path("Dockerfile")
+        assert is_dockerfile_rel_path("dockerfile")
+        assert is_dockerfile_rel_path("Dockerfile.prod")
+        assert is_dockerfile_rel_path("app.Dockerfile")
+        assert is_dockerfile_rel_path("services/api/Dockerfile")
+        assert not is_dockerfile_rel_path("resources/templates/nginx.dockerfile.twig")
+        assert not is_dockerfile_rel_path("Dockerfile.example.txt")
+        assert not is_dockerfile_rel_path("docs/DOCKERFILE_GUIDE.md")
+
+    def test_template_dockerfile_false_positives_not_detected(self, tmp_path: Path):
+        """End-to-end: a repo whose only 'dockerfile' names are Twig templates
+        yields no container, not a bogus one."""
+        (tmp_path / "resources" / "templates").mkdir(parents=True)
+        (tmp_path / "resources" / "templates" / "nginx.dockerfile.twig").write_text(
+            "FROM nginx:alpine\nEXPOSE 80\n"
+        )
+        result = detect_stack(tmp_path)
+        assert result.containers == []
+        assert result.container.detected is False
 
     def test_detect_java_repo(self, tmp_path: Path):
         """Test detecting Java stack."""

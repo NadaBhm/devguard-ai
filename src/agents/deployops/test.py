@@ -235,6 +235,38 @@ async def test_write_artifacts(agent, sample_payload, workspace):
     assert vars_content["region"] == "us-east-1"
 
 
+async def test_write_artifacts_multi_container_writes_each_dockerfile(agent, sample_payload, workspace):
+    from src.agents.deployops.models import Artifacts
+    sample_payload["artifacts"]["docker_images"] = [
+        {
+            "name": "test-app",
+            "dockerfile": "FROM python:3.12-slim\nCOPY . /app",
+            "context": "backend",
+            "tag": "latest",
+            "platform": "linux/amd64",
+        },
+        {
+            "name": "test-app-frontend",
+            "dockerfile": "FROM nginx:1.27\nCOPY . /usr/share/nginx/html",
+            "context": "frontend",
+            "tag": "latest",
+            "platform": "linux/amd64",
+        },
+    ]
+    artifacts = Artifacts(**sample_payload["artifacts"])
+
+    with patch("shutil.copytree") as mock_copytree:
+        mock_copytree.return_value = None
+        await agent._write_artifacts(artifacts, workspace)
+
+    backend_df = workspace / "backend" / "Dockerfile"
+    frontend_df = workspace / "frontend" / "Dockerfile"
+    assert backend_df.exists()
+    assert frontend_df.exists()
+    assert "python:3.12-slim" in backend_df.read_text()
+    assert "nginx:1.27" in frontend_df.read_text()
+
+
 def test_terraform_env_vars_mapping(monkeypatch):
     from src.agents.deployops.agent import _terraform_env_vars
 

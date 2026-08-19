@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 from core.constants import (
     DOCKER_IMAGE_NAME,
@@ -119,13 +120,51 @@ def _ec2_health_check_from_terraform(main_tf: str) -> tuple[int, str]:
     return port, path
 
 
+def _image_name_for(dockerfile_path: str | None, index: int) -> str:
+    """Derive a unique ECR image name for a container.
+
+    The first container keeps the canonical ``DOCKER_IMAGE_NAME``. Additional
+    containers get a suffix derived from their Dockerfile path so concurrent
+    images never collide in ECR: ``backend/Dockerfile`` -> ``devguard-app-backend``,
+    ``Dockerfile.web`` -> ``devguard-app-web``. Falls back to an index suffix
+    when the path carries nothing usable.
+    """
+    if index == 0 or not dockerfile_path:
+        return DOCKER_IMAGE_NAME
+    p = Path(dockerfile_path)
+    if p.name.lower().startswith("dockerfile"):
+        stem = re.sub(r"^dockerfile", "", p.stem, flags=re.IGNORECASE).lstrip(".-_")
+        if not stem:
+            stem = p.parent.name or ""
+    else:
+        stem = p.parent.name or ""
+    stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", stem).strip("-").lower()
+    return f"{DOCKER_IMAGE_NAME}-{stem}" if stem else f"{DOCKER_IMAGE_NAME}-{index}"
+
+
+def _dockerfile_context(dockerfile_path: str | None) -> str:
+    """Build-context directory (repo-relative) for a Dockerfile.
+
+    ``backend/Dockerfile`` builds from ``backend``; a root-level Dockerfile
+    (or any ``Dockerfile`` in the repo root) builds from ``"."``.
+    """
+    if not dockerfile_path:
+        return "."
+    parent = Path(dockerfile_path).parent.as_posix()
+    return "." if parent == "." else parent
+
+
 def resolve_docker_artifacts(
     analysis: RepoAnalysisInput, decision: DecisionResult
-) -> tuple[str | None, DockerImage | None]:
-    """Decide ``dockerfile`` / ``docker_image`` — ``None`` for a Lambda zip
-    deploy (no container detected upstream), otherwise a real Dockerfile
-    and image tag, falling back to ``"latest"`` with a warning if
-    ``commit_sha`` is unavailable — never silently.
+) -> list[DockerImage]:
+    """Decide ``docker_images`` — one entry per detected container, or an
+    empty list for a Lambda zip / S3 deploy (no container detected upstream).
+
+    Each returned ``DockerImage`` carries its own ``dockerfile`` content
+    (real content the CodeSec scanner captured, else a synthesized
+    ``FROM {base_image}\\nCOPY . /app\\n`` stand-in) and ``context``. Tags
+    fall back to ``"latest"`` with a warning if ``commit_sha`` is unavailable
+    — never silently.
 
     Public (not ``_``-prefixed): module 3 (``terraform_generator``) needs
     the resolved image string *before* rendering ECS/EC2 templates, so the
@@ -139,7 +178,7 @@ def resolve_docker_artifacts(
     )
     # S3 static sites ship plain files — no container to build.
     if is_lambda_zip or decision.compute_type == "s3":
-        return None, None
+        return []
 
     commit_sha = analysis.repo_metadata.commit_sha
     if commit_sha:
@@ -150,16 +189,29 @@ def resolve_docker_artifacts(
             "job_id=%s has no commit_sha; falling back to docker tag 'latest'",
             analysis.job_id,
         )
-    base_image = analysis.stack_detection.container.base_image or "python:3.12-slim"
-    dockerfile = f"FROM {base_image}\nCOPY . /app\n"
-    return dockerfile, DockerImage(name=DOCKER_IMAGE_NAME, tag=tag)
+
+    containers = analysis.stack_detection.containers or [
+        analysis.stack_detection.container
+    ]
+    images: list[DockerImage] = []
+    for index, container in enumerate(containers):
+        base_image = container.base_image or "python:3.12-slim"
+        dockerfile = container.dockerfile_content or f"FROM {base_image}\nCOPY . /app\n"
+        images.append(
+            DockerImage(
+                name=_image_name_for(container.dockerfile_path, index),
+                tag=tag,
+                dockerfile=dockerfile,
+                context=_dockerfile_context(container.dockerfile_path),
+            )
+        )
+    return images
 
 
 def _build_artifacts(
     analysis: RepoAnalysisInput,
     terraform_files: TerraformFiles,
-    dockerfile: str | None,
-    docker_image: DockerImage | None,
+    docker_images: list[DockerImage],
     source_code: str = ".",
     region: str = "us-east-1",
     environment: str = "dev",
@@ -170,8 +222,7 @@ def _build_artifacts(
     )
     return Artifacts(
         terraform=terraform,
-        dockerfile=dockerfile,
-        docker_image=docker_image,
+        docker_images=docker_images,
         source_code=source_code,
     )
 
@@ -347,6 +398,7 @@ def build_output(
     terraform_files: TerraformFiles,
     cost: Money,
     enrichment: Enrichment,
+    docker_images: list[DockerImage] | None = None,
     dockerfile: str | None = None,
     docker_image: DockerImage | None = None,
     approval_status: ApprovalStatus = "pending",
@@ -357,10 +409,14 @@ def build_output(
     """Assemble the final contract from already-computed module outputs.
 
     Args:
-        dockerfile: Pre-resolved via ``resolve_docker_artifacts`` — module 3
-            already needed the same value to render templates; if omitted,
+        docker_images: Pre-resolved via ``resolve_docker_artifacts`` — module 3
+            already needed the same values to render templates; if omitted,
             resolved on the spot (convenient for tests).
-        docker_image: Same as ``dockerfile``, resolved together.
+        dockerfile: Legacy singular alias for the first image's Dockerfile
+            content. Ignored when ``docker_images`` is provided; the first
+            image's content wins otherwise if ``docker_images`` is empty.
+        docker_image: Legacy singular alias for the first image. Ignored when
+            ``docker_images`` is provided.
         approval_status: Defaults to "pending" — module 8 owns the real
             state machine; this is just what gets stamped on assembly.
         source_code: Defaults to "." — a relative build context, never a
@@ -372,10 +428,19 @@ def build_output(
         One of the four ``InfraCostOutput`` variants, with the other
         ``aws_config``/``deployment_config`` blocks explicitly ``null``.
     """
-    if dockerfile is None and docker_image is None:
-        dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+    if docker_images is None:
+        docker_images = resolve_docker_artifacts(analysis, decision)
+    if not docker_images and (dockerfile is not None or docker_image is not None):
+        docker_images = [
+            DockerImage(
+                name=(docker_image.name if docker_image else DOCKER_IMAGE_NAME),
+                tag=(docker_image.tag if docker_image else "latest"),
+                dockerfile=dockerfile,
+                context=(docker_image.context if docker_image else source_code or "."),
+            )
+        ]
     artifacts = _build_artifacts(
-        analysis, terraform_files, dockerfile, docker_image, source_code, region, environment
+        analysis, terraform_files, docker_images, source_code, region, environment
     )
     builder = _BUILDERS[decision.compute_type]
     return builder(analysis, decision, artifacts, cost, enrichment, approval_status, region)

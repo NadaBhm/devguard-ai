@@ -121,6 +121,64 @@ def test_ecs_template_is_applyable_with_execution_role_and_logging() -> None:
     assert '"awslogs-region"        = var.region' in files.main_tf
 
 
+def test_ecs_multi_container_renders_one_definition_per_image() -> None:
+    """Multi-container ECS: every image becomes its own container_definition,
+    co-scheduled in one Fargate task. The ALB fronts the primary (first)
+    container; secondary containers share the task's localhost."""
+    decision = DecisionResult(
+        compute_type="ecs",
+        sizing={"task_cpu": 512, "task_memory": 1024},
+        score_breakdown={"ecs": 1.0, "lambda": 0.0, "ec2": 0.0, "s3": 0.0},
+    )
+    context = TerraformContext(
+        job_id="job-multi-1",
+        docker_images=[
+            {"name": "devguard-app", "image": "1111.dkr.ecr.us-east-1.amazonaws.com/devguard-app:sha-abc",
+             "port": 8000, "context": "."},
+            {"name": "devguard-app-frontend",
+             "image": "1111.dkr.ecr.us-east-1.amazonaws.com/devguard-app-frontend:sha-abc",
+             "port": 80, "context": "frontend"},
+        ],
+        health_check_port=8000,
+    )
+
+    files = generate_terraform(decision, context)
+
+    assert files.main_tf.count("portMappings = [") == 2
+    assert "name  = \"devguard-app\"" in files.main_tf
+    assert "name  = \"devguard-app-frontend\"" in files.main_tf
+    assert "containerPort = 8000" in files.main_tf
+    assert "containerPort = 80" in files.main_tf
+    # ALB + SG + service block all target the primary container.
+    assert "container_name   = \"devguard-app\"" in files.main_tf
+    assert "container_port   = 8000" in files.main_tf
+    assert "port        = 8000" in files.main_tf
+    # No database on the context -> no DB env placeholders at all.
+    assert "DB_HOST" not in files.main_tf
+
+
+def test_ecs_multi_container_db_env_only_on_primary() -> None:
+    decision = DecisionResult(
+        compute_type="ecs",
+        sizing={"task_cpu": 512, "task_memory": 1024},
+        score_breakdown={"ecs": 1.0},
+    )
+    context = TerraformContext(
+        job_id="job-multi-2",
+        database="postgresql",
+        docker_images=[
+            {"name": "devguard-app", "image": "x/devguard-app:1", "port": 8000, "context": "."},
+            {"name": "devguard-app-frontend", "image": "x/devguard-app-frontend:1", "port": 80, "context": "frontend"},
+        ],
+    )
+
+    files = generate_terraform(decision, context)
+
+    assert 'name = "DB_ENGINE", value = "postgresql"' in files.main_tf
+    # Only one container carries the DB placeholders.
+    assert files.main_tf.count("DB_ENGINE") == 1
+
+
 def test_generate_terraform_for_lambda_fixture() -> None:
     analysis = _load_analysis("sample_input_variant_lambda_candidate.json")
     decision = decide_architecture(analysis)

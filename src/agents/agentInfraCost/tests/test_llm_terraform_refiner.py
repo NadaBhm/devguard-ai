@@ -973,3 +973,83 @@ class TestRefinerRetries:
         files, _ = refine_terraform(CURRENT, "fence me")
 
         assert "fenced" in files.main_tf
+
+
+class TestRefinerMultiContainer:
+    DOCKERFILES = {
+        "Dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+        "frontend/Dockerfile": "FROM nginx:1.27\nCOPY . /usr/share/nginx/html\n",
+    }
+
+    def test_plural_refines_every_dockerfile(self, monkeypatch) -> None:
+        _patch_call_llm(
+            monkeypatch,
+            _valid_reply(
+                dockerfiles={
+                    "Dockerfile": "FROM python:3.12-slim\nRUN pip install fastapi\nCOPY . /app\n",
+                    "frontend/Dockerfile": "FROM nginx:1.27-alpine\nCOPY . /usr/share/nginx/html\n",
+                }
+            ),
+        )
+
+        files, dockerfiles = refine_terraform(
+            CURRENT, "switch to the alpine base image and pin python", dockerfiles=self.DOCKERFILES
+        )
+
+        assert files == CURRENT
+        assert "nginx:1.27-alpine" in dockerfiles["frontend/Dockerfile"]
+        assert "fastapi" in dockerfiles["Dockerfile"]
+
+    def test_plural_missing_file_keeps_original(self, monkeypatch) -> None:
+        # LLM only returns one Dockerfile; the other must survive unchanged.
+        _patch_call_llm(
+            monkeypatch,
+            _valid_reply(dockerfiles={"Dockerfile": "FROM python:3.11-slim\nCOPY . /app\n"}),
+        )
+
+        files, dockerfiles = refine_terraform(
+            CURRENT, "change the base image python version", dockerfiles=self.DOCKERFILES
+        )
+
+        assert dockerfiles["frontend/Dockerfile"] == self.DOCKERFILES["frontend/Dockerfile"]
+        assert "python:3.11-slim" in dockerfiles["Dockerfile"]
+
+    def test_plural_non_docker_feedback_keeps_all(self, monkeypatch) -> None:
+        _patch_call_llm(
+            monkeypatch,
+            _valid_reply(
+                dockerfiles={
+                    "Dockerfile": "FROM hacked:evil\n",
+                    "frontend/Dockerfile": "FROM hacked:evil\n",
+                }
+            ),
+        )
+
+        files, dockerfiles = refine_terraform(
+            CURRENT, "make it cheaper", dockerfiles=self.DOCKERFILES
+        )
+
+        assert dockerfiles == self.DOCKERFILES
+
+    def test_plural_llm_failure_keeps_originals(self, monkeypatch) -> None:
+        _patch_call_llm(monkeypatch, "not json at all")
+
+        files, dockerfiles = refine_terraform(
+            CURRENT, "change python version", dockerfiles=self.DOCKERFILES
+        )
+
+        assert files == CURRENT
+        assert dockerfiles == self.DOCKERFILES
+
+    def test_plural_fail_soft_returns_original_map(self, monkeypatch) -> None:
+        _patch_call_llm(
+            monkeypatch,
+            _valid_reply(main_tf="", variables_tf="", outputs_tf=""),
+        )
+
+        files, dockerfiles = refine_terraform(
+            CURRENT, "change python version", dockerfiles=self.DOCKERFILES
+        )
+
+        assert files == CURRENT
+        assert dockerfiles == self.DOCKERFILES

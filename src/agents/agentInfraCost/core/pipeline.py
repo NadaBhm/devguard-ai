@@ -430,14 +430,25 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         # onto each image by build context; singular string still overrides
         # the primary (first) image for legacy payloads.
         raw_contents = raw.get("dockerfile_contents")
+        # Whether at least one image carries a real Dockerfile CodeSec
+        # captured (vs. the synthesized "FROM ... COPY . /app" stub). The
+        # first-try artifact fix only needs to regenerate the Dockerfile when
+        # it's a stub: regenerating a real one from the repo digest makes the
+        # LLM rewrite a working Dockerfile from scratch, and it has corrupted
+        # valid ones before (splicing a stray "RUN apk add" into an apt-get
+        # block -> build died). Real Dockerfiles still get the port/health
+        # correction pass, just not a full regeneration.
+        has_real_dockerfile = False
         if isinstance(raw_contents, dict) and raw_contents:
             for image in docker_images:
                 match = _content_for_image(image, raw_contents)
                 if match:
                     image.dockerfile = match
+                    has_real_dockerfile = True
         elif raw.get("dockerfile_content"):
             for image in docker_images:
                 image.dockerfile = raw["dockerfile_content"]
+            has_real_dockerfile = bool(raw.get("dockerfile_content"))
         # Extract each image's real listen port from its own Dockerfile's
         # EXPOSE line, instead of always wiring the ECS template's fixed
         # default (8080) into both the container's containerPort and the
@@ -516,9 +527,16 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         elif raw.get("repo_path"):
             # First try (no feedback yet): drive a repo-conformant Dockerfile
             # and correct port/health from the whole-repo digest instead of
-            # shipping the stub and waiting for a regen.
-            feedback = _FIRST_TRY_ARTIFACT_FIX
-            force_dockerfile = True
+            # shipping the stub and waiting for a regen. Only regenerate the
+            # Dockerfile when it's a stub -- a real captured Dockerfile is
+            # trusted as-is (the refiner has corrupted valid ones) and only
+            # gets the port/health correction.
+            if has_real_dockerfile:
+                feedback = _HIDDEN_FIRST_REGEN_FIX
+                force_dockerfile = False
+            else:
+                feedback = _FIRST_TRY_ARTIFACT_FIX
+                force_dockerfile = True
         else:
             feedback = None
 

@@ -233,6 +233,46 @@ def test_first_try_with_repo_path_digests_and_refines_dockerfile(
     assert captured["feedback"] != raw.get("user_feedback")
 
 
+def test_first_try_with_real_dockerfile_does_not_force_regeneration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When CodeSec captured a real Dockerfile, the first-try refiner must NOT
+    regenerate it from the repo digest (force_dockerfile=False) — only apply
+    the port/health correction. Regression for the Jupyter REST API E2E
+    failure: the LLM rewrote a valid Dockerfile and spliced a stray
+    ``RUN apk add`` into an apt-get block, so the image build died."""
+    raw = _load_raw("sample_input.json")
+    raw["repo_path"] = "/tmp/some-cloned-repo"
+    raw["dockerfile_contents"] = {
+        "Dockerfile": "FROM python:3.6-slim\nCMD uvicorn app:app --port ${PORT}\n"
+    }
+
+    captured: dict = {}
+
+    def _fake_ingest(repo_path, job_id, *, commit_sha=None):
+        return "FastAPI app on 8888"
+
+    def _fake_arch_llm(*args, **kwargs):
+        return json.dumps({"compute_type": "ecs", "reasoning": "facts"})
+
+    def _fake_refiner(terraform_files, feedback, *, dockerfile=None, repo_context=None, force_dockerfile=False):
+        captured["feedback"] = feedback
+        captured["force_dockerfile"] = force_dockerfile
+        captured["dockerfile"] = dockerfile
+        return terraform_files, dockerfile
+
+    monkeypatch.setattr("core.pipeline.ingest_repo", _fake_ingest)
+    monkeypatch.setattr("core.llm_architecture_advisor.call_llm", _fake_arch_llm)
+    monkeypatch.setattr("core.pipeline.refine_terraform", _fake_refiner)
+
+    run_pipeline(raw)
+
+    assert captured["force_dockerfile"] is False
+    assert "runnable Dockerfile" not in captured["feedback"]
+    # the real captured content is what gets passed to the refiner, untouched
+    assert "python:3.6-slim" in captured["dockerfile"]
+
+
 def test_first_try_without_repo_path_skips_refiner() -> None:
     """No repo_path, no first-try refinement — the deterministic artifacts
     ship unchanged (fail-soft, backward compatible)."""

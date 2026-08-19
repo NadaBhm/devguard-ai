@@ -375,13 +375,28 @@ def _fix_mixed_apt_apk(dockerfile: str) -> str:
         return dockerfile
     lines = dockerfile.splitlines()
     out: list[str] = []
+    in_apt_get_block = False
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("RUN apt-get") and "apk add --no-cache" in stripped:
-            stripped = re.sub(r"RUN apk add --no-cache\s*", "", stripped)
-            out.append(line[: len(line) - len(line.lstrip())] + stripped)
-        else:
-            out.append(line)
+        if stripped.startswith("RUN apt-get"):
+            in_apt_get_block = stripped.endswith("\\")
+            if "apk add --no-cache" in stripped:
+                stripped = re.sub(r"RUN apk add --no-cache\s*", "", stripped)
+                out.append(line[: len(line) - len(line.lstrip())] + stripped)
+            else:
+                out.append(line)
+            continue
+        if in_apt_get_block:
+            # Continuation lines of an apt-get RUN: the refiner sometimes
+            # splices a whole ``RUN apk add --no-cache \`` line into them
+            # (its two install strategies merged), turning ``RUN``/``apk``/
+            # ``add``/``--no-cache`` into bogus apt packages. The preceding
+            # line already ends in ``\``, so dropping the stray line keeps
+            # the continuation flowing into the real package list.
+            if re.match(r"^RUN\s+apk\s+add\s+--no-cache\s*\\?$", stripped):
+                continue
+            in_apt_get_block = stripped.endswith("\\")
+        out.append(line)
     return "\n".join(out)
 
 

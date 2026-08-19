@@ -144,11 +144,15 @@ def test_ecs_multi_container_renders_one_definition_per_image() -> None:
 
     files = generate_terraform(decision, context)
 
-    assert files.main_tf.count("portMappings = [") == 2
+    assert files.main_tf.count("portMappings = [") == 1
     assert "name  = \"devguard-app\"" in files.main_tf
     assert "name  = \"devguard-app-frontend\"" in files.main_tf
+    # The secondary container shares the task's localhost, so it must NOT map
+    # a host port — one Fargate task has a single ENI, and two containers on
+    # the same port made RegisterTaskDefinition fail with "TCP host port
+    # '3000' is mapped multiple times in task" (verified live on mean-docker).
+    assert "containerPort = 80\n" not in files.main_tf
     assert "containerPort = 8000" in files.main_tf
-    assert "containerPort = 80" in files.main_tf
     # ALB + SG + service block all target the primary container.
     assert "container_name   = \"devguard-app\"" in files.main_tf
     assert "container_port   = 8000" in files.main_tf

@@ -495,10 +495,12 @@ def route_after_gate_2(state: OrchestratorState) -> str:
     if state.get("status") in ("failed", "rejected"):
         return "end"
     gate = state["human_gates"]["gate_2_pre_deployops"]
-    if gate["approved"]:
-        return "deployops_agent"
-    # User requested regeneration at Gate 2: loop back to InfraCost with the
-    # prompt in state.infracost_feedback, until the iteration cap is hit.
+    # Regeneration takes precedence over approval: when the user both approves
+    # and requests changes (the frontend sends approved=true alongside
+    # request_regeneration), the artifacts MUST be regenerated first and the
+    # workflow re-paused at Gate 2 with the fresh result -- never deploy the
+    # stale one. Checking requested_changes first fixes a live bug where
+    # approve+regen went straight to DeployOps with the pre-regen artifacts.
     if gate.get("requested_changes") or state.get("infracost_feedback"):
         if len(state.get("infracost_iterations", [])) < MAX_INFRACOST_ITERATIONS:
             return "infracost_agent"
@@ -506,6 +508,9 @@ def route_after_gate_2(state: OrchestratorState) -> str:
             "[%s] Gate 2 regeneration cap reached (%d); halting.",
             state["job_id"], MAX_INFRACOST_ITERATIONS,
         )
+        return "end"
+    if gate["approved"]:
+        return "deployops_agent"
     return "end"
 
 

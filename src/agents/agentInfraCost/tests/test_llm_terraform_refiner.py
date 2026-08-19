@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-from core.llm_terraform_refiner import refine_terraform
+from core.llm_terraform_refiner import _fix_mixed_apt_apk, refine_terraform
 from models.output_schema import TerraformFiles
 
 CURRENT = TerraformFiles(
@@ -1053,3 +1053,35 @@ class TestRefinerMultiContainer:
 
         assert files == CURRENT
         assert dockerfiles == self.DOCKERFILES
+
+
+def test_fix_mixed_apt_apk_drops_spliced_continuation_line() -> None:
+    """A ``RUN apk add --no-cache \\`` line spliced into an apt-get RUN's
+    backslash continuation (the refiner merging its two install strategies)
+    must be dropped, not left to become bogus apt packages. Regression for
+    the Jupyter REST API E2E failure: build died because ``RUN``/``apk``/
+    ``add``/``--no-cache`` were treated as Debian packages."""
+    corrupted = (
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\\n"
+        "    RUN apk add --no-cache \\\n"
+        "    tzdata \\\n"
+        "    python3-setuptools \\\n"
+        "    git \\\n"
+        "    && apt-get clean && rm -rf /var/lib/apt/lists/*\n"
+    )
+    fixed = _fix_mixed_apt_apk(corrupted)
+    assert "RUN apk add --no-cache" not in fixed
+    assert "python3-setuptools" in fixed
+    assert "git" in fixed
+    assert "&& apt-get clean" in fixed
+
+
+def test_fix_mixed_apt_apk_keeps_normal_continuation_intact() -> None:
+    """A legitimate apt-get RUN with a plain continuation is untouched."""
+    clean = (
+        "RUN apt-get update && apt-get install -y --no-install-recommends \\\n"
+        "    tzdata \\\n"
+        "    git \\\n"
+        "    && apt-get clean\n"
+    )
+    assert _fix_mixed_apt_apk(clean) == clean.rstrip("\n")

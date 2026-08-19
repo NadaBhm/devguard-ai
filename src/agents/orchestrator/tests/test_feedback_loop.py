@@ -44,6 +44,16 @@ class TestRouteAfterGate2:
         state["human_gates"]["gate_2_pre_deployops"]["approved"] = True
         assert route_after_gate_2(state) == "deployops_agent"
 
+    def test_approved_with_requested_changes_loops_back_to_infracost(self, state):
+        """Regeneration wins over approval: the frontend sends approved=True
+        alongside request_regeneration, and the stale artifacts must never be
+        deployed. Regression for a live E2E failure where approve+regen went
+        straight to DeployOps with the pre-regen result."""
+        gate = state["human_gates"]["gate_2_pre_deployops"]
+        gate["approved"] = True
+        gate["requested_changes"] = "wire PORT to the container port"
+        assert route_after_gate_2(state) == "infracost_agent"
+
     def test_plain_reject_routes_to_end(self, state):
         state["human_gates"]["gate_2_pre_deployops"]["approved"] = False
         assert route_after_gate_2(state) == "end"

@@ -140,12 +140,14 @@ resource "aws_ecs_task_definition" "this" {
     {
       name  = "{{ container.name }}"
       image = "{{ container.image }}"
+{% if loop.first %}
       portMappings = [
         {
           containerPort = {{ container.port }}
           protocol      = "tcp"
         }
       ]
+{% endif %}
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -154,18 +156,21 @@ resource "aws_ecs_task_definition" "this" {
           "awslogs-stream-prefix" = "ecs"
         }
       }
-{% if database and loop.first %}
-      # A "{{ database }}" database was detected in this repo. No database is
-      # created by this module (that's a separate decision, with a real
-      # recurring cost) -- these variables just give the primary container a
-      # place to receive real connection details, supplied at apply-time.
+{% if loop.first %}
+      # PORT is the convention virtually every framework honors (Heroku,
+      # uvicorn/gunicorn, Next.js, etc.) -- wire it to the mapped container
+      # port so apps that listen on $PORT actually serve where the target
+      # group probes. Harmless when the app ignores it.
       environment = [
+        { name = "PORT", value = tostring({{ container.port }}) },
+{% if database %}
         { name = "DB_ENGINE", value = "{{ database }}" },
         { name = "DB_HOST", value = var.db_host },
         { name = "DB_PORT", value = tostring(var.db_port) },
         { name = "DB_NAME", value = var.db_name },
         { name = "DB_USER", value = var.db_user },
         { name = "DB_PASSWORD", value = var.db_password },
+{% endif %}
       ]
 {% endif %}
     },

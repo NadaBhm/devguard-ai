@@ -9,7 +9,7 @@ from core.cost_estimator import estimate_cost
 from core.decision_engine import DecisionResult, decide_architecture
 from core.output_builder import build_output, resolve_docker_artifacts
 from core.terraform_generator import TerraformContext, generate_terraform
-from models.input_schema import RepoAnalysisInput
+from models.input_schema import ContainerInfo, RepoAnalysisInput, StackDetection
 from models.output_schema import (
     Ec2InfraCostOutput,
     EcsInfraCostOutput,
@@ -178,12 +178,55 @@ def test_docker_tag_falls_back_to_latest_with_warning(caplog: pytest.LogCaptureF
     decision = decide_architecture(analysis)
 
     with caplog.at_level(logging.WARNING, logger="core.output_builder"):
-        dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+        docker_images = resolve_docker_artifacts(analysis, decision)
 
-    assert docker_image.tag == "latest"
-    assert dockerfile is not None
+    assert docker_images[0].tag == "latest"
+    assert docker_images[0].dockerfile is not None
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert any("commit_sha" in w for w in warnings)
+
+
+def _load_multi_container_analysis() -> RepoAnalysisInput:
+    analysis = _load_analysis("sample_input.json")
+    stack = StackDetection.model_validate({
+        **analysis.stack_detection.model_dump(),
+        "containers": [
+            {"detected": True, "base_image": "python:3.12-slim",
+             "dockerfile_path": "backend/Dockerfile",
+             "dockerfile_content": "FROM python:3.12-slim\nEXPOSE 8000\n",
+             "compose_detected": False},
+            {"detected": True, "base_image": "nginx:1.27",
+             "dockerfile_path": "frontend/Dockerfile",
+             "dockerfile_content": "FROM nginx:1.27\nEXPOSE 80\n",
+             "compose_detected": False},
+        ],
+    })
+    return analysis.model_copy(update={"stack_detection": stack})
+
+
+def test_multi_container_resolves_one_image_per_dockerfile() -> None:
+    analysis = _load_multi_container_analysis()
+    decision = decide_architecture(analysis)
+
+    docker_images = resolve_docker_artifacts(analysis, decision)
+
+    assert [img.name for img in docker_images] == ["devguard-app", "devguard-app-frontend"]
+    assert [img.context for img in docker_images] == ["backend", "frontend"]
+    assert docker_images[0].dockerfile == "FROM python:3.12-slim\nEXPOSE 8000\n"
+    assert docker_images[1].dockerfile == "FROM nginx:1.27\nEXPOSE 80\n"
+    assert docker_images[0].tag == docker_images[1].tag
+
+
+def test_multi_container_build_output_plural_and_singular_alias() -> None:
+    analysis = _load_multi_container_analysis()
+    decision = decide_architecture(analysis)
+
+    output = _build(analysis, decision)
+
+    assert len(output.artifacts.docker_images) == 2
+    # Singular alias mirrors the first entry for legacy consumers.
+    assert output.artifacts.docker_image.name == "devguard-app"
+    assert output.artifacts.dockerfile == "FROM python:3.12-slim\nEXPOSE 8000\n"
 
 
 def test_lambda_without_container_has_no_dockerfile() -> None:
@@ -191,10 +234,9 @@ def test_lambda_without_container_has_no_dockerfile() -> None:
     assert analysis.stack_detection.container.detected is False
     decision = decide_architecture(analysis)
 
-    dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+    docker_images = resolve_docker_artifacts(analysis, decision)
 
-    assert dockerfile is None
-    assert docker_image is None
+    assert docker_images == []
 
 
 def test_output_is_json_serializable_with_correct_alias_keys() -> None:

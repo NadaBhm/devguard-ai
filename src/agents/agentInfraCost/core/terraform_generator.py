@@ -71,6 +71,16 @@ class TerraformContext(BaseModel):
     region: str = "us-east-1"
     environment: str = "dev"
     docker_image: str | None = None
+    docker_images: list[dict[str, Any]] | None = None
+    """Multi-container mode: one entry per container to co-schedule in the
+    task. Each entry is ``{"name", "image", "port", "context"}`` — ``name``
+    is the ECR/container name, ``image`` the fully-qualified ECR URI,
+    ``port`` the container's listen port (EXPOSE), ``context`` the build
+    context. When set, the ECS template renders one ``container_definitions``
+    entry per image and routes the ALB to the first (primary) one; secondary
+    containers are reachable over the task's shared localhost. ``None``
+    (legacy single-container) keeps today's behaviour via ``docker_image``.
+    """
     source_code_path: str | None = None
     health_check_port: int | None = None
     """The real container port, extracted from the repo's own Dockerfile
@@ -96,6 +106,27 @@ def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> 
     # -- confirmed colliding in practice (ELBv2 Target Group / IAM Role /
     # CloudWatch Log Group "already exists" on a second `terraform apply`).
     service_name = unique_resource_name(ECS_SERVICE_NAME, context.job_id)
+    if context.docker_images:
+        containers = [
+            {
+                "name": img["name"],
+                "image": img["image"],
+                "port": img.get("port") or ECS_HEALTH_CHECK_PORT,
+            }
+            for img in context.docker_images
+        ]
+    else:
+        containers = [
+            {
+                "name": service_name,
+                "image": context.docker_image or "devguard-app:latest",
+                "port": context.health_check_port or ECS_HEALTH_CHECK_PORT,
+            }
+        ]
+    # The ALB (target group, listener, SG ingress) always fronts the FIRST
+    # container — the app's public entrypoint. Secondary containers share the
+    # task's network namespace (localhost) and need no external listener.
+    primary = containers[0]
     return {
         "region": context.region,
         "environment": context.environment,
@@ -104,7 +135,9 @@ def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> 
         "task_cpu": decision.sizing["task_cpu"],
         "task_memory": decision.sizing["task_memory"],
         "docker_image": context.docker_image or "devguard-app:latest",
-        "health_check_port": context.health_check_port or ECS_HEALTH_CHECK_PORT,
+        "containers": containers,
+        "primary_container": primary,
+        "health_check_port": primary["port"],
         "health_check_path": ECS_HEALTH_CHECK_PATH,
         "database": context.database,
         "execution_role_name": unique_resource_name(ECS_TASK_EXECUTION_ROLE_NAME, context.job_id),

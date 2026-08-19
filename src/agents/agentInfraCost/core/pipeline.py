@@ -115,6 +115,20 @@ class PipelineContext(BaseModel):
     finops: FinOpsRecommendation
 
 
+def _content_for_image(
+    image: "DockerImage", contents: dict[str, str]
+) -> str | None:
+    """Map a captured dockerfile path -> content dict onto one image.
+
+    Matches by the image's build context (``context/Dockerfile``), then by an
+    exact path entry when the context is the repo root. Returns ``None`` when
+    no entry plausibly belongs to this image.
+    """
+    if not image.context or image.context == ".":
+        return contents.get("Dockerfile")
+    return contents.get(f"{image.context}/Dockerfile")
+
+
 class PipelineStageError(Exception):
     """A pipeline stage other than module 1 failed.
 
@@ -258,12 +272,22 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         raise PipelineStageError("decision_engine", exc) from exc
 
     try:
-        dockerfile, docker_image = resolve_docker_artifacts(analysis, decision)
+        docker_images = resolve_docker_artifacts(analysis, decision)
         # Prefer the real Dockerfile content the CodeSec agent extracted
-        # (agent.payload["dockerfile_content"]), never a synthesized stand-in.
-        if raw.get("dockerfile_content"):
-            dockerfile = raw["dockerfile_content"]
-        # Extract the app's real listen port from its own Dockerfile's
+        # (agent.payload["dockerfile_content"] / ["dockerfile_contents"]),
+        # never a synthesized stand-in. Plural dict (path -> content) maps
+        # onto each image by build context; singular string still overrides
+        # the primary (first) image for legacy payloads.
+        raw_contents = raw.get("dockerfile_contents")
+        if isinstance(raw_contents, dict) and raw_contents:
+            for image in docker_images:
+                match = _content_for_image(image, raw_contents)
+                if match:
+                    image.dockerfile = match
+        elif raw.get("dockerfile_content"):
+            for image in docker_images:
+                image.dockerfile = raw["dockerfile_content"]
+        # Extract each image's real listen port from its own Dockerfile's
         # EXPOSE line, instead of always wiring the ECS template's fixed
         # default (8080) into both the container's containerPort and the
         # ALB target group. Confirmed mismatch in practice: a FastAPI app
@@ -271,24 +295,57 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         # every health check failed with 502 -> full rollback. Fail-soft:
         # None (no EXPOSE line, e.g. the generic synthesized Dockerfile)
         # falls back to ECS_HEALTH_CHECK_PORT in terraform_generator.py.
-        expose_match = re.search(r"^\s*EXPOSE\s+(\d+)", dockerfile, re.MULTILINE) if dockerfile else None
-        detected_port = int(expose_match.group(1)) if expose_match else None
+        primary_image = docker_images[0] if docker_images else None
+        # Extract each container's real listen port from its own Dockerfile's
+        # EXPOSE line (same reasoning as the singular port below). None falls
+        # back to ECS_HEALTH_CHECK_PORT in terraform_generator.py.
+        def _expose_port(image) -> int | None:
+            match = (
+                re.search(r"^\s*EXPOSE\s+(\d+)", image.dockerfile, re.MULTILINE)
+                if image and image.dockerfile
+                else None
+            )
+            return int(match.group(1)) if match else None
+
+        image_ports = {img.name: _expose_port(img) for img in docker_images}
+        primary_port = image_ports.get(primary_image.name) if primary_image else None
         terraform_context = decide_deployment_context(
             analysis,
             job_id=analysis.job_id,
-            docker_image=f"{docker_image.name}:{docker_image.tag}" if docker_image else None,
-            health_check_port=detected_port,
+            docker_image=(
+                f"{primary_image.name}:{primary_image.tag}" if primary_image else None
+            ),
+            health_check_port=primary_port,
         )
         # A bare "name:tag" resolves against Docker Hub by default, not our
-        # ECR repo, so ECS fails with CannotPullContainerError. Qualify it
-        # with the ECR registry host once account_id and region (the latter
-        # decided above by decide_deployment_context) are both known.
+        # ECR repo, so ECS fails with CannotPullContainerError. Qualify every
+        # image with the ECR registry host once account_id and region (the
+        # latter decided above by decide_deployment_context) are both known.
         # account_id may be absent (STS call failed upstream in the
         # orchestrator adapter) — fail-soft and keep the bare name rather
         # than raise, same policy as the rest of this pipeline.
         if terraform_context.docker_image and analysis.account_id:
             ecr_registry = f"{analysis.account_id}.dkr.ecr.{terraform_context.region}.amazonaws.com"
             terraform_context.docker_image = f"{ecr_registry}/{terraform_context.docker_image}"
+            terraform_context.docker_images = [
+                {
+                    "name": img.name,
+                    "image": f"{ecr_registry}/{img.name}:{img.tag}",
+                    "port": image_ports[img.name],
+                    "context": img.context,
+                }
+                for img in docker_images
+            ]
+        elif docker_images:
+            terraform_context.docker_images = [
+                {
+                    "name": img.name,
+                    "image": f"{img.name}:{img.tag}",
+                    "port": image_ports[img.name],
+                    "context": img.context,
+                }
+                for img in docker_images
+            ]
         terraform_files = generate_terraform(decision, terraform_context)
         # LLM artifact pass: let the LLM edit the rendered files (and the
         # effective Dockerfile) so they match the real app. Runs on the FIRST
@@ -315,13 +372,40 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             feedback = None
 
         if feedback:
-            terraform_files, dockerfile = refine_terraform(
-                terraform_files,
-                feedback,
-                dockerfile=dockerfile,
-                repo_context=analysis.repo_context,
-                force_dockerfile=force_dockerfile,
-            )
+            if len(docker_images) > 1:
+                # Multi-container: the refiner edits every Dockerfile (keyed by
+                # build context path) with per-file sanitization.
+                dockerfile_map = {
+                    (img.context.rstrip("/") + "/Dockerfile" if img.context != "." else "Dockerfile"):
+                    img.dockerfile
+                    for img in docker_images
+                }
+                terraform_files, refined_map = refine_terraform(
+                    terraform_files,
+                    feedback,
+                    dockerfiles=dockerfile_map,
+                    repo_context=analysis.repo_context,
+                    force_dockerfile=force_dockerfile,
+                )
+                if refined_map:
+                    for image in docker_images:
+                        key = (
+                            image.context.rstrip("/") + "/Dockerfile"
+                            if image.context != "." else "Dockerfile"
+                        )
+                        if key in refined_map:
+                            image.dockerfile = refined_map[key]
+            else:
+                primary_dockerfile = primary_image.dockerfile if primary_image else None
+                terraform_files, primary_dockerfile = refine_terraform(
+                    terraform_files,
+                    feedback,
+                    dockerfile=primary_dockerfile,
+                    repo_context=analysis.repo_context,
+                    force_dockerfile=force_dockerfile,
+                )
+                if primary_image:
+                    primary_image.dockerfile = primary_dockerfile
     except Exception as exc:
         raise PipelineStageError("terraform_generator", exc) from exc
 
@@ -354,8 +438,7 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             terraform_files,
             cost,
             enrichment,
-            dockerfile,
-            docker_image,
+            docker_images=docker_images,
             region=terraform_context.region,
             environment=terraform_context.environment,
         )

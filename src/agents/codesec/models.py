@@ -55,11 +55,18 @@ class ContainerInfo(BaseModel):
     detected: bool = Field(default=False)
     base_image: str | None = Field(default=None)
     dockerfile_path: str | None = Field(default=None)
+    dockerfile_content: str | None = Field(default=None)
     compose_detected: bool = Field(default=False)
 
 
 class StackDetection(BaseModel):
-    """Technology stack identification result."""
+    """Technology stack identification result.
+
+    ``containers`` is the canonical multi-container list — one entry per
+    detected Dockerfile. ``container`` remains as a legacy singular alias
+    that mirrors the *first* entry (kept in sync by ``_sync_container``),
+    so existing single-container consumers keep working unchanged.
+    """
 
     primary_language: str = Field(..., description="Dominant programming language")
     languages: list[str] = Field(default_factory=list, description="All detected languages")
@@ -67,10 +74,19 @@ class StackDetection(BaseModel):
     database: str | None = Field(default=None)
     build_tool: str | None = Field(default=None)
     container: ContainerInfo = Field(default_factory=ContainerInfo)
+    containers: list[ContainerInfo] = Field(default_factory=list)
     confidence: float = Field(
         ..., ge=0.0, le=1.0, description="Detection confidence score"
     )
     detected_files: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_container(self) -> "StackDetection":
+        if self.containers:
+            self.container = self.containers[0]
+        elif self.container.detected:
+            self.containers = [self.container]
+        return self
 
 
 class SASTFinding(BaseModel):
@@ -302,5 +318,6 @@ class CodeSecResult(BaseModel):
     dependencies: DependenciesResult = Field(default_factory=DependenciesResult)
     dockerfile_findings: list[DockerfileFinding] = Field(default_factory=list)
     dockerfile_content: str | None = Field(default=None)
+    dockerfile_contents: dict[str, str] = Field(default_factory=dict)
     sbom: SBOM = Field(default_factory=lambda: SBOM(serial_number=""))
     security_score: SecurityScore = Field(...)

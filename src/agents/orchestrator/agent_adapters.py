@@ -470,6 +470,20 @@ _DEFAULT_PLATFORM = "linux/amd64"   # Fargate requires amd64 unless Graviton
 _DEFAULT_CONTEXT = "."
 
 
+def _raise_missing_image_dockerfile(name: str | None, job_id: str) -> str:
+    """Loud failure when a plural image entry lacks Dockerfile content.
+
+    Mirrors the singular guard above: an image without a Dockerfile would
+    silently build nothing. A missing ``dockerfile`` on a multi-container
+    entry is always a contract regression — refuse to ship it.
+    """
+    raise ValueError(
+        f"artifacts.docker_images[{name or '?'}] has no dockerfile content — "
+        f"InfraCost produced an image entry without its Dockerfile for job "
+        f"{job_id}. Refusing to send DeployOps an image build with no Dockerfile."
+    )
+
+
 def translate_infracost_to_deploy_payload(
     job_id: str,
     deploy_inputs: dict[str, Any],
@@ -520,8 +534,12 @@ def translate_infracost_to_deploy_payload(
     # . /app\n"), unlike an earlier API that only pointed at a source_code
     # path into CodeSec's already-deleted clone. Keep failing loudly if this
     # ever regresses. S3 static sites ship plain files and carry no image.
+    # Multi-container payloads carry the canonical plural `docker_images`
+    # list (name/dockerfile/context/tag/platform per image); legacy payloads
+    # fall back to the singular `dockerfile` + `docker_image`.
+    plural_images = artifacts.get("docker_images")
     dockerfile_content = artifacts.get("dockerfile")
-    if compute_type != "s3" and not dockerfile_content:
+    if compute_type != "s3" and not plural_images and not dockerfile_content:
         raise ValueError(
             "artifacts.dockerfile is empty - InfraCost produced no Dockerfile "
             "content (e.g. a Lambda deployment, which doesn't use one) or its "
@@ -530,7 +548,19 @@ def translate_infracost_to_deploy_payload(
         )
 
     docker_images: list[dict[str, Any]] = []
-    if compute_type != "s3":
+    if compute_type != "s3" and plural_images:
+        docker_images = [
+            {
+                "name": img.get("name") or f"devguard-{job_id[:8]}",
+                "dockerfile": img.get("dockerfile")
+                or _raise_missing_image_dockerfile(img.get("name"), job_id),
+                "context": img.get("context") or _DEFAULT_CONTEXT,
+                "tag": img.get("tag") or "latest",
+                "platform": img.get("platform") or _DEFAULT_PLATFORM,
+            }
+            for img in plural_images
+        ]
+    elif compute_type != "s3":
         docker_image = artifacts.get("docker_image") or {}
         docker_images = [{
             "name": docker_image.get("name") or f"devguard-{job_id[:8]}",

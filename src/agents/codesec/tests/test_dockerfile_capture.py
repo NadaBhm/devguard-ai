@@ -9,7 +9,7 @@ exact-match ``rglob("Dockerfile")`` missed files like
 
 from pathlib import Path
 
-from codesec.agent import _capture_dockerfile_content
+from codesec.agent import _capture_dockerfile_content, _capture_dockerfile_contents
 from codesec.models import ContainerInfo, StackDetection
 
 
@@ -90,3 +90,42 @@ def test_detected_path_missing_uses_scan(tmp_path: Path):
 
     assert content is not None
     assert "alpine:3.19" in content
+
+
+def _stack_multi() -> StackDetection:
+    return StackDetection(
+        primary_language="python",
+        frameworks=["fastapi"],
+        database="postgresql",
+        build_tool="pip",
+        confidence=0.9,
+        containers=[
+            ContainerInfo(detected=True, base_image="python:3.12-slim", dockerfile_path="backend/Dockerfile"),
+            ContainerInfo(detected=True, base_image="node:20", dockerfile_path="frontend/Dockerfile"),
+        ],
+    )
+
+
+def test_multi_container_capture_returns_all(tmp_path: Path):
+    repo = _make_repo(tmp_path, {
+        "backend/Dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+        "frontend/Dockerfile": "FROM node:20\nCMD [\"npm\", \"start\"]\n",
+    })
+
+    contents = _capture_dockerfile_contents(repo, _stack_multi())
+
+    assert contents == {
+        "backend/Dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+        "frontend/Dockerfile": "FROM node:20\nCMD [\"npm\", \"start\"]\n",
+    }
+
+
+def test_singular_capture_mirrors_primary_of_multi(tmp_path: Path):
+    repo = _make_repo(tmp_path, {
+        "backend/Dockerfile": "FROM python:3.12-slim\nCOPY . /app\n",
+        "frontend/Dockerfile": "FROM node:20\n",
+    })
+
+    content = _capture_dockerfile_content(repo, _stack_multi())
+
+    assert content == "FROM python:3.12-slim\nCOPY . /app\n"

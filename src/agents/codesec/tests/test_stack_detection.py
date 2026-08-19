@@ -85,6 +85,88 @@ class TestDetectStack:
         result = detect_stack(repo)
         assert result.primary_language == "rust"
 
+    def _write_multi_container_repo(
+        self, tmp_path: Path, compose_yml: str
+    ) -> None:
+        """Seed a repo with two service Dockerfiles + a compose file."""
+        (tmp_path / "docker-compose.yml").write_text(compose_yml)
+        for svc, port in (("api", "8000"), ("worker", "8001")):
+            d = tmp_path / svc
+            d.mkdir(exist_ok=True)
+            (d / "Dockerfile").write_text(f"FROM node:20-alpine\nEXPOSE {port}\n")
+            (d / "package.json").write_text('{"name": "' + svc + '"}\n')
+
+    def test_compose_host_ports_pick_primary(self, tmp_path: Path):
+        """The ALB-primary container should be the compose service exposing a
+        host port, not whatever sorts first on disk."""
+        self._write_multi_container_repo(
+            tmp_path,
+            "services:\n"
+            "  worker:\n"
+            "    build: ./worker\n"
+            "    ports:\n      - \"8001:8001\"\n"
+            "  api:\n"
+            "    build: ./api\n"
+            "    ports:\n      - \"8000:8000\"\n",
+        )
+        result = detect_stack(tmp_path)
+        # api binds the conventional web port 8000 -> primary
+        assert result.container.dockerfile_path == "api/Dockerfile"
+        assert [c.dockerfile_path for c in result.containers][0] == "api/Dockerfile"
+
+    def test_compose_entrypoint_name_breaks_port_tie(self, tmp_path: Path):
+        """When several services publish host ports, a gateway/entrypoint name
+        (with a less common port) should still win."""
+        self._write_multi_container_repo(
+            tmp_path,
+            "services:\n"
+            "  checkout:\n"
+            "    build: ./worker\n"
+            "    ports:\n      - \"8001:8001\"\n"
+            "  gateway:\n"
+            "    build: ./api\n"
+            "    ports:\n      - \"9000:9000\"\n",
+        )
+        result = detect_stack(tmp_path)
+        assert result.container.dockerfile_path == "api/Dockerfile"
+
+    def test_compose_absent_keeps_scan_order(self, tmp_path: Path):
+        """Without a compose file (or with no host ports), primary falls back
+        to scan order."""
+        self._write_multi_container_repo(
+            tmp_path,
+            "services:\n"
+            "  api:\n"
+            "    build: ./api\n"
+            "    expose:\n      - \"8000\"\n"
+            "  worker:\n"
+            "    build: ./worker\n",
+        )
+        result = detect_stack(tmp_path)
+        assert result.container.dockerfile_path == "api/Dockerfile"
+
+    def test_compose_build_object_context(self, tmp_path: Path):
+        """Compose ``build: {context, dockerfile}`` form maps to the nested
+        Dockerfile path correctly."""
+        (tmp_path / "docker-compose.yml").write_text(
+            "services:\n"
+            "  web:\n"
+            "    build:\n"
+            "      context: .\n"
+            "      dockerfile: services/web/Dockerfile\n"
+            "    ports:\n      - \"80:80\"\n"
+            "  api:\n"
+            "    build:\n"
+            "      context: .\n"
+            "      dockerfile: services/api/Dockerfile\n"
+        )
+        for svc, port in (("web", "80"), ("api", "8080")):
+            p = tmp_path / "services" / svc
+            p.mkdir(parents=True, exist_ok=True)
+            (p / "Dockerfile").write_text(f"FROM nginx:alpine\nEXPOSE {port}\n")
+        result = detect_stack(tmp_path)
+        assert result.container.dockerfile_path == "services/web/Dockerfile"
+
     def test_detect_java_repo(self, tmp_path: Path):
         """Test detecting Java stack."""
         repo = tmp_path / "java_repo"

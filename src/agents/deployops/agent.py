@@ -1050,12 +1050,20 @@ class DeployOpsAgent:
         if compute == "ecs":
             ecs_aws = aws_config.get("ecs") or {}
             ecs_dep = dep_config.get("ecs") or {}
+            # The orchestrator adapter already flattens aws_config (top-level
+            # ecs_cluster / service_name) while still tagging compute_type;
+            # prefer those flat values so re-normalization doesn't null them
+            # out. Nested (InfraCost-raw) shapes keep working as before.
             flat_aws = {
                 "region": aws_config.get("region", "us-east-1"),
-                "ecs_cluster": ecs_aws.get("cluster"),
-                "service_name": ecs_aws.get("service_name"),
-                "task_cpu": str(ecs_aws.get("task_cpu", "256")),
-                "task_memory": str(ecs_aws.get("task_memory", "512")),
+                "ecs_cluster": aws_config.get("ecs_cluster") or ecs_aws.get("cluster"),
+                "service_name": aws_config.get("service_name") or ecs_aws.get("service_name"),
+                "task_cpu": str(
+                    aws_config.get("task_cpu") or ecs_aws.get("task_cpu", "256")
+                ),
+                "task_memory": str(
+                    aws_config.get("task_memory") or ecs_aws.get("task_memory", "512")
+                ),
             }
             flat_dep = {
                 "strategy": ecs_dep.get("strategy", "rolling"),
@@ -1093,7 +1101,7 @@ class DeployOpsAgent:
                 "region": aws_config.get("region", "us-east-1"),
                 "ecs_cluster": None,
                 "service_name": None,
-                "bucket_name": s3_aws.get("bucket_name"),
+                "bucket_name": aws_config.get("bucket_name") or s3_aws.get("bucket_name"),
             }
             flat_dep = {
                 "strategy": s3_dep.get("strategy", "static"),

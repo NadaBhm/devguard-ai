@@ -70,6 +70,7 @@ class DeployOpsArtifacts(TypedDict):
     terraform: DeployOpsArtifactsTerraform
     dockerfile: str
     docker_image: dict[str, str]
+    docker_images: list[dict[str, str]]
     source_code: Optional[str]
 
 

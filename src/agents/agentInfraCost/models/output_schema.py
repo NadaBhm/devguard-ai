@@ -38,8 +38,19 @@ class TerraformArtifacts(BaseModel):
 
 
 class DockerImage(BaseModel):
+    """A single container image to build and push.
+
+    ``name`` / ``tag`` identify the ECR image; ``dockerfile`` holds the
+    image's Dockerfile content (required for the build), ``context`` the
+    build-context directory relative to the repo root (default ``"."``),
+    and ``platform`` the target build platform (default ``linux/amd64``).
+    """
+
     name: str
     tag: str
+    dockerfile: Optional[str] = None
+    context: str = "."
+    platform: str = "linux/amd64"
 
 
 class Artifacts(BaseModel):
@@ -47,12 +58,34 @@ class Artifacts(BaseModel):
 
     ``dockerfile`` / ``docker_image`` are ``None`` for a Lambda deployed as
     a plain zip (no container detected upstream).
+
+    ``docker_images`` is the canonical multi-container list — one entry per
+    detected Dockerfile. ``dockerfile`` / ``docker_image`` remain as legacy
+    singular aliases that mirror the *first* entry (or ``None``), so existing
+    single-container consumers keep working unchanged.
     """
 
     terraform: TerraformArtifacts
     dockerfile: Optional[str] = None
     docker_image: Optional[DockerImage] = None
+    docker_images: list[DockerImage] = Field(default_factory=list)
     source_code: str
+
+    @model_validator(mode="after")
+    def _sync_docker_aliases(self) -> "Artifacts":
+        if self.docker_images:
+            # Canonical list wins: keep singular aliases pointing at entry 0.
+            first = self.docker_images[0]
+            self.docker_image = first
+            self.dockerfile = first.dockerfile or self.dockerfile
+        elif self.docker_image is not None:
+            # Legacy singular → plural: lift a single-entry list so the new
+            # multi-container path sees the same image.
+            img = self.docker_image
+            if img.dockerfile is None and self.dockerfile is not None:
+                img = img.model_copy(update={"dockerfile": self.dockerfile})
+            self.docker_images = [img]
+        return self
 
 
 class Money(BaseModel):

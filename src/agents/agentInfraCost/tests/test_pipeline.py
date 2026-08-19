@@ -243,6 +243,44 @@ def test_first_try_without_repo_path_skips_refiner() -> None:
     assert "COPY . /app" in output.artifacts.dockerfile
 
 
+def test_multi_container_pipeline_qualifies_each_image_with_ecr() -> None:
+    """Multi-container E2E: plural containers resolve to plural docker_images,
+    each rendered as its own container_definition with an ECR-qualified URI.
+    No repo_path -> refiner skipped, so this exercises the full deterministic
+    path with account_id present (ECR qualification)."""
+    raw = _load_raw("sample_input.json")
+    raw["account_id"] = "111122223333"
+    raw["stack_detection"]["containers"] = [
+        {"detected": True, "base_image": "python:3.12-slim",
+         "dockerfile_path": "backend/Dockerfile",
+         "dockerfile_content": "FROM python:3.12-slim\nEXPOSE 8000\n",
+         "compose_detected": False},
+        {"detected": True, "base_image": "nginx:1.27",
+         "dockerfile_path": "frontend/Dockerfile",
+         "dockerfile_content": "FROM nginx:1.27\nEXPOSE 80\n",
+         "compose_detected": False},
+    ]
+    raw["stack_detection"]["container"] = raw["stack_detection"]["containers"][0]
+
+    output = run_pipeline(raw)
+
+    assert isinstance(output, EcsInfraCostOutput)
+    images = output.artifacts.docker_images
+    assert len(images) == 2
+    assert images[0].name == "devguard-app"
+    assert images[1].name == "devguard-app-frontend"
+    assert images[0].context == "backend"
+    assert images[1].context == "frontend"
+    assert images[0].dockerfile == "FROM python:3.12-slim\nEXPOSE 8000\n"
+    # The primary's EXPOSE port is wired into the rendered Terraform.
+    assert "containerPort = 8000" in output.artifacts.terraform.files.main_tf
+    assert "containerPort = 80" in output.artifacts.terraform.files.main_tf
+    # Singular alias mirrors the primary for legacy consumers.
+    assert output.artifacts.docker_image.name == "devguard-app"
+    assert "COPY . /app" not in output.artifacts.dockerfile
+    assert "EXPOSE 8000" in output.artifacts.dockerfile
+
+
 # --------------------------------------------------------------------------
 # Cost follows the refiner's actual sizing (option 1)
 # --------------------------------------------------------------------------

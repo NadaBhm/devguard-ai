@@ -10,9 +10,9 @@ reason for rejection is explicit and typed rather than a generic Pydantic
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ContainerInfo(BaseModel):
@@ -21,6 +21,7 @@ class ContainerInfo(BaseModel):
     detected: bool
     base_image: Optional[str] = None
     dockerfile_path: Optional[str] = None
+    dockerfile_content: Optional[str] = None
     compose_detected: bool = False
 
 
@@ -31,9 +32,21 @@ class StackDetection(BaseModel):
     frameworks: list[str] = Field(default_factory=list)
     database: Optional[str] = None
     build_tool: Optional[str] = None
-    container: ContainerInfo
+    container: Optional[ContainerInfo] = None
+    containers: list[ContainerInfo] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     detected_files: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_containers(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            containers = values.get("containers")
+            if not containers and values.get("container") is not None:
+                values = {**values, "containers": [values["container"]]}
+            elif containers and values.get("container") is None:
+                values = {**values, "container": containers[0]}
+        return values
 
 
 class RepoMetadata(BaseModel):

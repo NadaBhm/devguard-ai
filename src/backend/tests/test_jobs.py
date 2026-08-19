@@ -287,3 +287,30 @@ def test_per_node_progress_is_streamed(_clean_db, auth_headers, monkeypatch):
     phases = {phase for phase, _ in published}
     assert "codesec_agent" in phases
     assert "human_gate_1" in phases
+
+
+def test_multi_container_dockerfile_edits_route_by_context():
+    from src.backend.api.jobs import ArtifactEditRequest, _apply_artifact_edits
+    from src.backend.artifact_validation import allowed_file_path
+
+    assert allowed_file_path("backend/Dockerfile") is True
+    assert allowed_file_path("frontend/Dockerfile") is True
+    assert allowed_file_path("Dockerfile") is True
+    assert allowed_file_path("../evil/Dockerfile") is False
+    assert allowed_file_path("nested/path/to/Dockerfile") is True
+
+    state = {
+        "infracost_result": {"_deploy_inputs": {"artifacts": {
+            "docker_images": [
+                {"name": "devguard-app", "dockerfile": "OLD1", "context": "."},
+                {"name": "devguard-app-frontend", "dockerfile": "OLD2", "context": "frontend"},
+            ]
+        }}}
+    }
+    _apply_artifact_edits(state, [
+        ArtifactEditRequest(file_path="Dockerfile", content="NEW1"),
+        ArtifactEditRequest(file_path="frontend/Dockerfile", content="NEW2"),
+    ])
+    images = state["infracost_result"]["_deploy_inputs"]["artifacts"]["docker_images"]
+    assert images[0]["dockerfile"] == "NEW1"
+    assert images[1]["dockerfile"] == "NEW2"

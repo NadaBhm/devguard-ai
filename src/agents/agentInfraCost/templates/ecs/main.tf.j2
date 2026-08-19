@@ -136,12 +136,13 @@ resource "aws_ecs_task_definition" "this" {
   execution_role_arn        = aws_iam_role.ecs_task_execution.arn
 
   container_definitions = jsonencode([
+{% for container in containers %}
     {
-      name  = "{{ service_name }}"
-      image = "{{ docker_image }}"
+      name  = "{{ container.name }}"
+      image = "{{ container.image }}"
       portMappings = [
         {
-          containerPort = {{ health_check_port }}
+          containerPort = {{ container.port }}
           protocol      = "tcp"
         }
       ]
@@ -153,11 +154,11 @@ resource "aws_ecs_task_definition" "this" {
           "awslogs-stream-prefix" = "ecs"
         }
       }
-{% if database %}
+{% if database and loop.first %}
       # A "{{ database }}" database was detected in this repo. No database is
       # created by this module (that's a separate decision, with a real
-      # recurring cost) -- these variables just give the container a place
-      # to receive real connection details, supplied at apply-time.
+      # recurring cost) -- these variables just give the primary container a
+      # place to receive real connection details, supplied at apply-time.
       environment = [
         { name = "DB_ENGINE", value = "{{ database }}" },
         { name = "DB_HOST", value = var.db_host },
@@ -167,7 +168,8 @@ resource "aws_ecs_task_definition" "this" {
         { name = "DB_PASSWORD", value = var.db_password },
       ]
 {% endif %}
-    }
+    },
+{% endfor %}
   ])
 }
 
@@ -191,8 +193,8 @@ resource "aws_ecs_service" "this" {
 
   load_balancer {
     target_group_arn = aws_lb_target_group.this.arn
-    container_name   = "{{ service_name }}"
-    container_port   = {{ health_check_port }}
+    container_name   = "{{ primary_container.name }}"
+    container_port   = {{ primary_container.port }}
   }
 
   depends_on = [aws_lb_listener.this]

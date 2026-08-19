@@ -65,15 +65,30 @@ def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
     agent stashes them at ``infracost_result._deploy_inputs.artifacts``, the
     mock/legacy shape at ``deployops_result.artifacts``. Returns
     ``(file_path, artifact_type, content)`` tuples, content None when absent
-    (e.g. a serverless Lambda run)."""
+    (e.g. a serverless Lambda run).
+
+    Multi-container payloads carry the canonical plural ``docker_images``
+    list; each image becomes its own artifact row keyed by its build context
+    (``<context>/Dockerfile`` or ``Dockerfile`` for the repo root). Legacy
+    payloads keep the singular ``dockerfile`` + ``docker_image`` shape.
+    """
     artifacts = {}
     infracost = state.get("infracost_result") or {}
     deploy_inputs = (infracost.get("_deploy_inputs") or {}).get("artifacts") or {}
     deployops = (state.get("deployops_result") or {}).get("artifacts") or {}
     for source in (deploy_inputs, deployops):
-        for key in ("dockerfile", "docker_image"):
+        for key in ("dockerfile", "docker_image", "docker_images"):
             if key in source:
                 artifacts[key] = source[key]
+
+    rows: list[tuple[str, str, str | None]] = []
+    plural = artifacts.get("docker_images")
+    if plural:
+        for image in plural:
+            context = (image.get("context") or ".").rstrip("/")
+            rel = "Dockerfile" if context == "." else f"{context}/Dockerfile"
+            rows.append((rel, "dockerfile", image.get("dockerfile")))
+        return rows
 
     dockerfile = artifacts.get("dockerfile")
     docker_image = artifacts.get("docker_image") or {}

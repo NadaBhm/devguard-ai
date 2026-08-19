@@ -72,6 +72,52 @@ def test_persist_dockerfile_from_real_deploy_inputs(db: Session) -> None:
     assert "sha-a1b2c3d" in by_path["docker-image.json"].content
 
 
+def test_persist_multi_container_docker_images(db: Session) -> None:
+    """Multi-container runs carry the canonical plural docker_images list;
+    each image must be persisted under its build-context path."""
+    state = _make_state(
+        {
+            "files": {
+                "main.tf": "resource \"aws_ecs_cluster\" \"this\" {}",
+                "variables.tf": "variable \"region\" {}",
+                "outputs.tf": "output \"url\" {}",
+            },
+            "variables": {"region": "us-east-1"},
+        }
+    )
+    state["infracost_result"]["_deploy_inputs"] = {
+        "compute_type": "ecs",
+        "artifacts": {
+            "terraform": {
+                "files": {"main.tf": "x"},
+                "variables": {"region": "us-east-1"},
+            },
+            "docker_images": [
+                {
+                    "name": "devguard-app",
+                    "tag": "sha-a1b2c3d",
+                    "dockerfile": "FROM python:3.12-slim\nEXPOSE 8000\n",
+                    "context": ".",
+                },
+                {
+                    "name": "devguard-app-frontend",
+                    "tag": "sha-a1b2c3d",
+                    "dockerfile": "FROM nginx:1.27\nEXPOSE 80\n",
+                    "context": "frontend",
+                },
+            ],
+            "source_code": ".",
+        },
+    }
+    persist_results(db, "test-run-docker-multi", state)
+
+    artifacts = db.query(models.TerraformArtifact).filter_by(run_id="test-run-docker-multi").all()
+    by_path = {a.file_path: a for a in artifacts}
+    assert by_path["Dockerfile"].content == "FROM python:3.12-slim\nEXPOSE 8000\n"
+    assert by_path["frontend/Dockerfile"].content == "FROM nginx:1.27\nEXPOSE 80\n"
+    assert "docker-image.json" not in by_path
+
+
 def test_persist_dockerfile_from_mock_deployops_artifacts(db: Session) -> None:
     """Mock/legacy runs carry Docker artifacts on deployops_result.artifacts;
     those must be persisted too."""

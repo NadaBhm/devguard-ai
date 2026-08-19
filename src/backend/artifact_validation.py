@@ -33,7 +33,14 @@ _ALLOWED_FILE_PATHS = frozenset({
 
 
 def allowed_file_path(file_path: str) -> bool:
-    return file_path in _ALLOWED_FILE_PATHS
+    if file_path in _ALLOWED_FILE_PATHS:
+        return True
+    # Multi-container: Dockerfiles live under their build context
+    # (e.g. "backend/Dockerfile"), not just at the repo root.
+    if file_path.endswith("/Dockerfile"):
+        parent = file_path[:-len("/Dockerfile")]
+        return bool(parent) and not parent.startswith("/") and ".." not in parent.split("/")
+    return False
 
 
 def _balanced_structure(content: str) -> bool:

@@ -408,6 +408,10 @@ def _apply_artifact_edits(state: dict, edits: list[ArtifactEditRequest]) -> None
     generated = infracost.setdefault("generated_terraform", {})
     generated_files = generated["files"] if isinstance(generated.get("files"), dict) else generated
 
+    plural_images = artifacts.get("docker_images")
+    if not isinstance(plural_images, list):
+        plural_images = None
+
     for edit in edits:
         file_path = edit.file_path
         content = edit.content
@@ -417,6 +421,11 @@ def _apply_artifact_edits(state: dict, edits: list[ArtifactEditRequest]) -> None
             generated_files[file_path.replace(".", "_")] = content
         elif file_path == "Dockerfile":
             artifacts["dockerfile"] = content
+            if plural_images is not None:
+                _apply_dockerfile_edit(plural_images, ".", content)
+        elif file_path.endswith("/Dockerfile") and plural_images is not None:
+            context = file_path[:-len("/Dockerfile")]
+            _apply_dockerfile_edit(plural_images, context, content)
         elif file_path == "docker-image.json":
             import json as _json
 
@@ -432,6 +441,28 @@ def _apply_artifact_edits(state: dict, edits: list[ArtifactEditRequest]) -> None
                 dop_tf[edit.file_path] = edit.content
             elif edit.file_path == "Dockerfile":
                 dop_artifacts["dockerfile"] = edit.content
+                dop_images = dop_artifacts.get("docker_images")
+                if isinstance(dop_images, list):
+                    _apply_dockerfile_edit(dop_images, ".", edit.content)
+            elif edit.file_path.endswith("/Dockerfile"):
+                dop_images = dop_artifacts.get("docker_images")
+                if isinstance(dop_images, list):
+                    _apply_dockerfile_edit(
+                        dop_images, edit.file_path[:-len("/Dockerfile")], edit.content
+                    )
+
+
+def _apply_dockerfile_edit(images: list[dict], context: str, content: str) -> None:
+    """Route a Dockerfile edit to the plural image whose build context
+    matches. Root-level Dockerfile edits target the image with context "."."""
+    for image in images:
+        img_context = (image.get("context") or ".").rstrip("/")
+        if img_context == context:
+            image["dockerfile"] = content
+            return
+    # No exact context match: apply to the primary (first) image.
+    if images:
+        images[0]["dockerfile"] = content
 
 
 class RollbackRequest(BaseModel):

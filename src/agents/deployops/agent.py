@@ -79,6 +79,40 @@ class DeployOpsAgent:
         self.logger = logging.getLogger(__name__)
 
     @staticmethod
+    def _check_db_vars_available(tf_dir: Path) -> Optional[str]:
+        """Return an error message when terraform requires DB vars the
+        deployer didn't supply, else None.
+
+        The ECS template declares db_host/db_port/db_name/db_user/db_password
+        as required variables (no default) whenever a database was detected.
+        DeployOps fills them from DEVGUARD_DB_* env vars; if any are missing,
+        `terraform plan` fails on a cryptic "required variable is not set"
+        error after a full image build/push. Detect the requirement from the
+        generated variables.tf and fail fast with a clear message.
+        """
+        variables_tf = tf_dir / "variables.tf"
+        if not variables_tf.exists():
+            return None
+        try:
+            content = variables_tf.read_text()
+        except OSError:
+            return None
+        if 'variable "db_host"' not in content:
+            return None
+        missing = [
+            env for env, _ in _ENV_TF_VARS
+            if env.startswith("DEVGUARD_DB_") and not os.getenv(env)
+        ]
+        if missing:
+            return (
+                "App uses a database that DevGuard does not provision. "
+                "Set the database connection before deploying: "
+                + ", ".join(missing)
+                + ". Deployment cannot run without it."
+            )
+        return None
+
+    @staticmethod
     def _workspace_dir(job_id: str) -> Path:
         """Central workspace path; was hardcoded in three places that could diverge."""
         root = Path(os.getenv("DEPLOYOPS_WORKSPACE_ROOT", "/tmp/deployops"))
@@ -138,6 +172,21 @@ class DeployOpsAgent:
 
         tf_dir = workspace_dir / "terraform"
         tf_runner = TerraformRunner(tf_dir)
+
+        # A detected database is declared in terraform (variables.tf) as
+        # required db_* vars with no defaults, but is NOT provisioned by
+        # DevGuard -- DeployOps fills them from DEVGUARD_DB_* env vars. If the
+        # deployer didn't supply them, `terraform plan/apply` fails on an
+        # obscure "required variable" error after a full image build/push.
+        # Fail fast here with a clear message instead.
+        db_check = self._check_db_vars_available(tf_dir)
+        if db_check is not None:
+            return {
+                "status": "failed",
+                "job_id": job_id,
+                "error": db_check,
+            }
+
         if not tf_runner.init():
             self.logger.error("Terraform init failed")
             return {"status": "failed", "error": "terraform init failed"}
@@ -262,6 +311,13 @@ class DeployOpsAgent:
         if not source.exists():
             return {"ok": False, "error": f"source dir {source} missing"}
 
+        # Static sites ship a build output directory (dist/, public/, _site/,
+        # build/, out/). Syncing the whole workspace uploads source maps, test
+        # files and config that shouldn't be public; prefer the build dir when
+        # it actually contains the site's index document, else fall back to the
+        # repo root so bare "just HTML in a folder" repos still work.
+        source = self._static_source_dir(workspace_dir)
+
         uploaded = 0
         skipped = 0
         try:
@@ -288,6 +344,26 @@ class DeployOpsAgent:
         except Exception as exc:  # noqa: BLE001 - surfaced as failed deploy
             self.logger.error(f"S3 sync failed for job {job_id}: {exc}")
             return {"ok": False, "error": str(exc)}
+
+    @staticmethod
+    def _static_source_dir(workspace_dir: Path) -> Path:
+        """Pick the directory whose contents should be uploaded to the S3 site.
+
+        Tries conventional build output dirs (dist/, public/, _site/, build/,
+        out/, static/) at the workspace root; the first one that exists and
+        actually holds the site's index document wins. Otherwise the whole
+        workspace is used so bare "just HTML in a folder" repos still work.
+        """
+        for candidate in ("dist", "public", "_site", "build", "out", "static"):
+            candidate_dir = workspace_dir / candidate
+            if not candidate_dir.is_dir():
+                continue
+            if any(
+                (candidate_dir / name).is_file()
+                for name in ("index.html", "index.htm")
+            ):
+                return candidate_dir
+        return workspace_dir
 
     @staticmethod
     def _s3_content_type(key: str) -> str:
@@ -703,36 +779,48 @@ class DeployOpsAgent:
             url = f"http://{url}"
 
         url = url.rstrip("/")
-        health_url = f"{url}{health_check_path}"
 
-        self.logger.info(f"Starting health check for {health_url}")
+        # Try configured path plus fallbacks; any 200 passes.
+        candidates: list[str] = []
+        for p in (health_check_path, "/", "/health", "/healthz", "/api/health"):
+            if p and p not in candidates:
+                candidates.append(p)
+
+        self.logger.info(
+            f"Starting health check for {url} candidates={candidates}"
+        )
         last_status = 0
         total_start = time.monotonic()
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             for attempt in range(1, max_retries + 1):
-                attempt_start = time.monotonic()
-                try:
-                    response = await client.get(health_url)
-                    elapsed_ms = int((time.monotonic() - attempt_start) * 1000)
-                    last_status = response.status_code
-                    if response.status_code == 200:
-                        self.logger.info(f"Health check passed on attempt {attempt}")
-                        return {
-                            "passed": True,
-                            "response_time_ms": elapsed_ms,
-                            "status_code": 200,
-                            "checked_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                    self.logger.warning(
-                        f"Health check attempt {attempt}: status {response.status_code}"
-                    )
-                except httpx.TimeoutException:
-                    self.logger.warning(f"Health check attempt {attempt}: timeout")
-                except httpx.ConnectError:
-                    self.logger.warning(f"Health check attempt {attempt}: connection refused")
-                except Exception as e:
-                    self.logger.warning(f"Health check attempt {attempt}: {e}")
+                for path in candidates:
+                    health_url = f"{url}{path}"
+                    attempt_start = time.monotonic()
+                    try:
+                        response = await client.get(health_url)
+                        elapsed_ms = int((time.monotonic() - attempt_start) * 1000)
+                        last_status = response.status_code
+                        if response.status_code == 200:
+                            self.logger.info(
+                                f"Health check passed on attempt {attempt} at {path}"
+                            )
+                            return {
+                                "passed": True,
+                                "response_time_ms": elapsed_ms,
+                                "status_code": 200,
+                                "checked_at": datetime.now(timezone.utc).isoformat(),
+                                "health_check_path": path,
+                            }
+                        self.logger.warning(
+                            f"Health check attempt {attempt} {path}: status {response.status_code}"
+                        )
+                    except httpx.TimeoutException:
+                        self.logger.warning(f"Health check attempt {attempt} {path}: timeout")
+                    except httpx.ConnectError:
+                        self.logger.warning(f"Health check attempt {attempt} {path}: connection refused")
+                    except Exception as e:
+                        self.logger.warning(f"Health check attempt {attempt} {path}: {e}")
 
                 if attempt < max_retries:
                     await asyncio.sleep(retry_delay)
@@ -744,6 +832,7 @@ class DeployOpsAgent:
             "response_time_ms": total_elapsed_ms,
             "status_code": last_status,
             "checked_at": datetime.now(timezone.utc).isoformat(),
+            "health_check_path": health_check_path,
         }
         
             
@@ -1066,12 +1155,17 @@ class DeployOpsAgent:
                 ),
             }
             flat_dep = {
-                "strategy": ecs_dep.get("strategy", "rolling"),
-                "health_check_path": ecs_dep.get("health_check_path", "/health"),
-                "health_check_port": ecs_dep.get("health_check_port", 8080),
-                "timeout_minutes": ecs_dep.get("timeout_minutes", 15),
-                "min_healthy_percent": ecs_dep.get("min_healthy_percent", 50),
-                "max_percent": ecs_dep.get("max_percent", 200),
+                "strategy": ecs_dep.get("strategy") or dep_config.get("strategy", "rolling"),
+                "health_check_path": ecs_dep.get("health_check_path")
+                    or dep_config.get("health_check_path", "/health"),
+                "health_check_port": ecs_dep.get("health_check_port")
+                    or dep_config.get("health_check_port", 8080),
+                "timeout_minutes": ecs_dep.get("timeout_minutes")
+                    or dep_config.get("timeout_minutes", 15),
+                "min_healthy_percent": ecs_dep.get("min_healthy_percent")
+                    or dep_config.get("min_healthy_percent", 50),
+                "max_percent": ecs_dep.get("max_percent")
+                    or dep_config.get("max_percent", 200),
                 "auto_rollback": True,
                 "rollback_on_alarm": True,
             }

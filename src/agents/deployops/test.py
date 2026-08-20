@@ -212,6 +212,44 @@ def test_normalize_payload_ec2_nested_config_still_works(agent, sample_payload):
     assert result["deployment_config"]["health_check_port"] == 9000
 
 
+def test_normalize_payload_ecs_preserves_flat_health_check(agent, sample_payload):
+    """Regression (live E2E): translate_infracost_to_deploy_payload emits a
+    FLAT deployment_config (health_check_path="/", health_check_port=3000) for
+    ECS too. _normalize_payload's ECS branch must not clobber it with the
+    nested-ecs default of 8080 + "/health" (jupyter's healthy app on "/" was
+    probed at "/health", timed out, and rolled back a live deployment)."""
+    payload = sample_payload.copy()
+    payload["compute_type"] = "ecs"
+    payload["deployment_config"] = {
+        "strategy": "rolling",
+        "health_check_path": "/",
+        "health_check_port": 3000,
+        "timeout_minutes": 5,
+        "auto_rollback": True,
+    }
+    result = agent.sanitize_and_validate(payload)
+    assert result["deployment_config"]["health_check_path"] == "/"
+    assert result["deployment_config"]["health_check_port"] == 3000
+
+
+def test_normalize_payload_ecs_nested_config_still_works(agent, sample_payload):
+    """Nested deployment_config.ecs shape (the older raw InfraCost contract)
+    must still override the flat defaults."""
+    payload = sample_payload.copy()
+    payload["compute_type"] = "ecs"
+    payload["deployment_config"] = {
+        "ecs": {
+            "strategy": "rolling",
+            "health_check_path": "/healthz",
+            "health_check_port": 9000,
+            "timeout_minutes": 7,
+        }
+    }
+    result = agent.sanitize_and_validate(payload)
+    assert result["deployment_config"]["health_check_path"] == "/healthz"
+    assert result["deployment_config"]["health_check_port"] == 9000
+
+
 @pytest.mark.asyncio
 async def test_write_artifacts(agent, sample_payload, workspace):
     from src.agents.deployops.models import Artifacts
@@ -786,3 +824,197 @@ def test_prepare_docker_config_creates_config_and_links_plugins(tmp_path):
     DeployOpsAgent()._prepare_docker_config(str(cfg_dir))
     assert config_json.exists()
     assert (cfg_dir / "cli-plugins").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_health_check_falls_back_to_root_when_configured_path_404s():
+    """Regression (live E2E): the app serves "/" but DeployOps probed the
+    configured path first and rolled back a healthy deploy. The multi-path
+    probe must pass on the first candidate that returns 200."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    ok_paths = {"/"}
+    recorded = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            recorded.append(self.path)
+            self.send_response(200 if self.path in ok_paths else 404)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), H)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        agent = DeployOpsAgent()
+        result = await agent.health_check(
+            f"http://127.0.0.1:{server.server_port}",
+            max_retries=2,
+            timeout=10,
+            health_check_path="/health",
+            retry_delay=0,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert result["passed"] is True
+    assert result["status_code"] == 200
+    assert result["health_check_path"] == "/"
+    assert "/health" in recorded, "configured path must be tried first"
+    assert "/" in recorded, "fallback candidate must be reached"
+
+
+@pytest.mark.asyncio
+async def test_health_check_passes_on_standard_health_route():
+    """An app that only exposes /healthz (not /) must still pass."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    ok_paths = {"/healthz"}
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path in ok_paths else 404)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), H)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        agent = DeployOpsAgent()
+        result = await agent.health_check(
+            f"http://127.0.0.1:{server.server_port}",
+            max_retries=2,
+            timeout=10,
+            health_check_path="/",
+            retry_delay=0,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert result["passed"] is True
+    assert result["status_code"] == 200
+    assert result["health_check_path"] == "/healthz"
+
+
+@pytest.mark.asyncio
+async def test_health_check_fails_when_all_candidates_404():
+    """No candidate responds 200 -> every path exhausts retries -> fail."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), H)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        agent = DeployOpsAgent()
+        result = await agent.health_check(
+            f"http://127.0.0.1:{server.server_port}",
+            max_retries=2,
+            timeout=10,
+            health_check_path="/health",
+            retry_delay=0,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert result["passed"] is False
+    assert result["status_code"] == 404
+
+
+def test_db_check_returns_clear_error_when_db_required_but_env_missing(
+    tmp_path, monkeypatch
+):
+    """ECS template declares required db_* vars (no defaults) whenever a
+    database is detected. If the deployer never set DEVGUARD_DB_*, terraform
+    plan fails on a cryptic "required variable" error after a full build/push.
+    _check_db_vars_available must fail fast with a clear message."""
+    for env in ("DEVGUARD_DB_HOST", "DEVGUARD_DB_PORT", "DEVGUARD_DB_NAME",
+                "DEVGUARD_DB_USER", "DEVGUARD_DB_PASSWORD"):
+        monkeypatch.delenv(env, raising=False)
+
+    tf_dir = tmp_path / "terraform"
+    tf_dir.mkdir(parents=True, exist_ok=True)
+    (tf_dir / "variables.tf").write_text(
+        'variable "db_host" {\n  description = "Hostname of an existing database"\n  type = string\n}\n'
+    )
+
+    err = DeployOpsAgent._check_db_vars_available(tf_dir)
+    assert err is not None
+    assert "database" in err
+    assert "DEVGUARD_DB_" in err
+    assert "cannot run without it" in err
+
+
+def test_db_check_none_when_all_env_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVGUARD_DB_HOST", "db.example.com")
+    monkeypatch.setenv("DEVGUARD_DB_PORT", "5432")
+    monkeypatch.setenv("DEVGUARD_DB_NAME", "appdb")
+    monkeypatch.setenv("DEVGUARD_DB_USER", "appuser")
+    monkeypatch.setenv("DEVGUARD_DB_PASSWORD", "secret")
+
+    tf_dir = tmp_path / "terraform"
+    tf_dir.mkdir(parents=True, exist_ok=True)
+    (tf_dir / "variables.tf").write_text(
+        'variable "db_host" {\n  type = string\n}\n'
+    )
+
+    assert DeployOpsAgent._check_db_vars_available(tf_dir) is None
+
+
+def test_db_check_none_when_no_db_in_template(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEVGUARD_DB_HOST", raising=False)
+    tf_dir = tmp_path / "terraform"
+    tf_dir.mkdir(parents=True, exist_ok=True)
+    (tf_dir / "variables.tf").write_text(
+        'variable "vpc_id" {\n  type = string\n}\n'
+    )
+    assert DeployOpsAgent._check_db_vars_available(tf_dir) is None
+
+
+def test_db_check_none_when_variables_tf_missing(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEVGUARD_DB_HOST", raising=False)
+    tf_dir = tmp_path / "terraform"
+    tf_dir.mkdir(parents=True, exist_ok=True)
+    assert DeployOpsAgent._check_db_vars_available(tf_dir) is None
+
+
+def test_static_source_dir_prefers_build_output(tmp_path):
+    """A repo with dist/public/_site holding index.html must sync the build
+    output, not the whole workspace (which contains source, tests, config)."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "App.jsx").write_text("export const App = () => <div/>")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "index.html").write_text("<html></html>")
+    (tmp_path / "dist" / "main.js").write_text("console.log('hi')")
+    assert DeployOpsAgent._static_source_dir(tmp_path) == tmp_path / "dist"
+
+
+def test_static_source_dir_skips_empty_build_dir(tmp_path):
+    """A build dir that exists but holds no index document is not the site."""
+    (tmp_path / "dist").mkdir()
+    assert DeployOpsAgent._static_source_dir(tmp_path) == tmp_path
+
+
+def test_static_source_dir_falls_back_to_workspace(tmp_path):
+    """Bare 'just HTML in a folder' repos have no build dir -> whole workspace."""
+    (tmp_path / "index.html").write_text("<html></html>")
+    assert DeployOpsAgent._static_source_dir(tmp_path) == tmp_path

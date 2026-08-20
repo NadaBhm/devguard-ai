@@ -1,0 +1,26 @@
+[
+  {
+    "repo_url": "https://github.com/Nitjsefnie/nitjsefni.eu",
+    "branch": "main",
+    "commit_sha": "d5ea83fa968b5ddba5567e04f19549f18cb7ac36",
+    "label": "nitjsefni.eu-static"
+  },
+  {
+    "repo_url": "https://github.com/hoangsonww/DevVerse-SWE-Blog",
+    "branch": "master",
+    "commit_sha": "7474f6276046229c3ef90f2746f9840364c06f27",
+    "label": "devverse-nextjs"
+  },
+  {
+    "repo_url": "https://github.com/moissonti/fastapi-hello-world",
+    "branch": "main",
+    "commit_sha": "0e0210404816aa1f9978aeb46b13462ae39e78b7",
+    "label": "fastapi-hello"
+  },
+  {
+    "repo_url": "https://github.com/Sagargupta16/FARM-APP-TEMPLATE",
+    "branch": "main",
+    "commit_sha": "e833907091755f9b83630d623b7a93f2d13efffb",
+    "label": "farm-mongodb"
+  }
+]

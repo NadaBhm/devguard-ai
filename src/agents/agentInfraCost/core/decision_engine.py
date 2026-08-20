@@ -81,7 +81,7 @@ class DecisionResult(BaseModel):
 
 def _is_static_site(analysis: RepoAnalysisInput) -> bool:
     stack = analysis.stack_detection
-    if stack.container.detected or stack.database is not None:
+    if (stack.container is not None and stack.container.detected) or stack.database is not None:
         return False
     if stack.frameworks:
         return False
@@ -100,7 +100,11 @@ def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
     container = analysis.stack_detection.container
     scores = {"ecs": 0.0, "lambda": 0.0, "ec2": 0.0, "s3": 0.0}
 
-    if container.detected:
+    # Container is Optional in the schema (a bare static site has none); treat
+    # absent as "not detected" rather than crashing the scoring.
+    container_detected = container is not None and container.detected
+
+    if container_detected:
         scores["ecs"] += 3.0
         scores["lambda"] -= 3.0
         scores["ec2"] += 1.0
@@ -111,7 +115,7 @@ def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
         else:
             scores["ec2"] += 5.0
 
-    if container.compose_detected:
+    if container is not None and container.compose_detected:
         scores["ecs"] += 2.0
 
     if analysis.stack_detection.database is not None:
@@ -169,6 +173,58 @@ def _size_ecs(analysis: RepoAnalysisInput) -> dict[str, int | str]:
     return {"task_cpu": cpu, "task_memory": memory}
 
 
+# JS frontend frameworks that compile/bundle at runtime (Next.js, React/Vite,
+# Vue, Angular, Nuxt). Their production server keeps a watch/compiler resident,
+# so a 512MB Fargate task OOMs (devverse: verified live, `npm run dev` crashed
+# after compiling). Bump the task to the next valid CPU/memory tier so these
+# actually go healthy.
+_HEAVY_FRONTEND_FRAMEWORKS: Final[frozenset[str]] = frozenset({
+    "next", "nextjs", "react", "vue", "nuxt", "angular", "svelte", "astro",
+})
+_HEAVY_FRONTEND_TOOLS: Final[frozenset[str]] = frozenset({"npm", "yarn", "pnpm", "bun"})
+
+# Valid Fargate CPU/memory pairings, ordered smallest -> largest. Bumping
+# memory without also raising CPU yields an invalid combination that
+# terraform apply rejects ("memory is too large for the CPU"), so move up the
+# whole pair.
+_FARGATE_TIERS: Final[tuple[tuple[str, str], ...]] = (
+    ("256", "512"),
+    ("512", "1024"),
+    ("1024", "2048"),
+    ("2048", "4096"),
+    ("4096", "8192"),
+)
+
+
+def _is_heavy_frontend(analysis: RepoAnalysisInput) -> bool:
+    stack = analysis.stack_detection
+    container = stack.container
+    if (container is not None and container.detected) or stack.database is not None:
+        return False
+    has_framework = any(
+        fw.lower() in _HEAVY_FRONTEND_FRAMEWORKS for fw in stack.frameworks
+    )
+    has_tool = stack.build_tool and stack.build_tool.lower() in _HEAVY_FRONTEND_TOOLS
+    return has_framework and has_tool
+
+
+def _size_ecs_memory_bumped(analysis: RepoAnalysisInput) -> dict[str, int | str]:
+    """Size an ECS task, raising memory for heavy JS frontends.
+
+    A bare static site is already S3 (never ECS), so the only JS frontends that
+    land here have a server runtime (Next.js SSR, Nuxt SSR, an Express+Vite
+    hybrid...) — exactly the ones whose build/dev server OOMs at 512MB.
+    """
+    sizing = _size_ecs(analysis)
+    if not _is_heavy_frontend(analysis):
+        return sizing
+    cpu, memory = str(sizing["task_cpu"]), str(sizing["task_memory"])
+    for i, (c, m) in enumerate(_FARGATE_TIERS):
+        if c == cpu and m == memory and i + 1 < len(_FARGATE_TIERS):
+            return {"task_cpu": _FARGATE_TIERS[i + 1][0], "task_memory": _FARGATE_TIERS[i + 1][1]}
+    return sizing
+
+
 def _size_lambda(analysis: RepoAnalysisInput) -> dict[str, int | str]:
     loc = analysis.repo_metadata.loc
     for threshold, memory_mb in _LAMBDA_SIZE_TIERS:
@@ -190,7 +246,7 @@ def _size_s3(analysis: RepoAnalysisInput) -> dict[str, int | str]:
 
 
 _SIZERS = {
-    "ecs": _size_ecs,
+    "ecs": _size_ecs_memory_bumped,
     "lambda": _size_lambda,
     "ec2": _size_ec2,
     "s3": _size_s3,

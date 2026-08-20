@@ -719,6 +719,62 @@ def _strip_apt_nodejs_block(lines: list[str]) -> list[str]:
     return out
 
 
+def _fix_dev_mode_cmd(dockerfile: str) -> str:
+    """Rewrite dev-mode CMDs to production equivalents (fail-soft).
+
+    Maps npm run dev -> npm start, uvicorn --reload -> uvicorn, flask run ->
+    gunicorn, ng serve -> ng serve --configuration production. Only CMD/ENTRYPOINT.
+    """
+    if not dockerfile:
+        return dockerfile
+    lines = dockerfile.splitlines()
+    out: list[str] = []
+    changed = False
+    for line in lines:
+        stripped = line.strip()
+        if not (stripped.startswith("CMD") or stripped.startswith("ENTRYPOINT")):
+            out.append(line)
+            continue
+        # Normalize JSON-array form tokens so the dev-mode patterns match both
+        # `CMD ["npm", "run", "dev"]` and `CMD npm run dev`. A match on the
+        # normalized argument rebuilds the line in shell form; a non-match
+        # keeps the original line byte-for-byte.
+        prefix = "CMD" if stripped.startswith("CMD") else "ENTRYPOINT"
+        arg_text = stripped[len(prefix):]
+        normalized = arg_text
+        if re.search(r'^\s*\[', normalized) and "]" in normalized:
+            normalized = re.sub(r"[\"']", "", normalized)
+            normalized = normalized.replace(",", " ").replace("[", " ").replace("]", " ")
+        normalized = " ".join(normalized.split())
+        if re.search(r"\bnpm\s+(run\s+)?dev\b", normalized):
+            replacement = "npm run start" if re.search(r"npm run start|npm start", stripped) else "npm start"
+            normalized = re.sub(r"\bnpm\s+(run\s+)?dev\b", replacement, normalized)
+            line = f"{prefix} {normalized}"
+            changed = True
+        elif re.search(r"\buvicorn\b.*\b--reload\b", normalized) or re.search(r"\buvicorn\b.*--reload", normalized):
+            # Strip --reload and --reload-dir <path> in both shell form
+            # ("uvicorn ... --reload") and JSON-array form ("--reload"]).
+            normalized = re.sub(r"--reload-dir\s+\S+", "", normalized)
+            normalized = re.sub(r"--reload", "", normalized)
+            line = f"{prefix} {normalized}"
+            changed = True
+        elif re.search(r"\bflask\s+run\b", normalized):
+            normalized = re.sub(r"\bflask\s+run\b", "gunicorn app:app", normalized)
+            line = f"{prefix} {normalized}"
+            changed = True
+        elif re.search(r"\bng\s+serve\b", normalized):
+            normalized = re.sub(r"\bng\s+serve\b", "ng serve --configuration production", normalized)
+            line = f"{prefix} {normalized}"
+            changed = True
+        out.append(line)
+    # Fail-soft and diff-minimal: no dev-mode CMD -> return the Dockerfile
+    # byte-for-byte (other fixers here behave the same way, and the pipeline
+    # applies this to every image's Dockerfile on every render).
+    if not changed:
+        return dockerfile
+    return "\n".join(out)
+
+
 def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None) -> str:
     """Rewrite dependency installs that reference files absent from the repo context.
 
@@ -732,6 +788,7 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
     if not dockerfile or not repo_context:
         return dockerfile
 
+    dockerfile = _fix_dev_mode_cmd(dockerfile)
     dockerfile = _heredocify_multiline_echo(dockerfile)
     dockerfile = _fix_detached_install_run(dockerfile)
     dockerfile = _fix_mixed_apt_apk(dockerfile)

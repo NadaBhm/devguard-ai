@@ -62,10 +62,13 @@ class _LlmArchitectureChoice(BaseModel):
 
 def _build_prompt(analysis: RepoAnalysisInput) -> str:
     stack = analysis.stack_detection
+    container = stack.container
+    container_detected = container is not None and container.detected
+    compose_detected = container is not None and container.compose_detected
     prompt = (
         "Signaux du dépôt :\n"
-        f"- conteneur détecté : {stack.container.detected}\n"
-        f"- docker-compose détecté : {stack.container.compose_detected}\n"
+        f"- conteneur détecté : {container_detected}\n"
+        f"- docker-compose détecté : {compose_detected}\n"
         f"- base de données détectée : {stack.database is not None}\n"
         f"- au moins un framework détecté : {len(stack.frameworks) > 0}\n"
         f"- taille du projet (lignes de code) : {analysis.repo_metadata.loc}\n\n"

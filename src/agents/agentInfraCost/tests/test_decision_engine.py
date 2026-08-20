@@ -9,6 +9,8 @@ from pydantic import ValidationError
 from core.decision_engine import (
     DecisionResult,
     _choose_compute_type,
+    _is_heavy_frontend,
+    _size_ecs_memory_bumped,
     decide_architecture,
 )
 from models.input_schema import RepoAnalysisInput
@@ -188,3 +190,42 @@ def test_decide_architecture_is_deterministic() -> None:
     first = decide_architecture(analysis)
     second = decide_architecture(analysis)
     assert first == second
+
+
+def _frontend_analysis() -> RepoAnalysisInput:
+    raw = _load_raw("sample_input_variant_lambda_candidate.json")
+    raw["stack_detection"]["frameworks"] = ["next"]
+    raw["stack_detection"]["build_tool"] = "npm"
+    raw["stack_detection"]["database"] = None
+    raw["stack_detection"]["container"] = None
+    raw["stack_detection"]["containers"] = []
+    return RepoAnalysisInput.model_validate(raw)
+
+
+def test_heavy_frontend_detection() -> None:
+    assert _is_heavy_frontend(_frontend_analysis())
+    raw = _load_raw("sample_input_variant_lambda_candidate.json")
+    raw["stack_detection"]["frameworks"] = []
+    assert _is_heavy_frontend(RepoAnalysisInput.model_validate(raw)) is False
+
+
+def test_heavy_frontend_ecs_memory_bumped() -> None:
+    """Regression (live devverse): a Next.js task sized at the 256/512 tier
+    OOMs when the dev/compiler process starts. The heavy-frontend rule must
+    move the whole Fargate pair up a valid tier, not just memory (memory
+    without matching CPU is an invalid combo terraform apply rejects)."""
+    analysis = _frontend_analysis()
+    sizing = _size_ecs_memory_bumped(analysis)
+    assert sizing["task_memory"] == "1024"
+    assert sizing["task_cpu"] == "512"
+
+
+def test_non_frontend_ecs_sizing_unchanged() -> None:
+    raw = _load_raw("sample_input_variant_lambda_candidate.json")
+    raw["stack_detection"]["frameworks"] = []
+    raw["stack_detection"]["build_tool"] = "pip"
+    raw["stack_detection"]["database"] = None
+    raw["stack_detection"]["container"] = None
+    raw["stack_detection"]["containers"] = []
+    analysis = RepoAnalysisInput.model_validate(raw)
+    assert _size_ecs_memory_bumped(analysis)["task_memory"] == "512"

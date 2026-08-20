@@ -174,7 +174,10 @@ def resolve_docker_artifacts(
     """
     is_lambda_zip = (
         decision.compute_type == "lambda"
-        and not analysis.stack_detection.container.detected
+        and not (
+            analysis.stack_detection.container is not None
+            and analysis.stack_detection.container.detected
+        )
     )
     # S3 static sites ship plain files — no container to build.
     if is_lambda_zip or decision.compute_type == "s3":
@@ -215,10 +218,17 @@ def _build_artifacts(
     source_code: str = ".",
     region: str = "us-east-1",
     environment: str = "dev",
+    compute_type: str = "ecs",
 ) -> Artifacts:
+    variables: dict[str, str] = {"region": region, "environment": environment}
+    if compute_type == "s3":
+        # The S3 variables.tf declares bucket_name (no default) — the value
+        # must ride along in tfvars or terraform plan fails with "No value
+        # for required variable".
+        variables["bucket_name"] = f"{S3_BUCKET_PREFIX}-{analysis.job_id[:32].lower()}"
     terraform = TerraformArtifacts(
         files=terraform_files,
-        variables={"region": region, "environment": environment},
+        variables=variables,
     )
     return Artifacts(
         terraform=terraform,
@@ -440,7 +450,8 @@ def build_output(
             )
         ]
     artifacts = _build_artifacts(
-        analysis, terraform_files, docker_images, source_code, region, environment
+        analysis, terraform_files, docker_images, source_code, region, environment,
+        compute_type=decision.compute_type,
     )
     builder = _BUILDERS[decision.compute_type]
     return builder(analysis, decision, artifacts, cost, enrichment, approval_status, region)

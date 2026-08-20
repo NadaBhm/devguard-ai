@@ -8,6 +8,7 @@ from core.decision_engine import DecisionResult
 from core.input_validator import LowConfidenceError
 from core.pipeline import (
     PipelineStageError,
+    _ensure_production_build,
     _recompute_decision_from_refined,
     _required_env_vars,
     _sizing_from_refined_terraform,
@@ -71,6 +72,46 @@ def test_run_pipeline_with_context_exposes_decision_and_finops() -> None:
 def test_run_pipeline_ecs_has_real_terraform() -> None:
     output = run_pipeline(_load_raw("sample_input.json"))
     assert "aws_ecs_cluster" in output.artifacts.terraform.files.main_tf
+
+
+def test_database_warning_surfaces_at_gate2() -> None:
+    """A detected database (declared but not provisioned) must surface as a
+    warning so Gate 2 shows the deployer the app needs a DB before apply."""
+    context = run_pipeline_with_context(_load_raw("sample_input.json"))
+    assert any(
+        "database" in w and "DEVGUARD_DB_" in w for w in context.warnings
+    ), f"expected DB warning, got {context.warnings}"
+
+
+def test_no_database_no_db_warning() -> None:
+    raw = _load_raw("sample_input.json")
+    raw["stack_detection"]["database"] = None
+    context = run_pipeline_with_context(raw)
+    assert not any("DEVGUARD_DB_" in w for w in context.warnings)
+
+
+def test_static_site_pipeline_routes_to_s3_end_to_end() -> None:
+    """Regression (live nitjsefni.eu smoke): a bare HTML/CSS static site now
+    detects primary_language='html' and routes to S3 — but the pipeline crashed
+    at finops_optimizer (KeyError 's3'). The whole pipeline must complete for
+    S3: decision=s3, real S3 terraform, cost > 0, and a no-op FinOps stage."""
+    raw = _load_raw("sample_input.json")
+    raw["stack_detection"]["primary_language"] = "html"
+    raw["stack_detection"]["frameworks"] = []
+    raw["stack_detection"]["database"] = None
+    raw["stack_detection"]["container"] = None
+    raw["stack_detection"]["containers"] = []
+
+    context = run_pipeline_with_context(raw)
+
+    assert context.decision.compute_type == "s3"
+    assert "aws_s3_bucket" in context.output.artifacts.terraform.files.main_tf
+    assert context.finops.recommended.name == "no_compute_to_optimize"
+    assert context.output.aws_config.estimated_monthly_cost.amount > 0
+    # bucket_name is declared in variables.tf (no default) — it MUST ride in
+    # the tfvars or terraform plan fails with "No value for required variable".
+    tf_vars = context.output.artifacts.terraform.variables
+    assert tf_vars["bucket_name"] == context.output.aws_config.s3.bucket_name
 
 
 # --------------------------------------------------------------------------
@@ -425,6 +466,68 @@ def test_multi_container_pipeline_qualifies_each_image_with_ecr() -> None:
     assert output.artifacts.docker_image.name == "devguard-app"
     assert "COPY . /app" not in output.artifacts.dockerfile
     assert "EXPOSE 8000" in output.artifacts.dockerfile
+
+
+class TestEnsureProductionBuild:
+    """Deterministic companion to the dev-mode CMD fix: a Next.js/Nuxt-style
+    `npm start` requires the compiled output, so the Dockerfile needs a
+    `RUN npm run build` step or the container exits at boot (live devverse:
+    exit 1 -> ALB 503 -> rollback)."""
+
+    def test_injects_build_for_next_start(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"build": "next build", "start": "next start"}})
+        )
+        dockerfile = (
+            "FROM node:18-alpine\n"
+            "WORKDIR /app\n"
+            "COPY package*.json ./\n"
+            "RUN npm ci\n"
+            "COPY . .\n"
+            "CMD npm start\n"
+        )
+        fixed = _ensure_production_build(dockerfile, str(tmp_path))
+        assert "RUN npm run build" in fixed
+        assert fixed.index("RUN npm run build") < fixed.index("CMD")
+
+    def test_injects_build_for_next_start_json_array(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"build": "next build", "start": "next start"}})
+        )
+        dockerfile = 'FROM node:18-alpine\nCOPY . .\nCMD ["npm", "run", "start"]\n'
+        fixed = _ensure_production_build(dockerfile, str(tmp_path))
+        assert "RUN npm run build" in fixed
+        assert 'CMD ["npm", "run", "start"]' in fixed
+
+    def test_leaves_dockerfile_when_no_build_script(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"start": "node server.js"}})
+        )
+        dockerfile = "FROM node:18-alpine\nCOPY . .\nCMD npm start\n"
+        assert _ensure_production_build(dockerfile, str(tmp_path)) == dockerfile
+
+    def test_leaves_dockerfile_when_no_package_json(self, tmp_path: Path) -> None:
+        dockerfile = "FROM node:18-alpine\nCOPY . .\nCMD npm start\n"
+        assert _ensure_production_build(dockerfile, str(tmp_path)) == dockerfile
+
+    def test_does_not_duplicate_existing_build(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"build": "next build", "start": "next start"}})
+        )
+        dockerfile = (
+            "FROM node:18-alpine\n"
+            "COPY . .\n"
+            "RUN npm run build\n"
+            "CMD npm start\n"
+        )
+        assert _ensure_production_build(dockerfile, str(tmp_path)) == dockerfile
+
+    def test_leaves_non_node_server_untouched(self, tmp_path: Path) -> None:
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"build": "echo hi", "start": "node server.js"}})
+        )
+        dockerfile = "FROM node:18-alpine\nCOPY . .\nCMD node server.js\n"
+        assert _ensure_production_build(dockerfile, str(tmp_path)) == dockerfile
 
 
 # --------------------------------------------------------------------------

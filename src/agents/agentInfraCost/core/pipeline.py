@@ -28,6 +28,7 @@ bare, ambiguous traceback.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -40,7 +41,7 @@ from core.input_validator import validate_input
 from core.llm_architecture_advisor import decide_architecture_via_llm
 from core.llm_deployment_advisor import decide_deployment_context
 from core.llm_enrichment import build_enrichment
-from core.llm_terraform_refiner import refine_terraform
+from core.llm_terraform_refiner import _fix_dev_mode_cmd, refine_terraform
 from core.output_builder import build_output, resolve_docker_artifacts
 from core.repo_ingestor import ingest_repo
 from core.terraform_generator import generate_terraform
@@ -49,16 +50,9 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-# On the FIRST Gate-2 regeneration only, the refiner also gets this hidden
-# instruction (appended to the user's own feedback): correct the container
-# port and health-check path to match the real server config in the repo
-# context. The base template hardcodes 8080 + "/health" (constants.py), which
-# is wrong for most apps (e.g. a Next.js server on 3000 with /api/health) and
-# silently fails the ECS health check -> rollback. The first regen is the one
-# place where a deterministic "make the artifacts match the repo" pass is
-# warranted; later regens are owned by the user's own prompts and must not be
-# overridden. Keep it invisible to the user-visible feedback (Gate-2 logs show
-# only what the user typed).
+# Hidden instruction for first Gate-2 regen and first try: fix port/health path
+# and generate a complete Dockerfile from repo context (template defaults
+# 8080/"/health" and bare COPY stub fail for most apps).
 _HIDDEN_FIRST_REGEN_FIX: Final[str] = (
     "Additionally, correct the container port and the health-check path to "
     "match the actual server configuration found in the repo context (use the "
@@ -67,14 +61,6 @@ _HIDDEN_FIRST_REGEN_FIX: Final[str] = (
     "other resource and setting strictly identical."
 )
 
-# On the FIRST try (no user feedback yet), the refiner gets this instruction
-# instead: the deterministic artifacts are a stub -- a bare "FROM python:3.12-
-# slim COPY . /app" Dockerfile with no CMD and the template's hardcoded
-# 8080/"/health" -- that cannot run a real app. This tells the LLM to generate
-# a complete, runnable Dockerfile and correct port/health from the repo
-# context on the first pass, so the first deployment isn't guaranteed to fail
-# its health check and wait for a regen to fix it. Same fail-soft contract:
-# if the refiner can't run, the deterministic stub ships unchanged.
 _FIRST_TRY_ARTIFACT_FIX: Final[str] = (
     "Generate a complete, runnable Dockerfile for the application described in "
     "the repo context: choose the correct base image for the detected stack "
@@ -88,14 +74,8 @@ _FIRST_TRY_ARTIFACT_FIX: Final[str] = (
 )
 
 
-# The ECS template hardcodes the health path to "/health" (constants.py), which
-# is wrong for most apps: a Next.js server serves "/" (or "/api/health"), a
-# FastAPI app serves "/docs", etc. The LLM refiner is asked to correct it but
-# is not reliable on this (confirmed: it left "/health" on a Next.js blog that
-# has no health route at all -> 503 on every attempt -> rollback). This is the
-# deterministic fallback: look at the primary Dockerfile's CMD/EXPOSE and the
-# repo for an actual health route, and only then fix the path. Fail-soft —
-# never raises, and only changes the path when the app clearly exposes one.
+# Fallback health path: template defaults to "/health" but most apps use "/"
+# or "/api/health". Deterministically infer from repo/Dockerfile.
 _HEALTH_PATH_PATTERNS: Final[tuple[str, ...]] = (
     "/health",
     "/api/health",
@@ -118,19 +98,7 @@ _HEALTH_PATH_HINTS: Final[tuple[str, ...]] = (
 def _infer_health_path(primary_dockerfile: str | None, repo_path: str | None) -> str | None:
     """Pick a health-check path the app actually serves.
 
-    The ECS template hardcodes "/health" (constants.py), which most apps do
-    not expose -- a Next.js server serves "/" (or "/api/health"), a FastAPI
-    app serves "/docs", etc. The LLM refiner is asked to correct it but is
-    unreliable on this (confirmed: it left "/health" on a Next.js blog with no
-    health route at all -> 503 on every attempt -> rollback).
-
-    Order of evidence:
-      1. A route file/dir named for health/ready/status/ping in the repo.
-      2. A health route mentioned in the primary Dockerfile's CMD/ENTRYPOINT.
-      3. "/" -- the app's root. Any web server answers on its root when it is
-         up, so it is a valid liveness signal for the majority of web apps
-         that have no dedicated health route. This is the whole point: the
-         pipeline must work for projects that don't bother with /health.
+    Order: repo health route, Dockerfile CMD, fallback "/".
     """
     candidates: list[str] = list(_HEALTH_PATH_PATTERNS)
 
@@ -191,6 +159,63 @@ def _apply_inferred_health_path(
             logger.info("Inferred health-check path %s from the app", inferred)
     except Exception as exc:
         logger.warning("Health-path inference failed: %s", exc)
+
+
+def _ensure_production_build(
+    dockerfile: str, repo_path: str | None
+) -> str:
+    """Inject RUN npm run build before CMD when the production server needs it.
+
+    Only for Dockerfiles running next/nuxt/npm start that have a build script
+    and no existing build step. Fail-soft.
+    """
+    if not dockerfile or not repo_path:
+        return dockerfile
+    try:
+        lines = dockerfile.splitlines()
+        cmd_index = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("CMD") or stripped.startswith("ENTRYPOINT"):
+                cmd_index = i
+                break
+        if cmd_index is None:
+            return dockerfile
+        normalized = lines[cmd_index].strip()
+        prefix = "CMD" if normalized.startswith("CMD") else "ENTRYPOINT"
+        arg_text = normalized[len(prefix):]
+        if re.search(r'^\s*\[', arg_text) and "]" in arg_text:
+            arg_text = re.sub(r"[\"']", "", arg_text)
+            arg_text = arg_text.replace(",", " ").replace("[", " ").replace("]", " ")
+        normalized = " ".join(arg_text.split())
+        needs_build = re.search(
+            r"\b(next|nuxt|vite|vuepress|remix|gatsby|sveltekit|astro)\s+start\b",
+            normalized,
+        ) or re.search(r"\bnpm\s+(run\s+)?start\b", normalized)
+        if not needs_build:
+            return dockerfile
+
+        package_json = Path(repo_path) / "package.json"
+        if not package_json.is_file():
+            return dockerfile
+        scripts = json.loads(package_json.read_text(encoding="utf-8")).get("scripts") or {}
+        if not isinstance(scripts, dict) or not scripts.get("build"):
+            return dockerfile
+
+        has_build_run = any(
+            re.search(r"\bnpm\s+(run\s+)?build\b|next build|nuxt build|vite build", ln)
+            for ln in lines
+        )
+        if has_build_run:
+            return dockerfile
+
+        build_line = "RUN npm run build"
+        out = lines[:cmd_index] + [build_line] + lines[cmd_index:]
+        logger.info("Injected production build step before CMD")
+        return "\n".join(out)
+    except Exception as exc:
+        logger.warning("Production-build injection failed: %s", exc)
+        return dockerfile
 
 
 # Env vars that are conventionally harmless / auto-provisioned by the runtime
@@ -588,6 +613,19 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         raw.get("repo_path"),
     )
 
+    # Fix dev-mode CMDs to production equivalents (fail-soft).
+    if primary_image and primary_image.dockerfile:
+        primary_image.dockerfile = _fix_dev_mode_cmd(primary_image.dockerfile)
+        primary_image.dockerfile = _ensure_production_build(
+            primary_image.dockerfile, raw.get("repo_path")
+        )
+    for image in docker_images:
+        if image.dockerfile:
+            image.dockerfile = _fix_dev_mode_cmd(image.dockerfile)
+            image.dockerfile = _ensure_production_build(
+                image.dockerfile, raw.get("repo_path")
+            )
+
     # Boot-blocking env vars: apps like Animetrix hard-exit unless secrets
     # (MONGODB_URI, JWT_TOKEN) are set, so the container never reaches healthy.
     # Can't conjure the values, but must surface them at Gate 2 rather than
@@ -603,6 +641,19 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         if required_env_vars
         else []
     )
+
+    # A detected database is declared in terraform but NEVER provisioned: the
+    # ECS template wires DB_* env vars from tfvars (DEVGUARD_DB_*), so the app
+    # cannot reach healthy unless a database already exists somewhere the
+    # deployer controls. Surface it at Gate 2 instead of letting the deploy
+    # fail later on an obscure "required variable" error.
+    if analysis.stack_detection.database:
+        warnings.append(
+            f"App uses a {analysis.stack_detection.database} database, which is "
+            "declared but not provisioned by DevGuard. Supply DEVGUARD_DB_HOST/"
+            "DEVGUARD_DB_PORT/DEVGUARD_DB_NAME/DEVGUARD_DB_USER/DEVGUARD_DB_PASSWORD "
+            "or the terraform apply will fail."
+        )
 
     # After Gate-2 feedback the refiner may have rewritten sizing in main.tf;
     # cost must reflect what actually ships, not the pre-regen decision.

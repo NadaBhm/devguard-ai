@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-from core.llm_terraform_refiner import _fix_mixed_apt_apk, refine_terraform
+from core.llm_terraform_refiner import _fix_dev_mode_cmd, _fix_mixed_apt_apk, refine_terraform
 from models.output_schema import TerraformFiles
 
 CURRENT = TerraformFiles(
@@ -1085,3 +1085,91 @@ def test_fix_mixed_apt_apk_keeps_normal_continuation_intact() -> None:
         "    && apt-get clean\n"
     )
     assert _fix_mixed_apt_apk(clean) == clean.rstrip("\n")
+
+
+def test_fix_dev_mode_cmd_npm_dev_becomes_npm_start() -> None:
+    """Regression (live devverse): the repo's own Dockerfile ran `npm run dev`
+    (Next.js dev server), which OOM'd/crashed in ECS after compiling. The
+    deterministic fixer must map dev-mode CMDs to production equivalents."""
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        "WORKDIR /app\n"
+        "COPY package*.json ./\n"
+        "RUN npm ci\n"
+        "COPY . .\n"
+        "CMD [\"npm\", \"run\", \"dev\"]\n"
+    )
+    fixed = _fix_dev_mode_cmd(dockerfile)
+    assert "npm start" in fixed
+    assert "npm run dev" not in fixed
+
+
+def test_fix_dev_mode_cmd_prefers_existing_start_script() -> None:
+    """When the Dockerfile already references a start script, dev should map
+    to `npm run start` (respecting the repo's script name) over `npm start`."""
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        "COPY . .\n"
+        'RUN npm run start\n'
+        "CMD [\"npm\", \"run\", \"dev\"]\n"
+    )
+    fixed = _fix_dev_mode_cmd(dockerfile)
+    assert "npm run start" in fixed
+    assert "npm run dev" not in fixed
+
+
+def test_fix_dev_mode_cmd_strips_uvicorn_reload() -> None:
+    """`uvicorn --reload` runs a file-watcher process that's useless and
+    wasteful in a container; the production server is the same uvicorn
+    invocation without the watcher."""
+    dockerfile = (
+        "FROM python:3.12-slim\n"
+        "COPY . .\n"
+        "CMD [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\", \"--reload\"]\n"
+    )
+    fixed = _fix_dev_mode_cmd(dockerfile)
+    assert "--reload" not in fixed
+    assert "app.main:app" in fixed
+
+
+def test_fix_dev_mode_cmd_flask_run_becomes_gunicorn() -> None:
+    dockerfile = (
+        "FROM python:3.12-slim\n"
+        "COPY . .\n"
+        "CMD [\"flask\", \"run\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n"
+    )
+    fixed = _fix_dev_mode_cmd(dockerfile)
+    assert "gunicorn" in fixed
+    assert "flask run" not in fixed
+
+
+def test_fix_dev_mode_cmd_ng_serve_gets_production() -> None:
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        "COPY . .\n"
+        "CMD [\"ng\", \"serve\", \"--host\", \"0.0.0.0\"]\n"
+    )
+    fixed = _fix_dev_mode_cmd(dockerfile)
+    assert "--configuration production" in fixed
+
+
+def test_fix_dev_mode_cmd_leaves_production_cmd_untouched() -> None:
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        "COPY . .\n"
+        'CMD ["npm", "start"]\n'
+    )
+    assert _fix_dev_mode_cmd(dockerfile) == dockerfile
+
+
+def test_fix_dev_mode_cmd_never_rewrites_run_instructions() -> None:
+    """`npm run dev` inside a RUN (build-time dev-server setup) is not the
+    container's entrypoint and must stay untouched."""
+    dockerfile = (
+        "FROM node:18-alpine\n"
+        "RUN npm run dev -- --install\n"
+        "CMD [\"node\", \"server.js\"]\n"
+    )
+    fixed = _fix_dev_mode_cmd(dockerfile)
+    assert "npm run dev -- --install" in fixed
+    assert 'CMD ["node", "server.js"]' in fixed

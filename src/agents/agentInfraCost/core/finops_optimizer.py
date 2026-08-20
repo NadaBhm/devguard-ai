@@ -205,10 +205,28 @@ def _optimize_lambda(decision: DecisionResult) -> FinOpsRecommendation:
     )
 
 
+def _optimize_s3(analysis: RepoAnalysisInput, decision: DecisionResult) -> FinOpsRecommendation:
+    """Static S3 hosting has no compute to optimize — there is no concurrency,
+    instance count, or Lambda capacity to tune. Report that as the recommendation
+    so the FinOps stage is a no-op rather than a crash."""
+    return FinOpsRecommendation(
+        recommended=OptimizationOption(
+            name="no_compute_to_optimize",
+            reason=(
+                "Hébergement statique S3 : pas de calcul facturé à optimiser "
+                "(pas de serveur, pas de concurrence, pas d'instances)."
+            ),
+        ),
+        discarded=[],
+        context={"compute_type": "s3"},
+    )
+
+
 _OPTIMIZERS = {
     "ecs": _optimize_ecs_or_ec2,
     "lambda": lambda analysis, decision: _optimize_lambda(decision),
     "ec2": _optimize_ecs_or_ec2,
+    "s3": _optimize_s3,
 }
 
 

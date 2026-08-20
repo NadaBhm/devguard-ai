@@ -16,6 +16,10 @@ def _load_analysis(filename: str) -> RepoAnalysisInput:
     return RepoAnalysisInput.model_validate(raw)
 
 
+def _load_raw(filename: str) -> dict:
+    return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
+
+
 @pytest.mark.parametrize(
     "filename",
     ["sample_input.json", "sample_input_variant_node_ecs.json"],
@@ -162,3 +166,25 @@ def test_recommendation_rejects_wrong_discarded_type() -> None:
             discarded="not a list",  # type: ignore[arg-type]
             context={},
         )
+
+
+def test_s3_static_site_optimization_is_noop() -> None:
+    """Regression (live nitjsefni.eu smoke): routing a bare static site to S3
+    crashed the pipeline at finops_optimizer with a KeyError ('s3') because the
+    optimizer map had no S3 entry. Static hosting has no compute to optimize —
+    the stage must return a no-op recommendation, not crash."""
+    raw = _load_raw("sample_input.json")
+    raw["stack_detection"]["container"] = None
+    raw["stack_detection"]["containers"] = []
+    raw["stack_detection"]["database"] = None
+    raw["stack_detection"]["frameworks"] = []
+    raw["stack_detection"]["primary_language"] = "html"
+    analysis = RepoAnalysisInput.model_validate(raw)
+    decision = DecisionResult(
+        compute_type="s3",
+        sizing={},
+        score_breakdown={"ecs": 0.0, "lambda": 0.0, "ec2": 0.0, "s3": 10.0},
+    )
+    result = optimize_finops(analysis, decision)
+    assert result.recommended.name == "no_compute_to_optimize"
+    assert result.context == {"compute_type": "s3"}

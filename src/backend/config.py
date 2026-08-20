@@ -30,7 +30,11 @@ class Settings(BaseSettings):
         return v
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
-    DATABASE_URL: str = "sqlite:///./devguard.db"
+    # A generic filename like "devguard.db" can collide with an unrelated
+    # project's own default SQLite file if both happen to run from the same
+    # folder (this bit us in practice -- see project memory). Project-specific
+    # name to make that collision far less likely.
+    DATABASE_URL: str = "sqlite:///./devguard_infracost.db"
 
     GEMINI_API_KEY: str | None = None
     GEMINI_MODEL: str = "gemini-2.5-flash"

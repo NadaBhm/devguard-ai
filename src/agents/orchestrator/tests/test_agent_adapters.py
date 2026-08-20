@@ -313,11 +313,24 @@ class TestInfraCostToDeployPayload:
 class TestTranslationFailsLoudly:
     pass
 
-    def test_non_ecs_compute_type_is_rejected(self, deploy_inputs):
+    def test_non_ecs_compute_type_is_rejected(self, deploy_inputs, monkeypatch):
         deploy_inputs["compute_type"] = "lambda"
         deploy_inputs["aws_config"]["ecs"] = None
+        monkeypatch.setenv("DEVGUARD_FORCE_COMPUTE_ECS", "0")
         with pytest.raises(ValueError, match="No 'lambda' mapping"):
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
+
+    def test_lambda_falls_back_to_ec2_when_guard_enabled(self, deploy_inputs):
+        """When the guard is on, a lambda recommendation is remapped to ec2
+        so the real pipeline does not deterministically land on an undeployable
+        type (the deterministic scorer already excludes lambda under the same
+        guard)."""
+        deploy_inputs["compute_type"] = "lambda"
+        deploy_inputs["artifacts"]["docker_images"] = []
+        deploy_inputs["artifacts"]["dockerfile"] = None
+        result = translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
+        assert result["compute_type"] == "ec2"
+        assert len(result["artifacts"]["docker_images"]) == 1
 
     def test_missing_dockerfile_content_is_rejected(self, deploy_inputs):
         deploy_inputs["artifacts"]["dockerfile"] = None

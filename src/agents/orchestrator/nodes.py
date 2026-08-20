@@ -398,7 +398,15 @@ def health_check_impl(state: OrchestratorState) -> OrchestratorState:
         state["status"] = "rolled_back"
         if deployops:
             deployops["rollback_triggered"] = True
-            deployops["rollback_reason"] = "Health check failed after deployment"
+            # Preserve the underlying deployops error (e.g. "image build/push
+            # failed: devguard-app") when one exists — the health check only
+            # *probed* the already-broken deployment, so the build/apply
+            # failure is the root cause the user needs to see. Only fall back
+            # to the generic health-check message when there is no other.
+            if deployops.get("error") and not deployops.get("rollback_reason"):
+                deployops["rollback_reason"] = deployops["error"]
+            elif not deployops.get("error"):
+                deployops["rollback_reason"] = "Health check failed after deployment"
             deployops["deployment_status"] = "rolled_back"
 
     return state

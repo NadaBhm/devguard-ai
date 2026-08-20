@@ -227,6 +227,28 @@ class TestHealthCheck:
         assert result["deployops_result"]["rollback_triggered"] is True
         assert result["deployops_result"]["deployment_status"] == "rolled_back"
 
+    def test_failed_health_check_preserves_underlying_deployops_error(
+        self, initial_state
+    ):
+        """Regression (live devverse): the deployops agent failed with
+        "image build/push failed: devguard-app" before the health check ran, so
+        the health check only probed a broken deployment. The rollback reason
+        must keep that root-cause error instead of being overwritten with the
+        generic "Health check failed" message."""
+        initial_state = mock_codesec_agent_impl(initial_state)
+        initial_state = mock_infracost_agent_impl(initial_state)
+        initial_state = mock_deployops_agent_impl(initial_state)
+        initial_state["deployops_result"]["health_check"]["passed"] = False
+        initial_state["deployops_result"]["error"] = "image build/push failed: devguard-app"
+        result = health_check_impl(initial_state)
+        assert result["status"] == "rolled_back"
+        assert result["deployops_result"]["rollback_reason"] == (
+            "image build/push failed: devguard-app"
+        )
+        assert result["deployops_result"]["error"] == (
+            "image build/push failed: devguard-app"
+        )
+
 
 class TestGenerateReport:
     def test_report_generated(self, initial_state):

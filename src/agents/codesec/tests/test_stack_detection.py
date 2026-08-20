@@ -85,6 +85,74 @@ class TestDetectStack:
         result = detect_stack(repo)
         assert result.primary_language == "rust"
 
+    def test_detect_bare_static_site(self, tmp_path: Path):
+        """Regression: a JS-less static site (only .html/.css) reported
+        primary_language='unknown' because those extensions were never counted,
+        so it never reached S3. Now html wins and the S3 decision can fire."""
+        repo = tmp_path / "static_repo"
+        repo.mkdir()
+        (repo / "index.html").write_text("<html><body>Hello</body></html>")
+        (repo / "style.css").write_text("body { color: red; }")
+
+        result = detect_stack(repo)
+        assert result.primary_language == "html"
+        assert result.container.detected is False
+        assert result.database is None
+        assert result.confidence >= 0.5
+
+    def test_detect_mixed_html_static_site(self, tmp_path: Path):
+        """HTML must beat a small JS/TS footprint for a static site."""
+        repo = tmp_path / "static_repo_js"
+        repo.mkdir()
+        (repo / "index.html").write_text(
+            "<html><body>" + "x" * 500 + "</body></html>"
+        )
+        (repo / "style.css").write_text("body { color: red; }")
+        (repo / "app.js").write_text("document.title = 'hi';")
+
+        result = detect_stack(repo)
+        assert result.primary_language == "html"
+
+    def test_prose_mentions_do_not_false_positive_static_site(
+        self, tmp_path: Path
+    ):
+        """Regression: a static homepage whose README/HTML *mentions* tech
+        (\"built with Express + Prisma, FastAPI, Postgres\") must NOT be
+        detected as using those frameworks or a database, otherwise it is
+        misrouted away from S3."""
+        repo = tmp_path / "static_prose_repo"
+        repo.mkdir()
+        (repo / "index.html").write_text(
+            "<html><body>2023 backend — express + prisma, fastapi, postgres</body></html>"
+        )
+        (repo / "README.md").write_text(
+            "Portfolio. Built with flask, sqlalchemy, mongodb, redis, next.js.\n"
+        )
+        (repo / "style.css").write_text("body { color: red; }")
+
+        result = detect_stack(repo)
+        assert result.primary_language == "html"
+        assert result.frameworks == []
+        assert result.database is None
+
+    def test_binary_assets_do_not_false_positive_database(
+        self, tmp_path: Path
+    ):
+        """Regression: binary assets (e.g. .woff2 fonts) read as text with
+        errors=ignore can contain the substring \"pg\" at random bytes and
+        false-positive the postgresql database detection."""
+        repo = tmp_path / "static_binary_repo"
+        repo.mkdir()
+        (repo / "index.html").write_text("<html><body>Hello</body></html>")
+        fonts_dir = repo / "fonts"
+        fonts_dir.mkdir()
+        (fonts_dir / "webfont.woff2").write_bytes(b"\x00\x01pg\x00\xff\xfe")
+        (repo / "README.md").write_text("Portfolio site.")
+
+        result = detect_stack(repo)
+        assert result.database is None
+        assert result.frameworks == []
+
     def _write_multi_container_repo(
         self, tmp_path: Path, compose_yml: str
     ) -> None:

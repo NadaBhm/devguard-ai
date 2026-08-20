@@ -107,7 +107,13 @@ def read_file_safe(file_path: Path, max_size_mb: int = 10) -> str | None:
         if size > max_bytes:
             logger.warning("File too large (%d MB > %d MB limit): %s", size // (1024 * 1024), max_size_mb, file_path)
             return None
-        return file_path.read_text(encoding="utf-8", errors="ignore")
+        content = file_path.read_text(encoding="utf-8", errors="ignore")
+        if "\x00" in content:
+            # Binary file (fonts, images, archives…): reading it as text is
+            # meaningless and its random bytes can false-positive substring
+            # grepping (e.g. the DB indicator "pg" matching inside a .woff2).
+            return None
+        return content
     except (OSError, UnicodeDecodeError) as exc:
         logger.debug("Could not read file %s: %s", file_path, exc)
         return None

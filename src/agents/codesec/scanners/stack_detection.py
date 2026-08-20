@@ -41,6 +41,9 @@ def _is_dockerfile_path(rel_path: str) -> bool:
 
 # File extensions that contribute to language LOC counting
 LANGUAGE_EXTENSIONS: dict[str, str] = {
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
     ".py": "python",
     ".js": "javascript",
     ".jsx": "javascript",
@@ -66,6 +69,30 @@ LANGUAGE_EXTENSIONS: dict[str, str] = {
     ".tf": "terraform",
     ".tfvars": "terraform",
 }
+
+# Exclude prose/docs from framework/DB grepping to avoid false positives.
+_DOC_FILE_STEMS = (
+    "readme", "license", "licence", "changelog", "change_log", "contributing",
+    "code_of_conduct", "notice", "authors", "security", "thanks",
+)
+_DOC_EXTENSIONS = (
+    ".html", ".htm", ".css", ".scss", ".sass", ".less", ".md", ".markdown",
+    ".rst", ".txt", ".text", ".adoc", ".svg", ".xml", ".pdf",
+)
+
+
+def _is_signal_file(rel_path: str) -> bool:
+    """True when path can carry genuine framework/DB signals (excludes docs)."""
+    name = Path(rel_path).name.lower()
+    if name in _DOC_FILE_STEMS or name.split(".")[0] in _DOC_FILE_STEMS:
+        return False
+    if rel_path.lower().startswith(".git/"):
+        return False
+    ext = Path(rel_path).suffix.lower()
+    if ext in _DOC_EXTENSIONS:
+        return False
+    return True
+
 
 # Service names / image tags that indicate a public web entrypoint. Used as a
 # tiebreaker when a compose file maps host ports on several services (e.g. a
@@ -226,8 +253,12 @@ def detect_stack(repo_path: Path) -> StackDetection:
             for fname in filenames:
                 if indicator.lower() in fname.lower():
                     score += 1
-            # Check file contents (sample up to 20 files for performance)
+            # Check file contents (sample up to 20 files for performance),
+            # restricted to code/manifest/config files — READMEs and HTML
+            # prose commonly *mention* frameworks without using them.
             for f in all_files[:20]:
+                if not _is_signal_file(f.relative_to(repo_path).as_posix()):
+                    continue
                 content = read_file_safe(f, max_size_mb=1)
                 if content and indicator in content:
                     score += 2
@@ -248,6 +279,8 @@ def detect_stack(repo_path: Path) -> StackDetection:
                 if indicator.lower() in fname.lower():
                     score += 1
             for f in all_files[:20]:
+                if not _is_signal_file(f.relative_to(repo_path).as_posix()):
+                    continue
                 content = read_file_safe(f, max_size_mb=1)
                 if content and indicator in content:
                     score += 2
@@ -313,6 +346,14 @@ def detect_stack(repo_path: Path) -> StackDetection:
     # Confidence is a heuristic based on how many signals we found
     signal_count = sum(1 for v in [primary_language, frameworks, database, build_tool, container.detected] if v)
     confidence = min(0.95, 0.3 + (signal_count / 5) * 0.7)
+
+    # A *recognized* primary language (with files present) is itself the
+    # strongest single signal: an unambiguous stack must not be rejected as
+    # "too uncertain". Bare static sites (html/css only) have exactly one
+    # signal category, yet their S3 routing decision is deterministic — give
+    # them the same floor as a language + one more signal.
+    if primary_language != "unknown":
+        confidence = max(confidence, 0.5)
 
     # Detected files that contributed
     detected_files: list[str] = []

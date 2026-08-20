@@ -314,3 +314,89 @@ def test_multi_container_dockerfile_edits_route_by_context():
     images = state["infracost_result"]["_deploy_inputs"]["artifacts"]["docker_images"]
     assert images[0]["dockerfile"] == "NEW1"
     assert images[1]["dockerfile"] == "NEW2"
+
+
+def test_rollback_requires_auth(_clean_db):
+    client = _clean_db
+    r = client.post("/api/jobs/some-job-id/rollback", json={"reason": "x"})
+    assert r.status_code == 401
+
+
+def test_rollback_returns_404_without_deployment(_clean_db, auth_headers):
+    headers = auth_headers
+    client = _clean_db
+    r = client.post(
+        "/api/jobs/",
+        headers=headers,
+        json={"repo_url": "https://github.com/NadaBhm/no-deployment-yet", "commit_sha": "x"},
+    )
+    job_id = r.json()["job_id"]
+    # Job is still at gate_1: no Deployment row has been persisted yet.
+    r = client.post(f"/api/jobs/{job_id}/rollback", headers=headers, json={"reason": "x"})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "No deployment found for this job"
+
+
+def test_deployment_revisions_and_rollback_succeed_in_mock_mode(_clean_db, auth_headers):
+    """Regression test for the aws_config/terraform_outputs field-name
+    mismatch: deployops_result only ever has terraform_outputs.ecs_cluster_name
+    and .service_name, never an "aws_config" key, so both endpoints used to
+    400 on every deployment no matter what. They must now resolve those
+    fields via _extract_aws_config()'s terraform_outputs fallback."""
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    revisions = client.get(f"/api/jobs/{job_id}/deployments/revisions", headers=headers)
+    assert revisions.status_code == 200
+    body = revisions.json()
+    versions = body["versions"]
+    assert len(versions) >= 2
+    assert any(v["is_current"] for v in versions)
+
+    r = client.post(
+        f"/api/jobs/{job_id}/rollback",
+        headers=headers,
+        json={"reason": "Regression test rollback"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "rolled_back"
+    assert body["result"]["status"] == "success"
+
+    con = sqlite3.connect(TEST_DB)
+    con.row_factory = sqlite3.Row
+    deployment = con.execute(
+        "select status, rollback_reason from deployments where run_id = ?", (job_id,)
+    ).fetchone()
+    con.close()
+    assert deployment["status"] == "rolled_back"
+    assert deployment["rollback_reason"] == "Regression test rollback"
+
+
+def test_rollback_blocked_for_other_users_deployment(_clean_db, auth_headers):
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    r = client.post(
+        "/api/auth/register",
+        json={
+            "email": "rollback-intruder@devguard.ai",
+            "password": "x",
+            "first_name": "I",
+            "last_name": "N",
+        },
+    )
+    assert r.status_code == 200, r.text
+    r = client.post(
+        "/api/auth/login",
+        json={"email": "rollback-intruder@devguard.ai", "password": "x"},
+    )
+    intruder = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+    r = client.post(
+        f"/api/jobs/{job_id}/rollback", headers=intruder, json={"reason": "should not work"}
+    )
+    assert r.status_code == 404
+    assert client.get(f"/api/jobs/{job_id}/deployments/revisions", headers=intruder).status_code == 404

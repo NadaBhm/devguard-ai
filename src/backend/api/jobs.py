@@ -491,11 +491,17 @@ def rollback_job(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    infra = deployment.infrastructure_json or {}
-    aws_config = infra.get("aws_config") or {}
-    region = aws_config.get("region", deployment.aws_region or "us-east-1")
-    ecs_cluster = aws_config.get("ecs_cluster")
-    service_name = aws_config.get("service_name")
+    # deployops_result never carries an "aws_config" key (mock and real both
+    # go through translate_deployops_result(), whose only output shape is
+    # terraform_outputs{ecs_cluster_name, service_name, alb_dns}) -- reading
+    # infra["aws_config"] here always returned {}, so this endpoint 400'd on
+    # every single deployment. _extract_aws_config() (below, already used by
+    # destroy_job) resolves this correctly with the terraform_outputs
+    # fallback -- reuse it instead of this stale duplicate.
+    resolved = _extract_aws_config(deployment)
+    region = resolved.get("region") or "us-east-1"
+    ecs_cluster = resolved.get("ecs_cluster")
+    service_name = resolved.get("service_name")
 
     if not ecs_cluster or not service_name:
         raise HTTPException(
@@ -663,11 +669,14 @@ def list_deployment_revisions(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    infra = deployment.infrastructure_json or {}
-    aws_config = infra.get("aws_config") or {}
-    region = aws_config.get("region", deployment.aws_region or "us-east-1")
-    ecs_cluster = aws_config.get("ecs_cluster")
-    service_name = aws_config.get("service_name")
+    # Same fix as rollback_job above: read via _extract_aws_config() (which
+    # falls back to terraform_outputs) instead of the never-populated
+    # "aws_config" key, which made this endpoint 400 on every deployment --
+    # including breaking the rollback picker UI that depends on this list.
+    resolved = _extract_aws_config(deployment)
+    region = resolved.get("region") or "us-east-1"
+    ecs_cluster = resolved.get("ecs_cluster")
+    service_name = resolved.get("service_name")
 
     if not ecs_cluster or not service_name:
         raise HTTPException(

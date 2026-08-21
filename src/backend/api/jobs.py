@@ -258,6 +258,141 @@ def upload_job(
     )
 
 
+@router.get("/{job_id}/check-update")
+def check_update(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Compare the project's most recently analyzed commit against the tip
+    of its default branch, without cloning or starting a run."""
+    run = _get_owned_run(db, job_id, current_user.id)
+    project = run.project
+
+    from src.lib.git_remote import latest_remote_sha
+    try:
+        latest_sha = latest_remote_sha(project.github_url, project.default_branch)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=f"Could not check remote: {exc}") from exc
+
+    last_run = (
+        db.query(models.AnalysisRun)
+        .filter(models.AnalysisRun.project_id == project.id)
+        .order_by(models.AnalysisRun.started_at.desc())
+        .first()
+    )
+    current_sha = last_run.commit_sha if last_run else None
+    # CodeSec records commit_sha truncated to 12 chars (git rev-parse HEAD),
+    # while git ls-remote returns the full 40-char SHA -- compare prefixes.
+    has_update = current_sha is None or current_sha[:12] != latest_sha[:12]
+
+    return {
+        "job_id": job_id,
+        "has_update": has_update,
+        "latest_sha": latest_sha,
+        "current_sha": current_sha,
+    }
+
+
+@router.post("/{job_id}/update", status_code=201)
+def trigger_update(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Start a new run for the same project as an in-place update: full
+    CodeSec + InfraCost re-analysis of the latest commit, then a lightweight
+    redeploy onto the currently live ECS service instead of provisioning
+    fresh infrastructure from scratch."""
+    run = _get_owned_run(db, job_id, current_user.id)
+    project = run.project
+
+    deployment = (
+        db.query(models.Deployment)
+        .join(models.AnalysisRun, models.Deployment.run_id == models.AnalysisRun.id)
+        .filter(
+            models.AnalysisRun.project_id == project.id,
+            models.Deployment.status == "succeeded",
+        )
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if not deployment:
+        raise HTTPException(status_code=400, detail="No live deployment to update")
+
+    existing = _extract_aws_config(deployment)
+    if not existing.get("ecs_cluster") or not existing.get("service_name"):
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment has no ECS cluster/service info to update",
+        )
+    if existing.get("cluster_was_guessed"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not reliably determine the live ECS cluster for this "
+                "deployment (older record, name was inferred rather than "
+                "stored). Refusing to update automatically -- destroy and "
+                "redeploy this project instead."
+            ),
+        )
+
+    previous_run_id = deployment.run_id
+    previous_costs = (
+        db.query(models.InfracostEstimate.monthly_cost_usd)
+        .filter(models.InfracostEstimate.run_id == previous_run_id)
+        .all()
+    )
+    previous_monthly_cost_usd = (
+        float(sum(row[0] for row in previous_costs)) if previous_costs else None
+    )
+
+    new_run = _create_run(
+        db, project, current_user.id, commit_sha="HEAD", commit_message="Update deployment"
+    )
+
+    logger.info(
+        f"Starting update run {new_run.id} for project {project.id} "
+        f"(reusing deployment from run {previous_run_id})"
+    )
+    publish_progress(str(new_run.id), phase="start", progress=5, message="Update started")
+
+    try:
+        from src.agents.orchestrator.graph import run_workflow
+        state = run_workflow(
+            repo_url=project.github_url,
+            thread_id=str(new_run.id),
+            on_node_progress=_publish_node_progress(str(new_run.id)),
+            is_update=True,
+            existing_deployment={
+                "region": existing["region"],
+                "ecs_cluster": existing["ecs_cluster"],
+                "service_name": existing["service_name"],
+            },
+            previous_monthly_cost_usd=previous_monthly_cost_usd,
+        )
+        state["job_id"] = str(new_run.id)
+    except Exception as exc:
+        logger.error(f"run_workflow failed for update {new_run.id}: {exc}", exc_info=True)
+        state = {"status": "failed", "error": str(exc), "job_id": str(new_run.id)}
+
+    new_run = update_run_state(db, str(new_run.id), state)
+    _publish(state, 30, f"Orchestrator status: {state.get('status')}")
+
+    gate = _current_gate(state)
+    if gate:
+        publish_gate(str(new_run.id), gate, "awaiting_approval")
+
+    return {
+        "job_id": str(new_run.id),
+        "status": new_run.status,
+        "orchestrator_status": state.get("status"),
+        "gate": gate,
+        "mode": report_mode(),
+        "state": serialize_state(state),
+    }
+
+
 @router.post("/{job_id}/approve")
 def approve_job(
     job_id: str,
@@ -572,6 +707,7 @@ def _extract_aws_config(deployment: models.Deployment) -> dict:
     region = aws_config.get("region") or deployment.aws_region or "us-east-1"
     ecs_cluster = aws_config.get("ecs_cluster")
     service_name = aws_config.get("service_name")
+    cluster_was_guessed = False
 
     if not ecs_cluster or not service_name:
         tf_outputs = infra.get("terraform_outputs") or {}
@@ -580,11 +716,18 @@ def _extract_aws_config(deployment: models.Deployment) -> dict:
         if not ecs_cluster and service_name and "-" in service_name:
             suffix = service_name.rsplit("-", 1)[-1]
             ecs_cluster = f"devguard-cluster-{suffix}"
+            cluster_was_guessed = True
 
     return {
         "region": region,
         "ecs_cluster": ecs_cluster,
         "service_name": service_name,
+        # True only when ecs_cluster came from the suffix-derivation
+        # workaround above rather than being read directly from stored data.
+        # Callers that mutate a live service (update) should treat this as a
+        # reason to refuse rather than risk targeting the wrong cluster --
+        # callers that only read (rollback/destroy) can ignore it.
+        "cluster_was_guessed": cluster_was_guessed,
     }
 
 

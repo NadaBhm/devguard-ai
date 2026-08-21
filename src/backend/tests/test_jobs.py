@@ -400,3 +400,121 @@ def test_rollback_blocked_for_other_users_deployment(_clean_db, auth_headers):
     )
     assert r.status_code == 404
     assert client.get(f"/api/jobs/{job_id}/deployments/revisions", headers=intruder).status_code == 404
+
+
+def test_check_update_detects_new_commit(_clean_db, auth_headers, monkeypatch):
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    monkeypatch.setattr(
+        "src.lib.git_remote.latest_remote_sha",
+        lambda repo_url, branch, **kw: "f" * 40,
+    )
+    r = client.get(f"/api/jobs/{job_id}/check-update", headers=headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["has_update"] is True
+    assert body["latest_sha"] == "f" * 40
+
+
+def test_check_update_no_new_commit(_clean_db, auth_headers, monkeypatch):
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    # Give the recorded run a realistic-looking commit_sha, then make the
+    # "remote" answer share its 12-char prefix (check-update compares
+    # prefixes since CodeSec truncates git rev-parse HEAD to 12 chars).
+    con = sqlite3.connect(TEST_DB)
+    con.execute("UPDATE analysis_runs SET commit_sha = ? WHERE id = ?", ("abc123def456", job_id))
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(
+        "src.lib.git_remote.latest_remote_sha",
+        lambda repo_url, branch, **kw: "abc123def456" + "0" * 27,
+    )
+    r = client.get(f"/api/jobs/{job_id}/check-update", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["has_update"] is False
+
+
+def test_check_update_requires_auth(_clean_db):
+    client = _clean_db
+    r = client.get("/api/jobs/some-job-id/check-update")
+    assert r.status_code == 401
+
+
+def test_check_update_404_unknown_job(_clean_db, auth_headers):
+    client = _clean_db
+    r = client.get("/api/jobs/does-not-exist/check-update", headers=auth_headers)
+    assert r.status_code == 404
+
+
+def test_trigger_update_creates_new_run_targeting_existing_service(_clean_db, auth_headers):
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    r = client.post(f"/api/jobs/{job_id}/update", headers=headers)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["job_id"] != job_id
+    assert body["orchestrator_status"] == "analyzing"
+    assert body["gate"] == "gate_1_pre_infracost"
+
+    # It's a real, independent AnalysisRun row -- not a mutation of the old one.
+    con = sqlite3.connect(TEST_DB)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "select commit_message from analysis_runs where id = ?", (body["job_id"],)
+    ).fetchone()
+    con.close()
+    assert row["commit_message"] == "Update deployment"
+
+
+def test_trigger_update_requires_prior_deployment(_clean_db, auth_headers):
+    headers = auth_headers
+    client = _clean_db
+    r = client.post(
+        "/api/jobs/",
+        headers=headers,
+        json={"repo_url": "https://github.com/NadaBhm/no-deployment-for-update", "commit_sha": "x"},
+    )
+    job_id = r.json()["job_id"]  # still at gate_1, never deployed
+
+    r = client.post(f"/api/jobs/{job_id}/update", headers=headers)
+    assert r.status_code == 400
+    assert "No live deployment" in r.json()["detail"]
+
+
+def test_trigger_update_requires_auth(_clean_db):
+    client = _clean_db
+    r = client.post("/api/jobs/some-job-id/update")
+    assert r.status_code == 401
+
+
+def test_trigger_update_gate2_context_includes_cost_delta(_clean_db, auth_headers):
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    r = client.post(f"/api/jobs/{job_id}/update", headers=headers)
+    assert r.status_code == 201, r.text
+    new_job_id = r.json()["job_id"]
+
+    r = client.post(
+        f"/api/jobs/{new_job_id}/approve",
+        headers=headers,
+        json={"approved": True, "approved_by": "x@y.z"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["gate"] == "gate_2_pre_deployops"
+
+    interrupt_ctx = body["state"]["__interrupt__"][0]["value"]["context"]
+    assert interrupt_ctx["previous_monthly_cost_usd"] is not None
+    assert interrupt_ctx["cost_delta_usd"] == pytest.approx(
+        interrupt_ctx["monthly_cost_usd"] - interrupt_ctx["previous_monthly_cost_usd"]
+    )

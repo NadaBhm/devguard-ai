@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useNavigate } from "react-router-dom"
 import { jobsApi } from "../../api/jobs"
 import type { Deployment, DeploymentStatus } from "../../types/results"
 import { formatCurrency, formatDate } from "../../lib/format"
@@ -65,9 +66,28 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
   const [selectedRevision, setSelectedRevision] = useState<number | null>(null)
   const [rollbackError, setRollbackError] = useState<string | null>(null)
   const [rollbackResult, setRollbackResult] = useState<{ message?: string; task_definition?: string } | null>(null)
+  const [triggerUpdateError, setTriggerUpdateError] = useState<string | null>(null)
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   const canRollback = !!jobId && deployments.some((d) => d.status === "succeeded")
+
+  const checkUpdateQuery = useQuery({
+    queryKey: ["check-update", jobId],
+    queryFn: () => jobsApi.checkUpdate(jobId!),
+    enabled: canRollback,
+  })
+
+  const triggerUpdate = useMutation({
+    mutationFn: () => jobsApi.triggerUpdate(jobId!),
+    onSuccess: (res) => {
+      setTriggerUpdateError(null)
+      if (res.job_id) navigate(`/runs/${res.job_id}`)
+    },
+    onError: (err) => {
+      setTriggerUpdateError(err instanceof Error ? err.message : "Update failed.")
+    },
+  })
 
   const revisionsQuery = useQuery({
     queryKey: ["deployment-revisions", jobId],
@@ -197,6 +217,42 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
               {revisionsQuery.error instanceof Error ? revisionsQuery.error.message : "Failed to load versions."}
             </p>
           )}
+
+          <div className="flex flex-wrap items-center gap-3 border-t border-border pt-3">
+            <p className="min-w-0 flex-1 text-[12px] text-muted">
+              {checkUpdateQuery.isLoading && "Checking for updates…"}
+              {!checkUpdateQuery.isLoading && checkUpdateQuery.data?.has_update === false &&
+                "Up to date with the repository."}
+              {!checkUpdateQuery.isLoading && checkUpdateQuery.data?.has_update === true &&
+                "A new commit is available on the repository."}
+              {checkUpdateQuery.isError &&
+                (checkUpdateQuery.error instanceof Error
+                  ? checkUpdateQuery.error.message
+                  : "Could not check for updates.")}
+            </p>
+            {checkUpdateQuery.data?.has_update ? (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => triggerUpdate.mutate()}
+                loading={triggerUpdate.isPending}
+                disabled={triggerUpdate.isPending}
+              >
+                Update deployment
+              </Button>
+            ) : (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void checkUpdateQuery.refetch()}
+                loading={checkUpdateQuery.isFetching && !checkUpdateQuery.isLoading}
+                disabled={checkUpdateQuery.isFetching}
+              >
+                Check for update
+              </Button>
+            )}
+          </div>
+          {triggerUpdateError && <p className="text-[12px] text-critical">{triggerUpdateError}</p>}
         </div>
       )}
 

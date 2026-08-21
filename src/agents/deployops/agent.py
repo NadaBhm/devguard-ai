@@ -392,10 +392,55 @@ class DeployOpsAgent:
 
     @xray_recorder.capture("_deploy_existing_ecs_revision")  # type: ignore[reportCallIssue]
     async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
-        """Create a new ECS task-definition revision for an existing service."""
+        """Redeploy the current commit's code onto an EXISTING ECS service.
+
+        Builds and pushes fresh image(s) (reusing the same
+        _build_and_push_image() the normal deploy() path uses), registers a
+        new task-definition revision pointing at them, and updates the
+        service -- deliberately skipping Terraform entirely, since the whole
+        point of this path is refreshing an already-live service instead of
+        re-provisioning infrastructure that already exists.
+
+        FIX (previously): this method used to only bump a DEPLOYMENT_REVISION
+        env var and leave containerDefinitions[].image untouched, so it
+        silently kept redeploying the OLD image on every "update" -- never
+        building or pushing anything new. See ExistingDeploymentInfo in
+        src/agents/orchestrator/state.py for how the target cluster/service
+        gets resolved before this method ever runs.
+        """
+        job_id = payload.job_id
         region = payload.aws_config.region
         cluster = payload.aws_config.model_dump().get("ecs_cluster") or "todo-app-cluster"
         service_name = payload.aws_config.model_dump().get("service_name") or "todo-app-dev-frontend"
+
+        workspace_dir = self._workspace_dir(job_id)
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        repo_url = (payload.metadata or {}).get("repo_url")
+        if repo_url:
+            from src.lib.repo import clone_repo
+            try:
+                clone_repo(repo_url, workspace_dir)
+                self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
+            except Exception as exc:  # noqa: BLE001 - surface as failed deploy
+                self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
+                return {"status": "failed", "job_id": job_id, "error": f"source clone failed: {exc}"}
+
+        await self._write_artifacts(payload.artifacts, workspace_dir)
+
+        # Built up front, before touching the live service: a build/push
+        # failure must never leave the running task definition half-updated.
+        built_images: Dict[str, str] = {}
+        for docker_image in payload.artifacts.docker_images:
+            image_uri = await self._build_and_push_image(docker_image, payload.aws_config, job_id)
+            if not image_uri:
+                self.logger.error(f"Image build/push failed for {docker_image.name}")
+                return {
+                    "status": "failed",
+                    "job_id": job_id,
+                    "error": f"image build/push failed: {docker_image.name}",
+                }
+            built_images[docker_image.name] = image_uri
+
         aws = AWSClient(region=region)
         try:
             ecs = aws.ecs()
@@ -408,6 +453,11 @@ class DeployOpsAgent:
                 environment = {item["name"]: item.get("value", "") for item in container.get("environment", [])}
                 environment["DEPLOYMENT_REVISION"] = str(revision)
                 container["environment"] = [{"name": key, "value": value} for key, value in environment.items()]
+                # terraform_generator.py sets containerDefinitions[].name to
+                # the same docker_images[].name it was built from, so this
+                # match is exact -- for one container or several.
+                if container.get("name") in built_images:
+                    container["image"] = built_images[container["name"]]
 
             register_args = {
                 key: task[key]

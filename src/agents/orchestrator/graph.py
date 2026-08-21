@@ -208,6 +208,10 @@ def run_workflow(
     repo_url: str,
     thread_id: Optional[str] = None,
     on_node_progress: Optional[Callable[[str, dict], None]] = None,
+    *,
+    is_update: bool = False,
+    existing_deployment: Optional[dict] = None,
+    previous_monthly_cost_usd: Optional[float] = None,
 ) -> OrchestratorState:
     """
     Run the complete orchestrator workflow for a repository.
@@ -219,9 +223,21 @@ def run_workflow(
     on_node_progress: optional callback invoked as each graph node completes,
     (node_name, state_snapshot). The backend uses it to stream per-node
     progress over WebSocket instead of only coarse milestones.
+
+    is_update / existing_deployment / previous_monthly_cost_usd: set by the
+    backend for an "update deployment" run (a brand-new job for a project
+    that's already deployed) -- resolved from the DB before this call, since
+    the orchestrator itself never touches the database. Threaded straight
+    into the initial state; see ExistingDeploymentInfo in state.py.
     """
     graph = get_orchestrator_graph()
-    state = create_initial_state(repo_url, job_id=thread_id)
+    state = create_initial_state(
+        repo_url,
+        job_id=thread_id,
+        is_update=is_update,
+        existing_deployment=existing_deployment,
+        previous_monthly_cost_usd=previous_monthly_cost_usd,
+    )
     config = {"configurable": {"thread_id": thread_id or state["job_id"]}}
 
     logger.info(f"Starting workflow for job {state['job_id']} | repo: {repo_url}")

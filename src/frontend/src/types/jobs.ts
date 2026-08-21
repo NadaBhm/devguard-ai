@@ -82,6 +82,11 @@ export interface GateContext {
   breakdown?: CostItem[]
   iteration?: number
   max_iterations?: number
+  /** Only set on an "update deployment" run's gate 2 — the cost already
+   * being paid before this update, for comparison. */
+  previous_monthly_cost_usd?: number
+  /** monthly_cost_usd - previous_monthly_cost_usd; only set alongside it. */
+  cost_delta_usd?: number
 }
 
 export interface InfracostIteration {

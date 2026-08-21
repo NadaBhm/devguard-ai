@@ -92,6 +92,18 @@ def human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
     can_regenerate = iterations_done < MAX_INFRACOST_ITERATIONS
     actions = ["approve", "reject"] + (["regenerate"] if can_regenerate else [])
 
+    # "Update deployment" runs: previous_monthly_cost_usd is resolved by the
+    # backend (from the project's prior InfraCost estimates) and threaded
+    # through create_initial_state -- None on a normal, non-update run, so
+    # cost_delta_usd stays None too and the frontend simply doesn't render
+    # those rows (see GateApproval.tsx's GateDetails).
+    previous_monthly_cost_usd = state.get("previous_monthly_cost_usd")
+    cost_delta_usd = (
+        monthly_cost - previous_monthly_cost_usd
+        if previous_monthly_cost_usd is not None
+        else None
+    )
+
     approval = interrupt({
         "gate": "gate_2_pre_deployops",
         "message": "InfraCost complete. Review cost estimate and approve deployment?",
@@ -102,6 +114,8 @@ def human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
             "warnings": warnings,
             "iteration": iterations_done,
             "max_iterations": MAX_INFRACOST_ITERATIONS,
+            "previous_monthly_cost_usd": previous_monthly_cost_usd,
+            "cost_delta_usd": cost_delta_usd,
         },
         "actions": actions,
     })

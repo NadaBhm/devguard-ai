@@ -48,6 +48,13 @@ export interface ArtifactsEditResponse {
   terraform_artifacts: TerraformArtifact[]
 }
 
+export interface CheckUpdateResponse {
+  job_id: string
+  has_update: boolean
+  latest_sha: string
+  current_sha: string | null
+}
+
 export interface DestroyRequest {
   confirm_service_name: string
 }
@@ -98,4 +105,8 @@ export const jobsApi = {
     client.post<DestroyResponse>(`/jobs/${jobId}/destroy`, body),
   deploymentRevisions: (jobId: string) =>
     client.get<DeploymentRevisionsResponse>(`/jobs/${jobId}/deployments/revisions`),
+  checkUpdate: (jobId: string) =>
+    client.get<CheckUpdateResponse>(`/jobs/${jobId}/check-update`),
+  triggerUpdate: (jobId: string) =>
+    client.post<JobResponse>(`/jobs/${jobId}/update`),
 }

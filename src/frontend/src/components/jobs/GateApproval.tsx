@@ -17,6 +17,11 @@ function GateDetails({ context }: { context?: GateContext }) {
   if (context.vulnerabilities_count != null) rows.push(["Vulnerabilities", String(context.vulnerabilities_count)])
   if (context.secrets_count != null) rows.push(["Secrets", String(context.secrets_count)])
   if (context.monthly_cost_usd != null) rows.push(["Est. monthly cost", formatCurrency(context.monthly_cost_usd)])
+  if (context.previous_monthly_cost_usd != null) rows.push(["Current monthly cost", formatCurrency(context.previous_monthly_cost_usd)])
+  if (context.cost_delta_usd != null) {
+    const sign = context.cost_delta_usd > 0 ? "+" : ""
+    rows.push(["Cost delta", `${sign}${formatCurrency(context.cost_delta_usd)}/mo`])
+  }
   if (context.architecture) rows.push(["Architecture", context.architecture])
 
   if (rows.length === 0) return null

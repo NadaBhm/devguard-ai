@@ -986,7 +986,8 @@ class DeployOpsAgent:
                 process.kill()
                 await process.wait()
                 return -1, "", f"timed out after {timeout}s"
-            return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+            returncode = process.returncode if process.returncode is not None else -1
+            return returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
         with tempfile.TemporaryDirectory() as tmpdir:
             self._prepare_docker_config(tmpdir)
             env = os.environ.copy()
@@ -1004,7 +1005,8 @@ class DeployOpsAgent:
                 process.kill()
                 await process.wait()
                 return -1, "", f"timed out after {timeout}s"
-            return process.returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
+            returncode = process.returncode if process.returncode is not None else -1
+            return returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
 
     @xray_recorder.capture("_build_and_push_image")  # type: ignore[reportCallIssue]
     async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:

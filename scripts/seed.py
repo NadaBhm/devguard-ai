@@ -288,16 +288,16 @@ def seed_agent_tasks(db: Session, runs: list[models.AnalysisRun]):
     for run in runs:
         for agent_name in AGENT_NAMES:
             # Not all runs have all agents (example: failed early)
-            if run.status == "failed" and agent_name != "codesec":
+            if bool(run.status == "failed") and agent_name != "codesec":
                 continue
-            if run.status == "rejected" and agent_name in ["infracost", "deployops"]:
+            if bool(run.status == "rejected") and agent_name in ["infracost", "deployops"]:
                 continue
             
             task = models.AgentTask(
                 run_id=run.id,
                 agent_name=agent_name,
                 celery_task_id=str(uuid4()),
-                status="success" if run.status == "completed" else "failure",
+                status="success" if bool(run.status == "completed") else "failure",
                 started_at=run.started_at,
                 finished_at=run.completed_at,
                 retry_count=random.randint(0, 2),
@@ -315,7 +315,7 @@ def seed_findings(db: Session, runs: list[models.AnalysisRun]):
     count = 0
     
     for run in runs:
-        if run.status != "completed":
+        if bool(run.status != "completed"):
             continue
         
         num_findings = random.randint(5, 30)
@@ -356,7 +356,7 @@ def seed_cost_estimates(db: Session, runs: list[models.AnalysisRun]):
     count = 0
     
     for run in runs:
-        if run.status != "completed":
+        if bool(run.status != "completed"):
             continue
         
         architecture = random.choice(ARCHITECTURES)
@@ -423,7 +423,7 @@ def seed_terraform_artifacts(db: Session, runs: list[models.AnalysisRun]):
     count = 0
     
     for run in runs:
-        if run.status != "completed":
+        if bool(run.status != "completed"):
             continue
         
         artifacts = [
@@ -500,7 +500,7 @@ def seed_deployments(db: Session, runs: list[models.AnalysisRun]):
     count = 0
     
     for run in runs:
-        if run.status != "completed":
+        if bool(run.status != "completed"):
             continue
         
         # Not all completed runs have deployments
@@ -552,7 +552,7 @@ def seed_notifications(db: Session, runs: list[models.AnalysisRun], user: models
     count = 0
     
     for run in runs:
-        if run.status == "completed":
+        if bool(run.status == "completed"):
             if random.random() > 0.3:
                 notif = models.Notification(
                     user_id=user.id,
@@ -574,7 +574,7 @@ def seed_notifications(db: Session, runs: list[models.AnalysisRun], user: models
                     user_id=user.id,
                     run_id=run.id,
                     type="deployment",
-                    severity="info" if deployment.status == "succeeded" else "critical",
+                    severity="info" if bool(deployment.status == "succeeded") else "critical",
                     title=f"Deployment {deployment.status} for {run.project.repo_name}",
                     body=f"Environment: {deployment.environment}. Status: {deployment.status}.",
                     is_read=random.choice([True, False]),
@@ -583,7 +583,7 @@ def seed_notifications(db: Session, runs: list[models.AnalysisRun], user: models
                 db.add(notif)
                 count += 1
         
-        elif run.status == "failed":
+        elif bool(run.status == "failed"):
             notif = models.Notification(
                 user_id=user.id,
                 run_id=run.id,
@@ -606,7 +606,7 @@ def seed_cost_alerts(db: Session, runs: list[models.AnalysisRun], user: models.U
     count = 0
     
     for run in runs:
-        if run.status != "completed":
+        if bool(run.status != "completed"):
             continue
         
         deployment = db.query(models.Deployment).filter(models.Deployment.run_id == run.id).first()
@@ -629,7 +629,7 @@ def seed_cost_alerts(db: Session, runs: list[models.AnalysisRun], user: models.U
             actual_cost_usd=round(actual, 2),
             severity=random.choice(["warning", "critical"]),
             is_resolved=random.choice([True, False]),
-            created_at=deployment.applied_at + timedelta(days=random.randint(1, 7)) if deployment.applied_at else run.completed_at,
+            created_at=deployment.applied_at + timedelta(days=random.randint(1, 7)) if bool(deployment.applied_at) else run.completed_at,
             resolved_at=deployment.applied_at + timedelta(days=random.randint(8, 14)) if random.choice([True, False]) else None,
         )
         db.add(alert)

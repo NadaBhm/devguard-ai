@@ -554,6 +554,8 @@ def translate_infracost_to_deploy_payload(
             # Also regenerate Terraform for ec2 — the lambda terraform carries
             # a zip-based aws_lambda_function that will fail apply when the
             # compute type is remapped. Synthesize a valid ec2 stack instead.
+            _sys = None
+            _orig_path = None
             try:
                 import sys as _sys
                 import pathlib as _pathlib
@@ -562,8 +564,8 @@ def translate_infracost_to_deploy_payload(
                 _agent_cost = _pathlib.Path(__file__).resolve().parents[1] / "agentInfraCost"
                 if str(_agent_cost) not in _sys.path:
                     _sys.path.insert(0, str(_agent_cost))
-                from core.decision_engine import DecisionResult as _DecisionResult
-                from core.terraform_generator import TerraformContext as _TFContext, generate_terraform as _gen
+                from core.decision_engine import DecisionResult as _DecisionResult  # type: ignore[import]
+                from core.terraform_generator import TerraformContext as _TFContext, generate_terraform as _gen  # type: ignore[import]
 
                 _region = (aws_config.get("region") if isinstance(aws_config, dict) else None) or "us-east-1"
                 _first = artifacts["docker_images"][0]
@@ -580,10 +582,11 @@ def translate_infracost_to_deploy_payload(
 
                 _lg.getLogger(__name__).warning("[%s] ec2 terraform regeneration failed, keeping original: %s", job_id, _exc)
             finally:
-                try:
-                    _sys.path[:] = _orig_path
-                except Exception:
-                    pass
+                if _sys is not None and _orig_path is not None:
+                    try:
+                        _sys.path[:] = _orig_path
+                    except Exception:
+                        pass
                 deploy_inputs["artifacts"] = artifacts
         else:
             raise ValueError(

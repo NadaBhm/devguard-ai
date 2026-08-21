@@ -149,16 +149,16 @@ if __name__ == "__main__":
         pass  # optional; not needed when running as a plain script
 
     _orig_clone = CodeSecAgent._clone_repo
-    _orig_validate = CodeSecAgent._validate_github_url
+    _orig_validate = CodeSecAgent._validate_github_url  # type: ignore[attr-defined]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         if USE_SAMPLE_REPO:
             repo_path = _make_sample_repo(Path(tmpdir))
-            CodeSecAgent._demo_repo_path = repo_path # type: ignore
-            CodeSecAgent._clone_repo = lambda self, repo_url, job_id: repo_path
-            CodeSecAgent._validate_github_url = lambda self, url: (url or "")
+            setattr(CodeSecAgent, "_demo_repo_path", repo_path)
+            setattr(CodeSecAgent, "_clone_repo", lambda self, repo_url, job_id: repo_path)
+            setattr(CodeSecAgent, "_validate_github_url", lambda self, url: (url or ""))
         else:
-            CodeSecAgent._validate_github_url = lambda self, url: (url or "")
+            setattr(CodeSecAgent, "_validate_github_url", lambda self, url: (url or ""))
 
         agent = CodeSecAgent(clone_dir=str(Path(tmpdir) / "clones"))
 
@@ -170,8 +170,8 @@ if __name__ == "__main__":
 
         result = agent.analyze_sync(REPO_URL, job_id="demo-001")
 
-        CodeSecAgent._clone_repo = _orig_clone
-        CodeSecAgent._validate_github_url = _orig_validate
+        setattr(CodeSecAgent, "_clone_repo", _orig_clone)
+        setattr(CodeSecAgent, "_validate_github_url", _orig_validate)
 
         print("\n" + "=" * 70)
         print("   RESULT")

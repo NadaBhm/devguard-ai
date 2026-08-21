@@ -14,6 +14,7 @@ import logging
 import tempfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -179,8 +180,8 @@ def _create_job_for_repo(
     commit_sha: str,
     commit_message: str | None,
 ):
-    project = _get_or_create_project(db, current_user.id, repo_url, default_branch)
-    run = _create_run(db, project, current_user.id, commit_sha, commit_message)
+    project = _get_or_create_project(db, str(current_user.id), repo_url, default_branch)
+    run = _create_run(db, project, str(current_user.id), commit_sha, commit_message)
 
     logger.info(f"Starting orchestrator for run {run.id} | repo {repo_url}")
     publish_progress(str(run.id), phase="start", progress=5, message="Job started")
@@ -197,10 +198,12 @@ def _create_job_for_repo(
         logger.error(f"run_workflow failed for {run.id}: {exc}", exc_info=True)
         state = {"status": "failed", "error": str(exc), "job_id": str(run.id)}
 
-    run = update_run_state(db, str(run.id), state)
-    _publish(state, 30, f"Orchestrator status: {state.get('status')}")
+    state = cast(dict[Any, Any], state)
 
-    gate = _current_gate(state)
+    run = update_run_state(db, str(run.id), dict(state))
+    _publish(dict(state), 30, f"Orchestrator status: {state.get('status')}")
+
+    gate = _current_gate(dict(state))
     if gate:
         publish_gate(str(run.id), gate, "awaiting_approval")
 
@@ -210,7 +213,7 @@ def _create_job_for_repo(
         "orchestrator_status": state.get("status"),
         "gate": gate,
         "mode": report_mode(),
-        "state": serialize_state(state),
+        "state": serialize_state(dict(state)),
     }
 
 
@@ -265,7 +268,7 @@ def approve_job(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
     try:
         from src.agents.orchestrator.graph import resume_workflow
@@ -291,27 +294,27 @@ def approve_job(
         logger.error(f"resume_workflow failed for {job_id}: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Resume failed: {exc}") from exc
 
-    run = update_run_state(db, job_id, state)
+    run = update_run_state(db, job_id, dict(state))
 
     if state.get("status") in ("completed", "rolled_back", "failed", "rejected"):
         # The orchestrator runs in-process, so write results synchronously to
         # the schema tables (persist_results is idempotent).
-        persist_results(db, job_id, state)
-        _publish(state, 100, f"Run finished: {state.get('status')}")
+        persist_results(db, job_id, dict(state))
+        _publish(dict(state), 100, f"Run finished: {state.get('status')}")
         publish_results_ready(job_id)
     else:
-        _publish(state, 60, f"Orchestrator status: {state.get('status')}")
-        gate = _current_gate(state)
-        if gate:
-            publish_gate(job_id, gate, "awaiting_approval")
+        _publish(dict(state), 60, f"Orchestrator status: {state.get('status')}")
+    gate = _current_gate(dict(state))
+    if gate:
+        publish_gate(job_id, gate, "awaiting_approval")
 
     return {
         "job_id": job_id,
         "status": run.status,
         "orchestrator_status": state.get("status"),
-        "gate": _current_gate(state),
+        "gate": _current_gate(dict(state)),
         "mode": report_mode(),
-        "state": serialize_state(state),
+        "state": serialize_state(dict(state)),
     }
 
 
@@ -333,9 +336,9 @@ def edit_artifacts(
     if not body.files:
         raise HTTPException(status_code=422, detail="No artifact edits supplied")
 
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
-    state = run.run_metadata or {}
+    state = dict(run.run_metadata or {})  # type: ignore
     gate = _current_gate(state)
     if gate != "gate_2_pre_deployops":
         raise HTTPException(
@@ -361,8 +364,8 @@ def edit_artifacts(
     edited_at = datetime.utcnow()
 
     # Apply to both the deploy-consumed copy and the tab-consumed copy.
-    _apply_artifact_edits(state, body.files)
-    update_run_state(db, job_id, state)
+    _apply_artifact_edits(dict(state), body.files)
+    update_run_state(db, job_id, dict(state))
 
     # Rewrite the materialized artifact rows with the audit trail (bear in
     # mind persist_results deletes/recreates rows at terminal status, so the
@@ -480,7 +483,7 @@ def rollback_job(
     """Roll back a run's most recent deployment to a previous ECS
     task-definition revision, delegating to DeployOpsAgent using the AWS
     config captured in the persisted deployment record."""
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
     deployment = (
         db.query(models.Deployment)
@@ -539,12 +542,12 @@ def rollback_job(
         raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
 
     if result.get("status") == "success":
-        deployment.status = "rolled_back"
-        deployment.rollback_reason = body.reason
+        deployment.status = "rolled_back"  # type: ignore[assignment]
+        deployment.rollback_reason = body.reason  # type: ignore[assignment]
         db.commit()
         if run.status not in ("completed", "failed", "rejected"):
-            run.status = "rolled_back"
-            run.completed_at = datetime.utcnow()
+            run.status = "rolled_back"  # type: ignore[assignment]
+            run.completed_at = datetime.utcnow()  # type: ignore[assignment]
             db.commit()
         publish_results_ready(job_id)
     else:
@@ -599,7 +602,7 @@ def destroy_job(
     the exact service_name as confirmation (feature/destroy-deployment
     decision #2) -- enforced server-side, not just via a disabled UI button.
     """
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
     deployment = (
         db.query(models.Deployment)
@@ -636,11 +639,11 @@ def destroy_job(
 
     status = result.get("status")
     if status == "success":
-        deployment.status = "destroyed"
+        deployment.status = "destroyed"  # type: ignore[assignment]
         db.commit()
         if run.status not in ("completed", "failed", "rejected"):
-            run.status = "destroyed"
-            run.completed_at = datetime.utcnow()
+            run.status = "destroyed"  # type: ignore[assignment]
+            run.completed_at = datetime.utcnow()  # type: ignore[assignment]
             db.commit()
         publish_results_ready(job_id)
         return {"job_id": job_id, "status": "destroyed", "result": result}
@@ -658,7 +661,7 @@ def list_deployment_revisions(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    _get_owned_run(db, job_id, current_user.id)
+    _get_owned_run(db, job_id, str(current_user.id))
 
     deployment = (
         db.query(models.Deployment)
@@ -745,7 +748,7 @@ def get_job_results(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
     def _rows(query):
         return [dict((c.name, getattr(r, c.name)) for c in r.__table__.columns) for r in query]
@@ -773,7 +776,7 @@ def get_job_results(
     # The normalized tables are only materialized at a terminal status. For an
     # in-flight or gate-paused run, derive the same rows from run_metadata so
     # the UI can render CodeSec/Terraform/InfraCost tabs live.
-    live = derive_results_from_state(run.run_metadata or {})
+    live = derive_results_from_state(dict(run.run_metadata or {}))  # type: ignore
     if not findings and live["codesec_findings"]:
         findings = live["codesec_findings"]
     if not estimates and live["infracost_estimates"]:
@@ -798,7 +801,7 @@ def download_sbom(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
     sbom = (run.run_metadata or {}).get("codesec_result", {}).get("sbom")
     if not sbom:
@@ -819,7 +822,7 @@ def download_report(
     current_user: models.User = Depends(get_current_user),
 ):
     """Serve the final HTML/PDF report for a job, regenerating it on demand."""
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
     from src.agents.orchestrator.report import DEFAULT_REPORT_DIR, generate_report
 
@@ -836,7 +839,7 @@ def download_report(
         # The report is keyed by job_id (normalized to the DB run id on resume),
         # so regenerate it from the persisted state if the file is missing.
         try:
-            generate_report(run.run_metadata or {}, output_dir=report_dir, want_pdf=False)
+            generate_report(dict(run.run_metadata or {}), output_dir=report_dir, want_pdf=False)  # type: ignore
         except Exception as exc:
             logger.error(f"Report regeneration failed for {job_id}: {exc}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}") from exc
@@ -853,9 +856,9 @@ def get_job(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
 
-    state = run.run_metadata or {}
+    state: dict[str, Any] = dict(run.run_metadata or {})  # type: ignore[call-overload,arg-type,assignment]
     return {
         "job_id": str(run.id),
         "status": run.status,
@@ -863,7 +866,7 @@ def get_job(
         "completed_at": run.completed_at,
         "duration_seconds": run.duration_seconds,
         "orchestrator_status": state.get("status"),
-        "gate": _current_gate(state),
+        "gate": _current_gate(dict(state)),
         "mode": report_mode(),
         "state": state,
     }
@@ -877,7 +880,7 @@ def list_jobs(
 ):
     runs = (
         db.query(models.AnalysisRun)
-        .filter(models.AnalysisRun.triggered_by == current_user.id)
+        .filter(models.AnalysisRun.triggered_by == str(current_user.id))
         .order_by(models.AnalysisRun.started_at.desc())
         .limit(100)
         .all()

@@ -27,9 +27,8 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 from datetime import datetime, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 from langgraph.graph import StateGraph, END
 import sqlite3
@@ -91,37 +90,22 @@ def _build_checkpointer() -> SqliteSaver:
 # =============================================================================
 
 
-def build_orchestrator_graph() -> StateGraph:
+def _wrap_node(node_func, node_name: str):
+    def _node(state: OrchestratorState, config: Any = None) -> OrchestratorState:
+        return safe_node_wrapper(node_func, node_name, state)
+    return _node
+
+
+def build_orchestrator_graph() -> Any:
     builder = StateGraph(OrchestratorState)
 
-    builder.add_node(
-        "codesec_agent",
-        lambda s: safe_node_wrapper(codesec_agent_impl, "codesec_agent", s)
-    )
-    builder.add_node(
-        "human_gate_1",
-        lambda s: safe_node_wrapper(human_gate_1_impl, "human_gate_1", s)
-    )
-    builder.add_node(
-        "infracost_agent",
-        lambda s: safe_node_wrapper(infracost_agent_impl, "infracost_agent", s)
-    )
-    builder.add_node(
-        "human_gate_2",
-        lambda s: safe_node_wrapper(human_gate_2_impl, "human_gate_2", s)
-    )
-    builder.add_node(
-        "deployops_agent",
-        lambda s: safe_node_wrapper(deployops_agent_impl, "deployops_agent", s)
-    )
-    builder.add_node(
-        "health_check",
-        lambda s: safe_node_wrapper(health_check_impl, "health_check", s)
-    )
-    builder.add_node(
-        "generate_report",
-        lambda s: safe_node_wrapper(generate_report_impl, "generate_report", s)
-    )
+    builder.add_node("codesec_agent", _wrap_node(codesec_agent_impl, "codesec_agent"))
+    builder.add_node("human_gate_1", _wrap_node(human_gate_1_impl, "human_gate_1"))
+    builder.add_node("infracost_agent", _wrap_node(infracost_agent_impl, "infracost_agent"))
+    builder.add_node("human_gate_2", _wrap_node(human_gate_2_impl, "human_gate_2"))
+    builder.add_node("deployops_agent", _wrap_node(deployops_agent_impl, "deployops_agent"))
+    builder.add_node("health_check", _wrap_node(health_check_impl, "health_check"))
+    builder.add_node("generate_report", _wrap_node(generate_report_impl, "generate_report"))
 
     builder.set_entry_point("codesec_agent")
 
@@ -175,10 +159,10 @@ def build_orchestrator_graph() -> StateGraph:
 # interrupt() would become unresumable. Built lazily on first use (typically
 # once at FastAPI app startup).
 
-_graph_singleton: Optional[StateGraph] = None
+_graph_singleton: Optional[Any] = None
 
 
-def get_orchestrator_graph() -> StateGraph:
+def get_orchestrator_graph() -> Any:
     """
     Return the single shared, compiled graph, building it once (lazily) so
     checkpoints survive across run_workflow / resume_workflow calls in the
@@ -203,6 +187,15 @@ def reset_orchestrator_graph() -> None:
 # =============================================================================
 # SECTION 8: PUBLIC API
 # =============================================================================
+
+def _get_current_state(graph, config, fallback_state: Any) -> Any:
+    """Safely fetch the latest checkpointed state from the graph."""
+    try:
+        snapshot = graph.get_state(config)
+        return dict(snapshot.values) if snapshot else fallback_state
+    except Exception:
+        return fallback_state
+
 
 def run_workflow(
     repo_url: str,
@@ -231,23 +224,36 @@ def run_workflow(
         for event in graph.stream(state, config):
             for node_name, node_state in event.items():
                 if node_name == "__interrupt__":
-                    if final_state is None:
-                        final_state = dict(state)
-                    final_state["__interrupt__"] = list(node_state)
+                    # CRITICAL FIX: fetch the REAL checkpointed state, not the
+                    # initial input state. Otherwise all progress before the
+                    # human gate is lost and resumption breaks.
+                    final_state = _get_current_state(graph, config, state)
+
+                    # Normalize LangGraph >=1.x Interrupt objects to plain dicts
+                    interrupt_values = [
+                        i.value if hasattr(i, "value") else i for i in node_state
+                    ]
+                    final_state["__interrupt__"] = interrupt_values
+
                     if on_node_progress:
-                        on_node_progress("human_gate", dict(node_state=list(node_state)))
+                        on_node_progress("human_gate", dict(node_state=interrupt_values))
                 else:
                     final_state = node_state
                     if on_node_progress:
                         on_node_progress(node_name, node_state)
+
         if final_state is None:
             final_state = dict(state)
+
         logger.info(f"Workflow completed for job {state['job_id']} | status: {final_state['status']}")
-        return final_state
+        return cast(OrchestratorState, final_state)
+
     except Exception as e:
         logger.error(f"Workflow failed for job {state['job_id']}: {e}")
-        state["status"] = "failed"
-        state["error_log"].append({
+        # FIX: recover latest checkpointed state so we don't wipe node results
+        error_state = _get_current_state(graph, config, state)
+        error_state["status"] = "failed"
+        error_state["error_log"].append({
             "node": "orchestrator",
             "attempt": 1,
             "max_attempts": 1,
@@ -256,7 +262,7 @@ def run_workflow(
             "stack_trace": str(e.__traceback__) if e.__traceback__ else None,
             "resolved": False,
         })
-        return state
+        return cast(OrchestratorState, error_state)
 
 
 def resume_workflow(
@@ -284,19 +290,26 @@ def resume_workflow(
         for event in graph.stream(Command(resume=resume_data), config):
             for node_name, node_state in event.items():
                 if node_name == "__interrupt__":
-                    if final_state is None:
-                        final_state = dict(get_orchestrator_graph().get_state(config).values)
-                    final_state["__interrupt__"] = list(node_state)
+                    final_state = _get_current_state(graph, config, {})
+
+                    interrupt_values = [
+                        i.value if hasattr(i, "value") else i for i in node_state
+                    ]
+                    final_state["__interrupt__"] = interrupt_values
+
                     if on_node_progress:
-                        on_node_progress("human_gate", dict(node_state=list(node_state)))
+                        on_node_progress("human_gate", dict(node_state=interrupt_values))
                 else:
                     final_state = node_state
                     if on_node_progress:
                         on_node_progress(node_name, node_state)
+
         if final_state is None:
-            final_state = dict(get_orchestrator_graph().get_state(config).values)
+            final_state = _get_current_state(graph, config, {})
+
         logger.info(f"Workflow resumed for thread {thread_id} | status: {final_state.get('status')}")
-        return final_state
+        return cast(OrchestratorState, final_state)
+
     except Exception as e:
         logger.error(f"Resuming workflow failed for thread {thread_id}: {e}")
         raise

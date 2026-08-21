@@ -122,7 +122,7 @@ def _record_error(
 def safe_node_wrapper(
     node_func: Callable[[OrchestratorState], OrchestratorState],
     node_name: str,
-    state: OrchestratorState,
+    state: Any,
 ) -> OrchestratorState:
     """
     Run a graph node with error capture and, for agent nodes, retry/backoff.

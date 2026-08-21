@@ -513,7 +513,11 @@ def test_trigger_update_gate2_context_includes_cost_delta(_clean_db, auth_header
     body = r.json()
     assert body["gate"] == "gate_2_pre_deployops"
 
-    interrupt_ctx = body["state"]["__interrupt__"][0]["value"]["context"]
+    # run_workflow normalizes interrupt payloads to plain dicts up front
+    # (graph.py); serialize_state's _jsonable_interrupt then passes them
+    # through as-is, so context lives directly on the entry -- no "value"
+    # wrapper layer.
+    interrupt_ctx = body["state"]["__interrupt__"][0]["context"]
     assert interrupt_ctx["previous_monthly_cost_usd"] is not None
     assert interrupt_ctx["cost_delta_usd"] == pytest.approx(
         interrupt_ctx["monthly_cost_usd"] - interrupt_ctx["previous_monthly_cost_usd"]

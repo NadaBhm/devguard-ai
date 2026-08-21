@@ -1052,7 +1052,18 @@ def _current_gate(state: dict) -> str | None:
     interrupts = state.get("__interrupt__")
     if isinstance(interrupts, list) and interrupts:
         entry = interrupts[0]
-        value = entry.get("value", {}) if isinstance(entry, dict) else getattr(entry, "value", {})
+        # run_workflow now normalizes LangGraph Interrupt objects to plain
+        # dicts up front (graph.py), storing {"gate": ..., "context": ...}
+        # directly rather than wrapped in an outer {"value": {...}} -- match
+        # RunDetailPage.tsx's interruptInfo(), which handles both shapes the
+        # same defensive way, in case an older checkpoint still has the
+        # wrapped form.
+        if isinstance(entry, dict) and "value" in entry:
+            value = entry.get("value", {})
+        elif isinstance(entry, dict):
+            value = entry
+        else:
+            value = getattr(entry, "value", {})
         if isinstance(value, dict):
             gate = value.get("gate")
             if gate:

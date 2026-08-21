@@ -36,3 +36,24 @@ src/backend/tests/test_reports/
 **.pdf
 
 orchestrator_checkpoints.sqlite*
+
+# =============================================================================
+# Generated test artifacts (never commit test output dumps)
+# =============================================================================
+pytest_output.txt
+test_output.txt
+*_output.txt
+src/**/pytest_output.txt
+
+# =============================================================================
+# Generated payload dumps — keep fixtures in tests/fixtures/ instead
+# =============================================================================
+/codesec_result.json
+/infracost_result.json
+/deployops_result.json
+/src/agents/**/*_result.json
+
+# =============================================================================
+# Demo / scratch scripts that belong in scripts/, not src/
+# =============================================================================
+/src/agents/**/*_demo.py

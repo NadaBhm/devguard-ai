@@ -1,15 +1,6 @@
 """
 DevGuard AI - Orchestrator Human Approval Gates
-==================================================
-Human-in-the-loop approval nodes. Each gate pauses the LangGraph workflow
-via interrupt() and waits for a human decision (approve/reject), delivered
-through resume_workflow(thread_id, resume_data) in graph.py.
-
-CDC Reference: US-2.2.3 (approval gates so the user controls critical actions)
-
-Split out of graph.py (originally Section 4).
-
-Owner: Hbib (Subgroup 2 - Execution & Control)
+Pause the LangGraph workflow via interrupt() and wait for human decision.
 """
 
 from __future__ import annotations
@@ -25,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 
 def human_gate_1_impl(state: OrchestratorState) -> OrchestratorState:
-    """Human Approval Gate 1: After CodeSec, before InfraCost. CDC: US-2.2.3"""
     logger.info(f"[{state['job_id']}] HUMAN GATE 1: Pre-InfraCost approval required")
 
     state["status"] = "awaiting_approval_gate_1"
@@ -77,19 +67,13 @@ def human_gate_1_impl(state: OrchestratorState) -> OrchestratorState:
 
 
 def human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
-    """Human Approval Gate 2: After InfraCost, before DeployOps. CDC: US-2.2.3"""
     logger.info(f"[{state['job_id']}] HUMAN GATE 2: Pre-DeployOps approval required")
 
     state["status"] = "awaiting_approval_gate_2"
     state["orchestrator_metadata"]["current_node"] = "human_gate_2"
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    # A re-pause after a regeneration round must look like a fresh pause:
-    # the previous round left approved=False + requested_changes set, which
-    # would make the frontend treat this gate as already decided and never
-    # show the approval card again. Reset the decision fields in place
-    # BEFORE interrupt() - LangGraph only checkpoints in-place mutations of
-    # nested dict channels at an interrupt, not scalar rebinds like status.
+    # Reset decision fields before re-pause so the frontend treats it as a fresh gate.
     gate = state["human_gates"]["gate_2_pre_deployops"]
     gate["approved"] = None
     gate["comment"] = None
@@ -129,7 +113,6 @@ def human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
     gate["approved_by"] = approval.get("approved_by", "unknown")
 
     if approval.get("request_regeneration"):
-        # User wants the InfraCost artifacts regenerated from a free-form prompt.
         feedback = approval.get("comment", "").strip()
         gate["requested_changes"] = feedback
         state["infracost_feedback"] = feedback
@@ -139,9 +122,6 @@ def human_gate_2_impl(state: OrchestratorState) -> OrchestratorState:
         )
     elif not gate["approved"]:
         logger.warning(f"[{state['job_id']}] Gate 2 REJECTED. Workflow halted.")
-        # BUGFIX v1.0.4: was "failed" - now "rejected" for consistency with
-        # gate 1, so monitoring can distinguish a human "no" from a real
-        # technical failure.
         state["status"] = "rejected"
         state["error_log"].append({
             "node": "human_gate_2",

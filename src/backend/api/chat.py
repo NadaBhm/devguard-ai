@@ -1,19 +1,17 @@
 """
-Chat API - wired to the orchestrator's chat module (T-3.10 / T-3.11).
+Chat API - wired to the orchestrator's chat module.
 
-FIXED (2026-08-09): this router used to call lib.rag.retrieval.ask_repo()
-directly, bypassing src/agents/orchestrator/chat.py: no conversation memory,
-no job context, and `sources` was always [] because ask_repo never returns a
-tuple.
-
-Now it loads the persisted orchestrator state for the job and calls the
-orchestrator's chat(), which combines that job context with Nada's RAG
-retrieval and this job's conversation history.
+Loads the persisted job state and calls orchestrator.chat(), which combines
+pipeline results with RAG retrieval and conversation history.
 """
+from typing import Optional, cast
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from pathlib import Path
 from sqlalchemy.orm import Session
+
+from src.agents.orchestrator.state import OrchestratorState
 
 from .. import auth, models
 from ..database import get_db
@@ -38,7 +36,7 @@ class IngestRequest(BaseModel):
     job_id: str
 
 
-def _load_job_state(job_id: str, db: Session, user_id: str) -> dict | None:
+def _load_job_state(job_id: str, db: Session, user_id: str) -> Optional[OrchestratorState]:
     """Return the persisted AnalysisRun.run_metadata, scoped to the user.
 
     Returns None if the job doesn't exist (or isn't the user's) - chat()
@@ -52,9 +50,9 @@ def _load_job_state(job_id: str, db: Session, user_id: str) -> dict | None:
         )
         .first()
     )
-    if not run or not run.run_metadata:
+    if run is None or run.run_metadata is None:
         return None
-    return run.run_metadata
+    return cast(OrchestratorState, run.run_metadata)
 
 
 @router.post("/ask", response_model=ChatResponse)
@@ -66,7 +64,7 @@ async def ask_question(
     try:
         from src.agents.orchestrator.chat import chat as orchestrator_chat
 
-        state = _load_job_state(req.job_id, db, current_user.id)
+        state = _load_job_state(req.job_id, db, str(current_user.id))
         result = orchestrator_chat(req.job_id, req.query, state)
 
         return ChatResponse(

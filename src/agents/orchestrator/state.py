@@ -1,18 +1,6 @@
 """
 DevGuard AI - Orchestrator State Definitions
-==============================================
-All TypedDict definitions for the orchestrator's LangGraph state, plus the
-factory function that builds a fresh initial state for a new workflow.
-
-Split out of graph.py (originally Section 1, 1.1, and create_initial_state
-from Section 8) so that state shape can be reviewed/changed independently
-from graph wiring, node logic, and human-gate logic.
-
-Owner: Hbib (Subgroup 2 - Execution & Control)
-
-NOTE: codesec_result is kept as a flexible dict (not a strict TypedDict) to
-accept Nada's exact CodeSecResult payload without transformation (Option 1
-strategy - "accept everything from Nada").
+TypedDict definitions and the factory for a fresh workflow state.
 """
 
 from __future__ import annotations
@@ -21,20 +9,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional, TypedDict
 
-# Single source of truth for the orchestrator version. graph.py imports this
-# rather than repeating the string, so the value reported in state metadata
-# and the value logged at compile time can never drift apart again (they did:
-# state said 1.0.5 while the graph said 1.0.7).
 GRAPH_VERSION = "1.3.1"
-
-# Max feedback-driven regeneration rounds at Gate 2 before the user is forced
-# to approve/reject. Guards against runaway LLM loops (and cost).
 MAX_INFRACOST_ITERATIONS = 3
 
-
-# =============================================================================
-# SECTION 1: STATE DEFINITIONS
-# =============================================================================
 
 class InfraCostResult(TypedDict):
     architecture_recommendation: Literal["ecs_fargate", "lambda", "ec2", "hybrid"]
@@ -46,19 +23,11 @@ class InfraCostResult(TypedDict):
     region_comparison: list[dict]
 
 
-# =============================================================================
-# SECTION 1.1: DEPLOYOPS TYPED DICTS (ALIGNED WITH deployops-mock-schema.json)
-# =============================================================================
-
 class HealthCheckResult(TypedDict):
-    """
-    Health check result - aligned with deployops-mock-schema.json.
-    Required fields: passed, response_time_ms, status_code
-    """
     passed: bool
     response_time_ms: int
     status_code: int
-    checked_at: Optional[str]  # ISO 8601 date-time format
+    checked_at: Optional[str]
 
 
 class DeployOpsArtifactsTerraform(TypedDict):
@@ -93,25 +62,16 @@ class DeployOpsDeploymentConfig(TypedDict):
 
 class DeployOpsApproval(TypedDict):
     deploy_approved: bool
-    approved_by: str  # email format
+    approved_by: str
 
 
 class TerraformOutputs(TypedDict):
-    """Required Terraform outputs - aligned with deployops-mock-schema.json."""
     ecs_cluster_name: str
     service_name: str
     alb_dns: str
 
 
 class DeployOpsResult(TypedDict):
-    """
-    Output from DeployOps Agent (Oussema).
-    ALIGNED with deployops-mock-schema.json v1.0
-
-    Required fields (schema): job_id, deployment_status, deployed_url,
-    health_check, rollback_triggered, terraform_outputs
-    """
-    # ===== CHAMPS REQUIS par le schema =====
     job_id: str
     deployment_status: Literal["success", "failed", "rolled_back"]
     deployed_url: Optional[str]
@@ -119,9 +79,7 @@ class DeployOpsResult(TypedDict):
     rollback_triggered: bool
     rollback_reason: Optional[str]
     error: Optional[str]
-    terraform_outputs: TerraformOutputs  # Required, not Optional
-
-    # ===== CHAMPS OPTIONNELS du schema =====
+    terraform_outputs: TerraformOutputs
     artifacts: Optional[DeployOpsArtifacts]
     aws_config: Optional[DeployOpsAwsConfig]
     deployment_config: Optional[DeployOpsDeploymentConfig]
@@ -134,7 +92,7 @@ class HumanGate(TypedDict):
     comment: Optional[str]
     approved_at: Optional[str]
     approved_by: Optional[str]
-    requested_changes: Optional[str]  # user feedback prompt for regeneration
+    requested_changes: Optional[str]
 
 
 class HumanGates(TypedDict):
@@ -185,13 +143,6 @@ class FinalReport(TypedDict):
 
 
 class OrchestratorState(TypedDict):
-    """
-    Main state object for the LangGraph workflow.
-    ALIGNED with docs/api-contracts/orchestrator-input-schema.json
-
-    IMPORTANT: codesec_result is a flexible dict (Option 1 strategy).
-    It contains the EXACT payload from Nada's codesec-mock-schema.json.
-    """
     job_id: str
     repo_url: str
     status: Literal[
@@ -202,7 +153,7 @@ class OrchestratorState(TypedDict):
     ]
     created_at: str
     updated_at: str
-    codesec_result: Optional[dict]  # <-- Flexible dict for Nada's exact payload
+    codesec_result: Optional[dict]
     infracost_result: Optional[InfraCostResult]
     deployops_result: Optional[DeployOpsResult]
     human_gates: HumanGates
@@ -212,10 +163,6 @@ class OrchestratorState(TypedDict):
     infracost_feedback: Optional[str]
     infracost_iterations: list[InfracostIteration]
 
-
-# =============================================================================
-# STATE FACTORY
-# =============================================================================
 
 def create_initial_state(repo_url: str, job_id: str | None = None) -> OrchestratorState:
     now = datetime.now(timezone.utc).isoformat()

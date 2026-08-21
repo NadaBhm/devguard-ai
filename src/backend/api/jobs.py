@@ -2,10 +2,10 @@
 Job endpoints.
 
 The FastAPI process drives the LangGraph orchestrator in-process
-(get_orchestrator_graph built once at startup), because the orchestrator
-currently uses an in-memory MemorySaver checkpointer (graph.py). Each call to
-run_workflow / resume_workflow returns at the next human gate; the API persists
-the resulting state to Postgres when the run reaches a terminal state.
+(get_orchestrator_graph built once at startup). Each call to
+run_workflow / resume_workflow returns at the next human gate; the API
+persists the resulting state to Postgres when the run reaches a terminal
+state.
 """
 
 
@@ -494,13 +494,8 @@ def rollback_job(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    # deployops_result never carries an "aws_config" key (mock and real both
-    # go through translate_deployops_result(), whose only output shape is
-    # terraform_outputs{ecs_cluster_name, service_name, alb_dns}) -- reading
-    # infra["aws_config"] here always returned {}, so this endpoint 400'd on
-    # every single deployment. _extract_aws_config() (below, already used by
-    # destroy_job) resolves this correctly with the terraform_outputs
-    # fallback -- reuse it instead of this stale duplicate.
+    # deployops_result stores terraform_outputs, not aws_config; use the same
+    # _extract_aws_config() helper that destroy_job already uses.
     resolved = _extract_aws_config(deployment)
     region = resolved.get("region") or "us-east-1"
     ecs_cluster = resolved.get("ecs_cluster")
@@ -672,10 +667,8 @@ def list_deployment_revisions(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    # Same fix as rollback_job above: read via _extract_aws_config() (which
-    # falls back to terraform_outputs) instead of the never-populated
-    # "aws_config" key, which made this endpoint 400 on every deployment --
-    # including breaking the rollback picker UI that depends on this list.
+    # Use _extract_aws_config() (terraform_outputs fallback) instead of the
+    # unpopulated "aws_config" key.
     resolved = _extract_aws_config(deployment)
     region = resolved.get("region") or "us-east-1"
     ecs_cluster = resolved.get("ecs_cluster")
@@ -917,10 +910,8 @@ def _current_gate(state: dict) -> str | None:
     status = state.get("status")
     if status and status.startswith("awaiting_approval_gate"):
         return status
-    # The orchestrator also records pending gates in human_gates (required +
-    # approved=None). The frontend resolves the active gate the same way, so
-    # the backend must agree or artifact edits get rejected with a confusing
-    # "not paused" error.
+    # Fallback: check human_gates so artifact-edit validation agrees with
+    # the frontend.
     for gate_name in ("gate_1_pre_infracost", "gate_2_pre_deployops"):
         gate = (state.get("human_gates") or {}).get(gate_name)
         if isinstance(gate, dict) and gate.get("required") and gate.get("approved") is None:

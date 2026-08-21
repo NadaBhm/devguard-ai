@@ -32,8 +32,6 @@ def list_notifications(
                 "related_finding_id": n.related_finding_id,
                 "is_read": n.is_read,
                 "created_at": n.created_at,
-                # The notifications table has no read_at/dismissed_at columns
-                # yet (only is_read) -- always null rather than fabricated.
                 "read_at": None,
                 "dismissed_at": None,
             }
@@ -58,7 +56,7 @@ def mark_notification_read(
     )
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
-    notification.is_read = True
+    notification.is_read = True  # type: ignore[reportAttributeAccessIssue]
     db.commit()
     db.refresh(notification)
     return {"id": notification.id, "is_read": notification.is_read}

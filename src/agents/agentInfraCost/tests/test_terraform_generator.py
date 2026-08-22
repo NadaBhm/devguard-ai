@@ -57,8 +57,9 @@ def test_ecs_database_detected_adds_connection_placeholders() -> None:
     assert "var.db_password" in files.main_tf
     assert 'variable "db_password"' in files.variables_tf
     assert "sensitive   = true" in files.variables_tf
-    # never a real database resource -- only variable declarations
-    assert "aws_db_instance" not in files.main_tf
+    # provisioned DB alongside the app
+    assert "aws_db_instance" in files.main_tf
+    assert 'variable "create_db"' in files.variables_tf
 
 
 def test_ecs_no_database_detected_adds_no_db_placeholders() -> None:
@@ -86,7 +87,7 @@ def test_ecs_service_has_working_health_check_and_networking() -> None:
     assert "network_configuration" in files.main_tf
     assert "subnets          = var.subnet_ids" in files.main_tf
     assert "aws_lb_target_group" in files.main_tf
-    assert 'path                = "/health"' in files.main_tf
+    assert 'path                = "/"' in files.main_tf
     assert "load_balancer {" in files.main_tf
     assert 'variable "vpc_id"' in files.variables_tf
     assert 'variable "subnet_ids"' in files.variables_tf
@@ -105,9 +106,11 @@ def test_ecs_template_is_applyable_with_execution_role_and_logging() -> None:
 
     files = generate_terraform(decision, context)
 
-    # IAM execution role with the ECS-tasks assume-role policy
+    # IAM execution role with the ECS-tasks assume-role policy; the name is
+    # job-id-suffixed (constants.unique_resource_name) so concurrent deploys
+    # never collide on the same IAM role.
     assert "aws_iam_role" in files.main_tf
-    assert 'name = "devguard-task-execution-role"' in files.main_tf
+    assert 'name = "devguard-task-execution-role-550e8400"' in files.main_tf
     assert 'Principal' in files.main_tf
     assert 'Service = "ecs-tasks.amazonaws.com"' in files.main_tf
     assert "AmazonECSTaskExecutionRolePolicy" in files.main_tf
@@ -115,9 +118,9 @@ def test_ecs_template_is_applyable_with_execution_role_and_logging() -> None:
     assert "execution_role_arn        = aws_iam_role.ecs_task_execution.arn" in files.main_tf
     # CloudWatch log group + awslogs container configuration pinned to `var.region`
     assert "aws_cloudwatch_log_group" in files.main_tf
-    assert 'name              = "/ecs/app-service"' in files.main_tf
+    assert 'name              = "/ecs/app-service-550e8400"' in files.main_tf
     assert 'logDriver = "awslogs"' in files.main_tf
-    assert '"awslogs-group"         = "/ecs/app-service"' in files.main_tf
+    assert '"awslogs-group"         = "/ecs/app-service-550e8400"' in files.main_tf
     assert '"awslogs-region"        = var.region' in files.main_tf
 
 

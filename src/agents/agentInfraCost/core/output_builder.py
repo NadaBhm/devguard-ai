@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Final
 from pathlib import Path
 
 from core.constants import (
@@ -68,6 +69,19 @@ from models.output_schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Language-aware base image for repos without a Dockerfile.
+_FALLBACK_BASE_IMAGES: Final[dict[str, str]] = {
+    "python": "python:3.12-slim",
+    "javascript": "node:20-alpine",
+    "typescript": "node:20-alpine",
+    "go": "golang:1.21-alpine",
+    "java": "maven:3.9-eclipse-temurin-17",
+    "php": "php:8.2-cli",
+    "ruby": "ruby:3.2-slim",
+    "rust": "rust:1.75-slim",
+    "csharp": "mcr.microsoft.com/dotnet/sdk:8.0",
+}
 
 
 def _health_check_from_terraform(main_tf: str) -> tuple[int, str]:
@@ -196,9 +210,13 @@ def resolve_docker_artifacts(
     containers = analysis.stack_detection.containers or [
         analysis.stack_detection.container
     ]
+    # Language-aware base image for repos without a Dockerfile.
+    fallback_base = _FALLBACK_BASE_IMAGES.get(
+        analysis.stack_detection.primary_language, "python:3.12-slim"
+    )
     images: list[DockerImage] = []
     for index, container in enumerate(containers):
-        base_image = container.base_image or "python:3.12-slim"
+        base_image = container.base_image or fallback_base
         dockerfile = container.dockerfile_content or f"FROM {base_image}\nCOPY . /app\n"
         images.append(
             DockerImage(

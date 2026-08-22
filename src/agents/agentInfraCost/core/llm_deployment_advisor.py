@@ -146,6 +146,10 @@ def decide_deployment_context(
                     region, environment, choice.reasoning,
                 )
 
+    # sqlite is a local file — no RDS to provision or wire.
+    db = analysis.stack_detection.database
+    if db == "sqlite":
+        db = None
     return TerraformContext(
         job_id=job_id,
         region=region,
@@ -154,5 +158,5 @@ def decide_deployment_context(
         source_code_path=source_code_path,
         health_check_port=health_check_port,
         account_id=analysis.account_id,
-        database=analysis.stack_detection.database,
+        database=db,
     )

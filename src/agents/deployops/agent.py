@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import shlex
 import subprocess
 import tempfile
 import time
@@ -94,6 +95,9 @@ class DeployOpsAgent:
             return None
         if 'variable "db_host"' not in content:
             return None
+        # When the template provisions its own DB (create_db), no external DB is needed.
+        if 'variable "create_db"' in content:
+            return None
         missing = [
             env for env, _ in _ENV_TF_VARS
             if env.startswith("DEVGUARD_DB_") and not os.getenv(env)
@@ -144,7 +148,8 @@ class DeployOpsAgent:
         if repo_url:
             from src.lib.repo import clone_repo
             try:
-                clone_repo(repo_url, workspace_dir)
+                # 50k files: monorepos (next.js = 31k) are legit build contexts.
+                clone_repo(repo_url, workspace_dir, max_files=50_000)
                 self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
             except Exception as exc:  # noqa: BLE001 - surface as failed deploy
                 self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
@@ -320,7 +325,7 @@ class DeployOpsAgent:
                 if not filepath.is_file():
                     continue
                 rel = filepath.relative_to(source)
-                if ".git" in rel.parts or rel.parts[0].startswith("."):
+                if ".git" in rel.parts or "terraform" in rel.parts or ".terraform" in rel.parts or rel.parts[0].startswith("."):
                     skipped += 1
                     continue
                 key = rel.as_posix()
@@ -612,19 +617,24 @@ class DeployOpsAgent:
         tf_dir.mkdir(parents=True, exist_ok=True)
         self._write_remote_state_backend(tf_dir, job_id=job_id)
 
-        if not (tf_dir / "backend.tf").exists():
-            self.logger.warning(f"[{job_id}] Destroy: TF_STATE_BUCKET not configured, cannot recover state")
+        tf_runner = TerraformRunner(tf_dir)
+
+        # Two state sources: remote S3 (backend.tf, written when
+        # TF_STATE_BUCKET is set) or the local tfstate in the persisted job
+        # workspace. Without this fallback teardown silently no-ops and
+        # leaks AWS resources.
+        if not (tf_dir / "backend.tf").exists() and not (tf_dir / "terraform.tfstate").exists():
+            self.logger.warning(f"[{job_id}] Destroy: no backend.tf (TF_STATE_BUCKET unset) and no local tfstate")
             return {
                 "status": "no_state",
                 "job_id": job_id,
                 "message": (
-                    "TF_STATE_BUCKET is not configured; this deployment has no "
-                    "recoverable Terraform state. Manual AWS cleanup required."
+                    "No recoverable Terraform state (TF_STATE_BUCKET is not "
+                    "configured and no local tfstate exists in the job "
+                    "workspace). Manual AWS cleanup required."
                 ),
                 "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
             }
-
-        tf_runner = TerraformRunner(tf_dir)
 
         if not tf_runner.init():
             self.logger.error(f"[{job_id}] Destroy: terraform init failed")
@@ -632,17 +642,16 @@ class DeployOpsAgent:
                 "status": "failed",
                 "job_id": job_id,
                 "error": "terraform_init_failed",
-                "message": "Could not initialize Terraform with the remote state backend.",
+                "message": "Could not initialize Terraform with the state backend.",
                 "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
             }
 
-        # A job with no prior real `apply` (or one applied before
-        # TF_STATE_BUCKET existed) has no state key in S3 -- init() still
-        # succeeds against an empty backend, so check for an actual state
-        # explicitly rather than trusting init() alone.
+        # A job with no prior real `apply` has no state -- init() still
+        # succeeds against an empty backend (or empty local state), so check
+        # for an actual state explicitly rather than trusting init() alone.
         state_output = tf_runner.output()
         if not state_output:
-            self.logger.info(f"[{job_id}] Destroy: no Terraform state found in remote backend")
+            self.logger.info(f"[{job_id}] Destroy: no Terraform state found (remote backend or local tfstate)")
             return {
                 "status": "no_state",
                 "job_id": job_id,
@@ -984,6 +993,74 @@ class DeployOpsAgent:
             local_plugins.symlink_to(real_plugins, target_is_directory=True)
         return docker_config
 
+    @staticmethod
+    def _drop_missing_copy_sources(build_context: Path) -> None:
+        """Drop ``COPY <src>`` lines whose sources don't exist in ``build_context``.
+
+        The refiner hallucinates files (e.g. ``COPY rust-toolchain.toml /``
+        on next.js), which kills the build at checksum time. Also drops
+        dangling ``COPY --from=<name>`` refs where <name> is neither a
+        defined stage nor a registry image.
+        """
+        dockerfile_path = build_context / "Dockerfile"
+        if not dockerfile_path.is_file():
+            return
+        text = dockerfile_path.read_text(encoding="utf-8", errors="ignore")
+        defined_stages = {
+            m.group(1).lower()
+            for m in re.finditer(r"(?mi)^\s*FROM\s+\S+\s+AS\s+([\w-]+)", text)
+        }
+        kept: list[str] = []
+        dropped: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            m = re.match(r'^COPY\s+((?:--[^\s]+\s+)*)(.+)$', stripped)
+            flags = (m.group(1) or "") if m else ""
+            if not m:
+                kept.append(line)
+                continue
+            from_m = re.search(r"--from=([^\s]+)", flags)
+            if from_m:
+                name = from_m.group(1)
+                # Real image refs (contain '/' or ':') are kept; anything
+                # else must be an in-file stage.
+                if "/" not in name and ":" not in name and name.lower() not in defined_stages:
+                    dropped.append(stripped)
+                    continue
+                kept.append(line)
+                continue
+            rest = m.group(2)
+            if rest.startswith("["):
+                # JSON form: COPY ["src", "dst"]
+                try:
+                    parts = json.loads(rest.replace("'", '"'))
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+            else:
+                # Shell form: last token is dest, everything before is src.
+                tokens = shlex.split(rest) if "\\" not in rest else rest.split()
+                parts = [t for t in tokens if not t.startswith("--")]
+            sources = parts[:-1] if len(parts) > 1 else []
+            if not sources:
+                kept.append(line)
+                continue
+            missing = [
+                s for s in sources
+                if "*" not in s and "?" not in s
+                and not (build_context / s.lstrip("/")).exists()
+            ]
+            if missing:
+                dropped.append(stripped)
+                continue
+            kept.append(line)
+        if dropped:
+            dockerfile_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            logging.getLogger(__name__).warning(
+                "Dropped %d COPY line(s) referencing files absent from %s: %s",
+                len(dropped), build_context, dropped,
+            )
+
     async def _run_docker_cmd(
         self, cmd: list[str], timeout: float = 300.0, docker_config: str | None = None
     ) -> tuple[int, str, str]:
@@ -1077,9 +1154,12 @@ class DeployOpsAgent:
             # for push; plain docker build misbehaves with cross-platform
             # multi-stage builds on hosts with mixed-arch caches.
             build_context = self._workspace_dir(job_id) / docker_image.context
+            self._drop_missing_copy_sources(build_context)
             returncode, stdout, stderr = await self._run_docker_cmd(
                 ["docker", "buildx", "build", "--load", "--platform", docker_image.platform, "-t", image_uri, str(build_context)],
-                timeout=600.0, docker_config=docker_config_dir,
+                # 1800s: monorepo builds pull multi-GB base images; 600s killed
+                # them mid-pull.
+                timeout=1800.0, docker_config=docker_config_dir,
             )
             if returncode != 0:
                 self.logger.error(f"Docker build failed: {stderr}")
@@ -1152,11 +1232,14 @@ class DeployOpsAgent:
             flat_dep = {
                 "strategy": ec2_dep.get("strategy") or dep_config.get("strategy", "rolling"),
                 "health_check_path": ec2_dep.get("health_check_path")
-                    or dep_config.get("health_check_path", "/health"),
+                    or dep_config.get("health_check_path", "/"),
                 "health_check_port": ec2_dep.get("health_check_port")
                     or dep_config.get("health_check_port", 8080),
+                # EC2 bootstraps from scratch (yum, docker, image pull) —
+                # 15 min expired before the app was even up. Only EC2 pays
+                # this cost; ECS/S3 keep 15.
                 "timeout_minutes": ec2_dep.get("timeout_minutes")
-                    or dep_config.get("timeout_minutes", 15),
+                    or dep_config.get("timeout_minutes", 30),
                 "auto_rollback": True,
                 "rollback_on_alarm": True,
             }

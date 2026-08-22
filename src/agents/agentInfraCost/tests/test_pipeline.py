@@ -75,19 +75,16 @@ def test_run_pipeline_ecs_has_real_terraform() -> None:
 
 
 def test_database_warning_surfaces_at_gate2() -> None:
-    """A detected database (declared but not provisioned) must surface as a
-    warning so Gate 2 shows the deployer the app needs a DB before apply."""
+    """A detected database must surface as a warning at Gate 2."""
     context = run_pipeline_with_context(_load_raw("sample_input.json"))
-    assert any(
-        "database" in w and "DEVGUARD_DB_" in w for w in context.warnings
-    ), f"expected DB warning, got {context.warnings}"
+    assert any("database" in w for w in context.warnings), f"expected DB warning, got {context.warnings}"
 
 
 def test_no_database_no_db_warning() -> None:
     raw = _load_raw("sample_input.json")
     raw["stack_detection"]["database"] = None
     context = run_pipeline_with_context(raw)
-    assert not any("DEVGUARD_DB_" in w for w in context.warnings)
+    assert not any("database" in w for w in context.warnings)
 
 
 def test_static_site_pipeline_routes_to_s3_end_to_end() -> None:

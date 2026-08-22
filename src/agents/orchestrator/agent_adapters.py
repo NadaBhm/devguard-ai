@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -144,7 +145,9 @@ async def call_infracost(
     try:
         from src.lib.repo import clone_repo
         repo_path = tempfile.mkdtemp(prefix=f"devguard-repo-{job_id[:8]}-")
-        clone_repo(codesec_result.get("repo_url", ""), repo_path)
+        # 50k: monorepos (next.js = 31k files) are legit; the digestor
+        # self-caps reading, so a bigger tree is only a disk/time cost.
+        clone_repo(codesec_result.get("repo_url", ""), repo_path, max_files=50_000)
         raw_input["repo_path"] = repo_path
     except Exception as exc:
         logger.warning("[%s] Could not re-clone repo for InfraCost: %s", job_id, exc)
@@ -403,6 +406,16 @@ def translate_infracost_to_deploy_payload(
     if strategy == "blue-green":
         strategy = "blue_green"
 
+    # When DeployOps forces a different compute than InfraCost decided
+    # (lambda -> ec2 fallback), deployment_config[compute] is null and the
+    # defaults below don't match the rendered Terraform. Parse the rendered
+    # locals first — they are what the deploy actually serves.
+    rendered_main = (terraform.get("files") or {}).get("main.tf", "")
+    m_port = re.search(r"health_check_port\s*=\s*(\d+)", rendered_main)
+    m_path = re.search(r'health_check_path\s*=\s*"([^"]+)"', rendered_main)
+    default_port = int(m_port.group(1)) if m_port else 80
+    default_path = m_path.group(1) if m_path else "/health"
+
     ecs_block = aws_config.get("ecs") or {}
     ec2_block = aws_config.get("ec2") or {}
     s3_block = aws_config.get("s3") or {}
@@ -443,8 +456,8 @@ def translate_infracost_to_deploy_payload(
         "aws_config": flat_aws,
         "deployment_config": {
             "strategy": strategy,
-            "health_check_path": dep_block.get("health_check_path", "/health"),
-            "health_check_port": dep_block.get("health_check_port", 80),
+            "health_check_path": dep_block.get("health_check_path", default_path),
+            "health_check_port": dep_block.get("health_check_port", default_port),
             "min_healthy_percent": dep_block.get("min_healthy_percent", 50),
             "max_percent": dep_block.get("max_percent", 200),
             "timeout_minutes": dep_block.get("timeout_minutes", 15),

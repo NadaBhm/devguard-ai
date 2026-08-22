@@ -16,7 +16,9 @@ RETRY_CONFIG = Config(
     retries={
         "max_attempts": 3,
         "mode": "adaptive",
-    }
+    },
+    request_checksum_calculation="when_required",
+    response_checksum_validation="when_required",
 )
 
 class AWSClient:

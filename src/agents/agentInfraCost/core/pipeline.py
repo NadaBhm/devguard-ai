@@ -647,12 +647,11 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
     # cannot reach healthy unless a database already exists somewhere the
     # deployer controls. Surface it at Gate 2 instead of letting the deploy
     # fail later on an obscure "required variable" error.
-    if analysis.stack_detection.database:
+    # sqlite is a local file, not a server — no managed DB needed.
+    if analysis.stack_detection.database and analysis.stack_detection.database != "sqlite":
         warnings.append(
-            f"App uses a {analysis.stack_detection.database} database, which is "
-            "declared but not provisioned by DevGuard. Supply DEVGUARD_DB_HOST/"
-            "DEVGUARD_DB_PORT/DEVGUARD_DB_NAME/DEVGUARD_DB_USER/DEVGUARD_DB_PASSWORD "
-            "or the terraform apply will fail."
+            f"App uses a {analysis.stack_detection.database} database — a managed DB "
+            f"(db.t3.micro) will be provisioned alongside the app."
         )
 
     # After Gate-2 feedback the refiner may have rewritten sizing in main.tf;

@@ -26,7 +26,13 @@ from typing import Final
 
 from pydantic import BaseModel, ValidationError
 
-from core.decision_engine import ComputeType, DecisionResult, compute_sizing, decide_architecture
+from core.decision_engine import (
+    ComputeType,
+    DecisionResult,
+    _is_static_site,
+    compute_sizing,
+    decide_architecture,
+)
 from core.llm_provider import call_llm
 from models.input_schema import RepoAnalysisInput
 
@@ -120,6 +126,17 @@ def decide_architecture_via_llm(analysis: RepoAnalysisInput) -> DecisionResult:
 
     choice = _parse_llm_choice(raw_text)
     if choice is None:
+        return deterministic
+
+    # S3 can only serve a static site; block the LLM from sending anything
+    # else there (deterministic scoring already penalizes it -20).
+    if choice.compute_type == "s3" and not _is_static_site(analysis):
+        logger.warning(
+            "LLM chose compute_type=s3 but the repo is not a static site "
+            "(lang=%s); keeping deterministic %s",
+            analysis.stack_detection.primary_language,
+            deterministic.compute_type,
+        )
         return deterministic
 
     logger.info(

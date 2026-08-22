@@ -126,9 +126,13 @@ def is_dockerfile_rel_path(rel_path: str) -> bool:
     basename must be (case-insensitively) exactly ``dockerfile``, start with
     ``dockerfile.`` followed by a single variant token (no extra dots, so
     ``Dockerfile.example.txt`` stays a doc), or end with ``.dockerfile``.
-    Rejects templates/docs that merely contain the word, e.g.
-    ``nginx.dockerfile.twig``.
+    Rejects templates/docs (``nginx.dockerfile.twig``) and dev-container
+    definitions (``.devcontainer/Dockerfile``), which are not deployable
+    app images.
     """
+    lower = rel_path.lower()
+    if lower.startswith(".devcontainer/") or "/.devcontainer/" in lower:
+        return False
     basename = Path(rel_path).name.lower()
     if basename == "dockerfile":
         return True

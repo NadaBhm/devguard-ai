@@ -64,7 +64,8 @@ def unique_resource_name(base: str, job_id: str) -> str:
 ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
 ECS_SERVICE_NAME: Final[str] = "app-service"
 ECS_HEALTH_CHECK_PORT: Final[int] = 8080
-ECS_HEALTH_CHECK_PATH: Final[str] = "/health"
+# "/" is universally served; "/health" often is not.
+ECS_HEALTH_CHECK_PATH: Final[str] = "/"
 ECS_TASK_EXECUTION_ROLE_NAME: Final[str] = "devguard-task-execution-role"
 
 LAMBDA_FUNCTION_NAME: Final[str] = "app-handler"
@@ -82,7 +83,7 @@ EC2_KEY_PAIR_NAME: Final[str] = os.getenv("DEVGUARD_KEY_PAIR_NAME", "")
 EC2_INSTANCE_COUNT: Final[int] = 1
 EC2_INSTANCE_NAME: Final[str] = "devguard-app"
 EC2_HEALTH_CHECK_PORT: Final[int] = 8080
-EC2_HEALTH_CHECK_PATH: Final[str] = "/health"
+EC2_HEALTH_CHECK_PATH: Final[str] = "/"
 EC2_INSTANCE_PORT: Final[int] = 8080
 EC2_SSH_CIDR: Final[str] = "0.0.0.0/0"
 

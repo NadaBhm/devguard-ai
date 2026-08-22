@@ -76,7 +76,7 @@ def test_deployment_config_health_check_tracks_refined_terraform() -> None:
     refined_main = base_tf.main_tf.replace(
         "port        = 8080", "port        = 3000"
     ).replace(
-        'path                = "/health"', 'path                = "/api/health"'
+        'path                = "/"', 'path                = "/api/health"'
     )
     assert refined_main != base_tf.main_tf
     refined = TerraformFiles(
@@ -141,7 +141,7 @@ def test_ec2_health_check_reads_refined_terraform() -> None:
     # The Gate-2 refiner legitimately rewrites the rendered locals block to
     # match the app (e.g. a Node server on 3000 with /api/health).
     refined = terraform_files.main_tf.replace(
-        'health_check_path = "/health"', 'health_check_path = "/api/health"'
+        'health_check_path = "/"', 'health_check_path = "/api/health"'
     ).replace("health_check_port = 8080", "health_check_port = 3000")
     terraform_files.main_tf = refined
 

@@ -261,7 +261,9 @@ STACK_INDICATORS: Final[dict[str, dict[str, list[str]]]] = {
         "prisma": ["prisma"],
     },
     "databases": {
-        "postgresql": ["postgresql", "psycopg", "pg", "postgres"],
+        # No bare "pg": base64 hashes in lockfiles match it even with
+        # word boundaries (html5-boilerplate regression).
+        "postgresql": ["postgresql", "psycopg", "postgres"],
         "mysql": ["mysql", "pymysql", "mysql-connector"],
         "mongodb": ["mongodb", "pymongo", "mongoose"],
         "redis": ["redis", "redis-py"],
@@ -299,7 +301,9 @@ OWASP_CWE_MAP: Final[dict[str, list[str]]] = {
 
 DEFAULT_CLONE_DIR: Final[str] = os.getenv("CODESEC_CLONE_DIR", "/tmp/codesec-clones")
 MAX_REPO_SIZE_MB: Final[int] = int(os.getenv("CODESEC_MAX_REPO_SIZE_MB", "500"))
-MAX_FILES_PER_REPO: Final[int] = int(os.getenv("CODESEC_MAX_FILES", "10000"))
+# 50k: 10k rejected legit monorepos (vercel/next.js = 31k files). Scanners
+# cap their own work, so this only guards disk/time.
+MAX_FILES_PER_REPO: Final[int] = int(os.getenv("CODESEC_MAX_FILES", "50000"))
 GITHUB_URL_PATTERN: Final[str] = r"^https?://github\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(/.*)?$"
 GITLAB_URL_PATTERN: Final[str] = r"^https?://gitlab\.com/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(/.*)?$"
 

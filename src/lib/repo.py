@@ -76,8 +76,18 @@ def clone_repo(
                 check=False,
             )
             if result.returncode != 0:
+                # Non-standard default branch (e.g. canary) — let git resolve it.
                 shutil.rmtree(target, ignore_errors=True)
-                raise RuntimeError(f"Git clone failed: {result.stderr}")
+                result = subprocess.run(
+                    ["git", "clone", "--depth=1", repo_url, str(target)],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    shutil.rmtree(target, ignore_errors=True)
+                    raise RuntimeError(f"Git clone failed: {result.stderr}")
     except subprocess.TimeoutExpired as exc:
         shutil.rmtree(target, ignore_errors=True)
         raise RuntimeError(f"Git clone timed out after {timeout} seconds") from exc

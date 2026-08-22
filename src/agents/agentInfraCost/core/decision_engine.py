@@ -85,6 +85,14 @@ def _is_static_site(analysis: RepoAnalysisInput) -> bool:
         return False
     if stack.frameworks:
         return False
+    # npm/yarn/pnpm usually means a Node server — unless there's no server
+    # entry file, in which case it's dev tooling on a pure static site
+    # (e.g. startbootstrap templates).
+    if stack.build_tool in ("npm", "yarn", "pnpm"):
+        entry = {"server.js", "app.js", "index.js", "main.js"}
+        if not any(f.lower() in entry for f in stack.detected_files):
+            return True
+        return False
     return stack.primary_language.strip().lower() in _STATIC_PRIMARY_LANGUAGES
 
 
@@ -118,7 +126,8 @@ def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
     if container is not None and container.compose_detected:
         scores["ecs"] += 2.0
 
-    if analysis.stack_detection.database is not None:
+    # sqlite is a local file, not a server — no managed DB to size for.
+    if analysis.stack_detection.database is not None and analysis.stack_detection.database != "sqlite":
         scores["ecs"] += 1.0
         scores["lambda"] -= 1.0
         scores["ec2"] += 1.0

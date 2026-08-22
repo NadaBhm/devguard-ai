@@ -153,6 +153,42 @@ class TestDetectStack:
         assert result.database is None
         assert result.frameworks == []
 
+    def test_lockfile_hashes_do_not_false_positive_database(
+        self, tmp_path: Path
+    ):
+        """Base64 integrity hashes containing "pg" must not flag postgres."""
+        repo = tmp_path / "static_lockfile_repo"
+        repo.mkdir()
+        (repo / "index.html").write_text("<html><body>Hello</body></html>")
+        (repo / "package.json").write_text(
+            '{"name":"static","devDependencies":{"webpack":"^5.0.0"}}'
+        )
+        (repo / "package-lock.json").write_text(
+            '{"packages":{"":{}},"node_modules/foo":{"integrity":"sha512-dgweJhWWpgKYrQaMNH+f0pbo"}}'
+        )
+
+        result = detect_stack(repo)
+        assert result.database is None
+        assert result.frameworks == []
+
+    def test_postgres_still_detected_without_bare_pg(self, tmp_path: Path):
+        """'postgres' detects; bare 'pg' does not (hash regression)."""
+        repo = tmp_path / "node_pg_repo"
+        repo.mkdir()
+        (repo / "package.json").write_text(
+            '{"name":"api","dependencies":{"postgres":"^3.0.0","express":"^4.0.0"}}'
+        )
+        (repo / "index.js").write_text(
+            'const postgres = require("postgres"); module.exports = () => postgres();'
+        )
+        assert detect_stack(repo).database == "postgresql"
+
+        repo2 = tmp_path / "node_pg_bare_repo"
+        repo2.mkdir()
+        (repo2 / "package.json").write_text('{"name":"api","dependencies":{"pg":"^8.0.0"}}')
+        (repo2 / "index.js").write_text('const { Pool } = require("pg");')
+        assert detect_stack(repo2).database is None
+
     def _write_multi_container_repo(
         self, tmp_path: Path, compose_yml: str
     ) -> None:

@@ -358,44 +358,36 @@ def _ensure_debian_git_for_composer(dockerfile: str) -> str:
 
 
 def _fix_mixed_apt_apk(dockerfile: str) -> str:
-    """Strip a stray ``RUN apk add --no-cache`` sequence inside an apt-get line.
+    """Strip stray ``RUN`` splices inside RUN continuation blocks.
 
-    The refiner occasionally merges its two package-install strategies into one
-    line::
-
-        RUN apt-get update && apt-get install -y RUN apk add --no-cache libzip-dev zip unzip && docker-php-ext-install ...
-
-    The embedded ``RUN apk add --no-cache`` tokens then become package names
-    for ``apt-get install`` (``RUN``, ``apk``, ``add``, ``--no-cache`` are not
-    Debian packages), so the build dies at install time. The whole sequence is
-    apk-specific noise on a Debian base; stripping it keeps the real packages
-    (``libzip-dev zip unzip``) on the apt-get line.
+    The refiner sometimes splices ``RUN apk add --no-cache \\<newline>`` into
+    the middle of another instruction's continuation, producing either bogus
+    apt packages or "/bin/sh: RUN: not found". An instruction keyword can
+    never legally appear mid-continuation, so such lines are simply dropped.
     """
     if not dockerfile:
         return dockerfile
     lines = dockerfile.splitlines()
     out: list[str] = []
-    in_apt_get_block = False
+    in_continuation_block = False
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("RUN apt-get"):
-            in_apt_get_block = stripped.endswith("\\")
-            if "apk add --no-cache" in stripped:
-                stripped = re.sub(r"RUN apk add --no-cache\s*", "", stripped)
-                out.append(line[: len(line) - len(line.lstrip())] + stripped)
+        if stripped.startswith("RUN"):
+            if in_continuation_block:
+                continue  # stray splice inside previous RUN's continuation
+            in_apt_block = stripped.startswith("RUN apt-get")
+            if in_apt_block and "apk add --no-cache" in stripped:
+                fixed = re.sub(r"RUN apk add --no-cache\s*", "", stripped)
+                out.append(line[: len(line) - len(line.lstrip())] + fixed)
+                in_continuation_block = fixed.endswith("\\")
             else:
                 out.append(line)
+                in_continuation_block = stripped.endswith("\\")
             continue
-        if in_apt_get_block:
-            # Continuation lines of an apt-get RUN: the refiner sometimes
-            # splices a whole ``RUN apk add --no-cache \`` line into them
-            # (its two install strategies merged), turning ``RUN``/``apk``/
-            # ``add``/``--no-cache`` into bogus apt packages. The preceding
-            # line already ends in ``\``, so dropping the stray line keeps
-            # the continuation flowing into the real package list.
-            if re.match(r"^RUN\s+apk\s+add\s+--no-cache\s*\\?$", stripped):
+        if in_continuation_block:
+            if re.match(r"^RUN\s+\S", stripped):
                 continue
-            in_apt_get_block = stripped.endswith("\\")
+            in_continuation_block = stripped.endswith("\\")
         out.append(line)
     return "\n".join(out)
 
@@ -611,7 +603,7 @@ def _fix_healthcheck_localhost(dockerfile: str) -> str:
     )
 
 
-def _fix_inline_frontend_build(dockerfile: str) -> str:
+def _fix_inline_frontend_build(dockerfile: str, repo_context: str | None = None) -> str:
     """Move an inline ``npm build`` out of a PHP image into a Node builder stage.
 
     The refiner sometimes builds the React frontend *inside* the PHP runtime
@@ -638,6 +630,60 @@ def _fix_inline_frontend_build(dockerfile: str) -> str:
     if "npm run build" not in dockerfile and "npm ci" not in dockerfile:
         return dockerfile
     has_node_stage = "node:" in dockerfile and "AS frontend-builder" in dockerfile
+
+    # Hallucinated frontend-builder stage for a repo with no front/ dir:
+    # drop the whole stage, then fall through to the root-layout strip.
+    context_has_front = bool(repo_context) and "front/" in repo_context
+    if has_node_stage and not context_has_front and "AS frontend-builder" in dockerfile:
+        lines_tmp = dockerfile.splitlines()
+        pruned: list[str] = []
+        in_builder_stage = False
+        for line in lines_tmp:
+            s = line.strip()
+            if re.match(r"^FROM\s+\S*node:\S+\s+AS\s+frontend-builder", s):
+                in_builder_stage = True
+                continue
+            if in_builder_stage:
+                if s.startswith("FROM"):
+                    in_builder_stage = False
+                else:
+                    continue
+            pruned.append(line)
+        dockerfile = "\n".join(pruned)
+        has_node_stage = False
+
+    # Root-layout guard (no front/ dir): strip inline node-build lines from
+    # the PHP stage instead of injecting a front/-layout builder stage. The
+    # app serves fine without compiled vite assets; keeping them guaranteed
+    # a dead build.
+    if not has_node_stage and "front/" not in dockerfile:
+        out: list[str] = []
+        skipping_comment = False
+        for line in dockerfile.splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                low = s.lower()
+                skipping_comment = (
+                    "node dependencies" in low
+                    or "frontend build" in low
+                    or ("package.json" in low and "copy" not in low)
+                )
+                if skipping_comment:
+                    continue
+            elif re.match(r"^COPY\s+--from=frontend-builder\b", s):
+                # Dangling reference: no such stage exists.
+                continue
+            elif re.match(r"^COPY\s+(--from=\S+\s+)?(package\.json|package-lock\.json|\./?package)", s):
+                continue
+            elif re.match(r"^RUN\s+npm\s+(ci|install)\b", s):
+                continue
+            elif re.match(r"^RUN\s+npm\s+run\s+build\b", s):
+                continue
+            else:
+                skipping_comment = False
+            out.append(line)
+        return "\n".join(out)
+
     lines = dockerfile.splitlines()
     new_lines: list[str] = []
     inserted = has_node_stage
@@ -775,6 +821,32 @@ def _fix_dev_mode_cmd(dockerfile: str) -> str:
     return "\n".join(out)
 
 
+def _fix_bun_without_lockfile(dockerfile: str, repo_context: str | None) -> str:
+    """Rewrite bun invocations to npm/node when the repo has no bun lockfile
+    (base images ship no bun binary, so every bun line fails the build)."""
+    if not dockerfile or not repo_context:
+        return dockerfile
+    if "bun" not in dockerfile:
+        return dockerfile
+    if "bun.lockb" in repo_context or "bun.lock" in repo_context or "bunfig.toml" in repo_context:
+        return dockerfile
+    dockerfile = re.sub(r"\bbun\s+install\b", "npm install", dockerfile)
+    dockerfile = re.sub(r"\bbun\s+run\b", "npm run", dockerfile)
+    node = '"node"'
+    dockerfile = re.sub(
+        r'(?m)^(\s*(?:CMD|ENTRYPOINT)\s*\[?\s*")bun("\s*,)',
+        lambda m: m.group(1) + "node" + m.group(2),
+        dockerfile,
+    )
+    dockerfile = re.sub(
+        r"(?m)^(\s*(?:CMD|ENTRYPOINT)\s*\[\s*)bun(\s*,)",
+        lambda m: m.group(1) + node + m.group(2),
+        dockerfile,
+    )
+    dockerfile = re.sub(r"(?m)^(\s*(?:CMD|ENTRYPOINT)\s+)\bbun\s+", r"\1node ", dockerfile)
+    return dockerfile
+
+
 def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None) -> str:
     """Rewrite dependency installs that reference files absent from the repo context.
 
@@ -792,6 +864,7 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
     dockerfile = _heredocify_multiline_echo(dockerfile)
     dockerfile = _fix_detached_install_run(dockerfile)
     dockerfile = _fix_mixed_apt_apk(dockerfile)
+    dockerfile = _fix_bun_without_lockfile(dockerfile, repo_context)
     if "composer.json" in repo_context:
         dockerfile = _ensure_debian_git_for_composer(dockerfile)
     dockerfile = _fix_php_alpine_apk_extensions(dockerfile)
@@ -800,7 +873,7 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
     dockerfile = _fix_php_docroot_mismatch(dockerfile)
     dockerfile = _fix_missing_server_source_copy(dockerfile)
     dockerfile = _fix_healthcheck_localhost(dockerfile)
-    dockerfile = _fix_inline_frontend_build(dockerfile)
+    dockerfile = _fix_inline_frontend_build(dockerfile, repo_context=repo_context)
 
     dep_files = {
         "requirements.txt": ("pip install", ["fastapi", "uvicorn"]),

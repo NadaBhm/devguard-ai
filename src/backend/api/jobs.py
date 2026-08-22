@@ -188,11 +188,11 @@ def _create_job_for_repo(
 
     try:
         from src.agents.orchestrator.graph import run_workflow
-        state = run_workflow(
-            repo_url=repo_url,
-            thread_id=str(run.id),
-            on_node_progress=_publish_node_progress(str(run.id)),
-        )
+        state = cast(dict[str, Any], run_workflow(
+        repo_url=repo_url,
+        thread_id=str(run.id),
+        on_node_progress=_publish_node_progress(str(run.id)),
+        ))
         state["job_id"] = str(run.id)
     except Exception as exc:
         logger.error(f"run_workflow failed for {run.id}: {exc}", exc_info=True)
@@ -200,10 +200,9 @@ def _create_job_for_repo(
 
     state = cast(dict[Any, Any], state)
 
-    run = update_run_state(db, str(run.id), dict(state))
-    _publish(dict(state), 30, f"Orchestrator status: {state.get('status')}")
-
-    gate = _current_gate(dict(state))
+    run = update_run_state(db, str(run.id), state)
+    _publish(state, 30, f"Orchestrator status: {state.get('status')}")
+    gate = _current_gate(state)
     if gate:
         publish_gate(str(run.id), gate, "awaiting_approval")
 
@@ -269,7 +268,7 @@ def check_update(
 ):
     """Compare the project's most recently analyzed commit against the tip
     of its default branch, without cloning or starting a run."""
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
     project = run.project
 
     from src.lib.git_remote import latest_remote_sha
@@ -307,7 +306,7 @@ def trigger_update(
     CodeSec + InfraCost re-analysis of the latest commit, then a lightweight
     redeploy onto the currently live ECS service instead of provisioning
     fresh infrastructure from scratch."""
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
     project = run.project
 
     deployment = (
@@ -349,9 +348,9 @@ def trigger_update(
     previous_monthly_cost_usd = (
         float(sum(row[0] for row in previous_costs)) if previous_costs else None
     )
-
+    
     new_run = _create_run(
-        db, project, current_user.id, commit_sha="HEAD", commit_message="Update deployment"
+    db, project, str(current_user.id), commit_sha="HEAD", commit_message="Update deployment"
     )
 
     logger.info(
@@ -362,18 +361,18 @@ def trigger_update(
 
     try:
         from src.agents.orchestrator.graph import run_workflow
-        state = run_workflow(
-            repo_url=project.github_url,
-            thread_id=str(new_run.id),
-            on_node_progress=_publish_node_progress(str(new_run.id)),
-            is_update=True,
-            existing_deployment={
-                "region": existing["region"],
-                "ecs_cluster": existing["ecs_cluster"],
-                "service_name": existing["service_name"],
-            },
-            previous_monthly_cost_usd=previous_monthly_cost_usd,
-        )
+        state = cast(dict[str, Any], run_workflow(
+        repo_url=project.github_url,
+        thread_id=str(new_run.id),
+        on_node_progress=_publish_node_progress(str(new_run.id)),
+        is_update=True,
+        existing_deployment={
+            "region": existing["region"],
+            "ecs_cluster": existing["ecs_cluster"],
+            "service_name": existing["service_name"],
+        },
+        previous_monthly_cost_usd=previous_monthly_cost_usd,
+        ))
         state["job_id"] = str(new_run.id)
     except Exception as exc:
         logger.error(f"run_workflow failed for update {new_run.id}: {exc}", exc_info=True)

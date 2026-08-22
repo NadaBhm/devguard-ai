@@ -224,13 +224,7 @@ def run_workflow(
     into the initial state; see ExistingDeploymentInfo in state.py.
     """
     graph = get_orchestrator_graph()
-    state = create_initial_state(
-        repo_url,
-        job_id=thread_id,
-        is_update=is_update,
-        existing_deployment=existing_deployment,
-        previous_monthly_cost_usd=previous_monthly_cost_usd,
-    )
+    state = create_initial_state(repo_url, job_id=thread_id)
     config = {"configurable": {"thread_id": thread_id or state["job_id"]}}
 
     logger.info(f"Starting workflow for job {state['job_id']} | repo: {repo_url}")

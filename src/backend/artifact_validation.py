@@ -1,16 +1,9 @@
 """Server-side validation for manually edited artifacts.
-
-Edits to the generated Terraform / Dockerfile are applied to orchestrator
-state and later deployed, so a syntax-valid save is enforced here -- a broken
-file is rejected with a clear message instead of failing deep inside Terraform
-at apply time.
-
-- ``.tf`` files: balanced-brace/quote check plus, when the ``terraform`` CLI
-  is present, a real ``terraform fmt`` parse pass (no providers/init needed).
-- ``Dockerfile``: must contain a ``FROM`` instruction.
-- ``docker-image.json``: must be valid JSON.
-
-Every validator returns ``(ok: bool, error: str | None)``.
+Edits apply to orchestrator state and deploy later, so syntax-valid saves are
+enforced here rather than failing deep inside Terraform at apply time. ``.tf``:
+brace/quote balance plus ``terraform fmt`` parse when CLI available; Dockerfile
+needs ``FROM``; docker-image.json must be JSON with a "name". Validators return
+an error string, or None when valid.
 """
 from __future__ import annotations
 
@@ -35,8 +28,7 @@ _ALLOWED_FILE_PATHS = frozenset({
 def allowed_file_path(file_path: str) -> bool:
     if file_path in _ALLOWED_FILE_PATHS:
         return True
-    # Multi-container: Dockerfiles live under their build context
-    # (e.g. "backend/Dockerfile"), not just at the repo root.
+    # Multi-container: Dockerfiles live under their build context, not just repo root.
     if file_path.endswith("/Dockerfile"):
         parent = file_path[:-len("/Dockerfile")]
         return bool(parent) and not parent.startswith("/") and ".." not in parent.split("/")
@@ -48,8 +40,7 @@ def _balanced_structure(content: str) -> bool:
 
 
 def _terraform_fmt_check(content: str) -> str | None:
-    """Syntax-check via ``terraform fmt`` (no providers needed) on a temp
-    file. Returns an error string, or None when the file parses."""
+    """Syntax-check via ``terraform fmt`` on a temp file (no providers/init needed)."""
     tf = shutil.which("terraform")
     if not tf:
         return None  # CLI unavailable — structural check already passed
@@ -63,8 +54,7 @@ def _terraform_fmt_check(content: str) -> str | None:
                 text=True,
                 timeout=30,
             )
-            # Exit 0 = parses; 1 = would reformat (valid, formatting preserved
-            # on purpose); anything else is a syntax error.
+            # 0 = parses; 1 = would reformat (valid, formatting preserved on purpose); else error.
             if proc.returncode not in (0, 1):
                 return (proc.stderr or proc.stdout or "terraform fmt failed").strip()
     except Exception as exc:  # pragma: no cover - defensive

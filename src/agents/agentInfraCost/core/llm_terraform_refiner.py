@@ -1,21 +1,10 @@
 """Feedback-driven artifact refinement via an LLM.
 
-Runs after ``generate_terraform`` when the orchestrator's Gate 2 asked for
-changes (``RepoAnalysisInput.user_feedback`` is set): the LLM edits the
-rendered ``main.tf`` / ``variables.tf`` / ``outputs.tf`` — and, when a
-Dockerfile is supplied, that too — to honor requests like "make it cheaper"
-or "use two AZs". Returns validated strings.
-
-Design contract (mirrors ``llm_architecture_advisor`` / ``llm_deployment_advisor``):
-the LLM's usable surface is the three Terraform files plus one optional
-``dockerfile`` field, strictly Pydantic-validated; and fail-soft — every
-failure mode returns the ORIGINAL files unchanged, never a partial write,
-so the pipeline proceeds even if the refiner is unavailable. The
-architecture (``compute_type``, sizing) is decided elsewhere
-(``llm_architecture_advisor``); this module never touches it.
-
-Uses ``core.llm_provider.call_llm`` (OpenRouter), which honours
-``OPENROUTER_MODEL``.
+After Gate 2 asks for changes, the LLM rewrites the rendered Terraform files —
+plus a supplied Dockerfile — to honor the request. Contract mirrors the other
+LLM advisors: Pydantic-validated surface, fail-soft (any failure keeps the
+ORIGINAL files; architecture/sizing is never touched here). Uses
+``core.llm_provider.call_llm`` (OpenRouter, honours ``OPENROUTER_MODEL``).
 """
 
 from __future__ import annotations
@@ -84,13 +73,9 @@ _SYSTEM_INSTRUCTION: Final[str] = (
 
 
 class _RefinedTerraform(BaseModel):
-    """Strict shape the LLM's raw JSON response must match. Anything else —
-    malformed JSON, a missing field, or an empty file — triggers the
-    fail-soft fallback (original files unchanged). ``dockerfile`` is optional:
-    when present it replaces the current Dockerfile, when absent the original
-    is kept (backward-compatible with Terraform-only responses). For
-    multi-container refinements the LLM returns ``dockerfiles`` — a dict
-    keyed by repo-relative path (e.g. ``backend/Dockerfile``) — instead.
+    """Strict shape for the LLM's raw JSON response; anything else (malformed
+    JSON, missing/empty field) triggers the fail-soft fallback. Optional
+    ``dockerfile``; ``dockerfiles`` maps repo-relative paths (multi-container).
     """
 
     main_tf: str
@@ -101,13 +86,9 @@ class _RefinedTerraform(BaseModel):
 
 
 def _docker_blocks(dockerfiles: dict[str, str] | None) -> str:
-    """Render the Dockerfile section of the prompt.
-
-    One labelled block per container (``path: Dockerfile``): for a
-    single-container repo that's just ``Dockerfile`` (legacy singular
-    payloads), for a monorepo it's one block per detected file. Empty dict /
-    None renders the explicit "(aucun Dockerfile fourni)" marker so the LLM
-    knows not to invent one.
+    """Render the prompt's Dockerfile section: one labelled block per container
+    (single-container legacy payloads just say ``Dockerfile``). Empty/None renders
+    "(aucun Dockerfile fourni)" so the LLM won't invent one.
     """
     if not dockerfiles:
         return "=== Dockerfile ===\n(aucun Dockerfile fourni)\n\n"
@@ -169,14 +150,9 @@ def _valid_file(content: str) -> bool:
 
 
 def _heredocify_multiline_echo(dockerfile: str) -> str:
-    """Rewrite multi-line ``RUN echo '...' > file`` blocks as heredocs.
-
-    The refiner sometimes emits a shell block legitimately spanning several
-    lines (e.g. writing a PHP router script). That is NOT valid Dockerfile
-    syntax — continuation only happens at ``\\``, so every following line
-    parses as its own unknown instruction and the build dies at parse time
-    (verified: ``docker buildx build`` fails with "dockerfile parse error ...
-    unknown instruction"). Rewrite as the idiomatic heredoc form instead.
+    """Rewrite multi-line ``RUN echo '...' > file`` blocks as heredocs: they're
+    invalid Dockerfile syntax (continuation only happens at ``\\``, so each extra
+    line parses as its own unknown instruction and the build dies at parse time).
     """
     if not dockerfile:
         return dockerfile
@@ -189,8 +165,7 @@ def _heredocify_multiline_echo(dockerfile: str) -> str:
 def _heredocify_repl(match: re.Match) -> str:
     content = match.group(1)
     dest = match.group(2)
-    # Single-line bodies (the common case, e.g. `RUN echo '<?php ... ?>' > /app/public/health.php`)
-    # are already valid; leave them untouched so the diff stays minimal.
+    # Single-line bodies are already valid; leave untouched (minimal diff).
     if "\n" not in content:
         return match.group(0)
     marker = "DOCKERFILE_EOF"
@@ -204,22 +179,14 @@ def _heredocify_repl(match: re.Match) -> str:
 
 
 def _fix_php_alpine_apk_extensions(dockerfile: str) -> str:
-    """Replace ``apk add php82-*`` with ``docker-php-ext-install``.
-
-    On official PHP Alpine images (``php:8.2-cli-alpine`` and friends) the
-    ``php82-*`` packages don't exist in the Alpine repo (PHP is compiled into
-    the image), so ``apk add`` exits nonzero and the build fails. Two more
-    pitfalls are handled so the rewrite actually builds: extensions already
-    compiled into the base image must NOT go through ``docker-php-ext-install``
-    (it refuses to rebuild a loaded module — verified against
-    ``php:8.2-cli-alpine``), and gd/zip/intl need their apk build deps first.
-    Unknown/non-``phpNN-`` packages stay on the ``apk add`` line.
+    """Replace ``apk add phpNN-*`` with ``docker-php-ext-install`` — on PHP Alpine
+    images those packages don't exist, so ``apk add`` fails; already-loaded modules
+    are skipped (rebuild refused, verified) and gd/zip/intl get apk build deps first.
     """
     if not dockerfile:
         return dockerfile
-    # Modules already compiled into the official php:8.x-cli-alpine images
-    # (from `php -m` on php:8.2-cli-alpine). docker-php-ext-install refuses to
-    # rebuild a module that's already loaded, so skip these.
+    # Modules already compiled into the official php:8.x-cli-alpine images (from
+    # `php -m`); docker-php-ext-install refuses to rebuild a loaded module.
     _PRESENT: frozenset[str] = frozenset({
         "core", "ctype", "curl", "date", "dom", "fileinfo", "filter", "hash",
         "iconv", "json", "libxml", "mbstring", "mysqlnd", "openssl", "pcre",
@@ -247,9 +214,7 @@ def _fix_php_alpine_apk_extensions(dockerfile: str) -> str:
                 joined += " " + lines[j].strip().rstrip("\\")
             if not re.search(r"\bphp\d+-", joined):
                 # No phpNN-* packages: keep the block untouched, including any
-                # trailing &&/|| continuation, so the RUN prefix stays attached
-                # (dropping it would leave continuation lines to parse as
-                # unknown instructions).
+                # &&/|| continuation (losing RUN would orphan continuation lines).
                 while j + 1 < len(lines) and re.match(r"^\s*(&&|\|\|)", lines[j + 1]):
                     j += 1
                 out.extend(lines[i : j + 1])
@@ -281,8 +246,7 @@ def _fix_php_alpine_apk_extensions(dockerfile: str) -> str:
                     )
                 else:
                     out.append("RUN docker-php-ext-install " + " ".join(php_exts))
-                # Swallow any trailing &&/|| continuation lines of the original
-                # block (e.g. ``&& docker-php-ext-install ...``, ``&& rm -rf``);
+                # Swallow trailing &&/|| continuation lines of the original block;
                 # the rewrite above already covers their intent.
                 while j + 1 < len(lines) and re.match(r"^\s*(&&|\|\|)", lines[j + 1]):
                     j += 1
@@ -299,14 +263,9 @@ def _fix_php_alpine_apk_extensions(dockerfile: str) -> str:
 
 
 def _ensure_debian_git_for_composer(dockerfile: str) -> str:
-    """Add ``git`` to a Debian ``apt-get install`` when the repo needs composer.
-
-    Composer's dist-first install falls back to ``--prefer-source`` on a
-    GitHub 429 (fallback injected elsewhere in this file), and that fallback
-    clones with git; on ``php:8.2-apache`` the refiner's apt list has no git,
-    so the fallback dies with "git was not found in your PATH". Only the
-    Debian apt-get path needs this (the alpine branch installs git); the
-    caller only invokes this when the repo actually has a composer.json.
+    """Add ``git`` to a Debian ``apt-get install`` when the repo needs composer:
+    its dist-first install falls back to git-cloning ``--prefer-source`` on a
+    GitHub 429, and e.g. ``php:8.2-apache`` lacks git ("git was not found").
     """
     if not dockerfile:
         return dockerfile
@@ -327,12 +286,9 @@ def _ensure_debian_git_for_composer(dockerfile: str) -> str:
 
 
 def _fix_mixed_apt_apk(dockerfile: str) -> str:
-    """Strip stray ``RUN`` splices inside RUN continuation blocks.
-
-    The refiner sometimes splices ``RUN apk add --no-cache \\<newline>`` into
-    the middle of another instruction's continuation, producing either bogus
-    apt packages or "/bin/sh: RUN: not found". An instruction keyword can
-    never legally appear mid-continuation, so such lines are simply dropped.
+    """Strip stray ``RUN`` splices inside RUN continuation blocks: the refiner
+    sometimes splices ``RUN apk add ...`` mid-continuation, producing bogus apt
+    packages or "/bin/sh: RUN: not found"; such lines are simply dropped.
     """
     if not dockerfile:
         return dockerfile
@@ -362,15 +318,9 @@ def _fix_mixed_apt_apk(dockerfile: str) -> str:
 
 
 def _fix_detached_install_run(dockerfile: str) -> str:
-    """Reattach a RUN prefix to a continuation block that lost its instruction.
-
-    When the refiner drops the leading ``RUN apk add --no-cache \\`` (or
-    ``apt-get install``) line, every remaining indented continuation line
-    parses as its own unknown Dockerfile instruction and the build dies at
-    parse time. When such a block ends up invoking ``docker-php-ext-install``
-    / ``pecl install`` / an apt/composer install, the missing instruction is
-    reconstructed as ``RUN apk add --no-cache``.
-    """
+    """Reattach a RUN prefix lost by the refiner: without the leading ``RUN apk
+    add/apt-get install \\`` line, continuation lines parse as unknown instructions;
+    docker-php-ext/pecl/apt/composer blocks get ``RUN apk add --no-cache`` back."""
     if not dockerfile:
         return dockerfile
     _INSTRUCTIONS: frozenset[str] = frozenset({
@@ -412,15 +362,10 @@ def _fix_detached_install_run(dockerfile: str) -> str:
 
 
 def _fix_php_builtin_server_docroot(dockerfile: str) -> str:
-    """Add a docroot to a PHP built-in server ``CMD`` that uses a router script.
-
-    Without ``-t``, the built-in server resolves request paths against the
-    CWD, so an actual file under ``public`` (e.g. ``/health.php``) returns
-    404 even though the router returns ``false`` for existing files.
-    Verified live: the refiner's exact CMD served ``/health.php`` 404 while
-    ``php -S ... -t /app/public ...`` served it 200. The router's own
-    absolute-path checks keep working regardless of docroot.
-    """
+    """Add a docroot (-t) to a PHP built-in server CMD using a router script:
+    without it request paths resolve against CWD, so a real file under ``public``
+    404s even though the router handles existing files (verified live: 404 vs 200
+    with ``-t /app/public``); the router's absolute-path checks keep working."""
     if not dockerfile:
         return dockerfile
     pattern = re.compile(
@@ -437,14 +382,9 @@ def _fix_php_builtin_server_docroot(dockerfile: str) -> str:
 
 
 def _fix_php_docroot_mismatch(dockerfile: str) -> str:
-    """Point a PHP built-in server ``-t`` docroot at the real frontend dir.
-
-    The refiner sometimes emits ``-t /app/public`` while the Dockerfile copies
-    the frontend build to ``/app/server/public/``; ``php -S`` then dies at
-    startup with "Directory /app/public does not exist" (verified live), the
-    container never serves and DeployOps rolls back. Rewrite the docroot to
-    the directory the frontend-build ``COPY --from`` actually creates.
-    """
+    """Point a PHP built-in server ``-t`` docroot at the real frontend dir: a
+    stale path kills ``php -S`` at startup ("Directory does not exist", verified
+    live) -> DeployOps rollback; rewrite to the dir the frontend-build COPY creates."""
     if not dockerfile:
         return dockerfile
     build_dest = re.search(
@@ -465,15 +405,9 @@ def _fix_php_docroot_mismatch(dockerfile: str) -> str:
 
 
 def _fix_missing_mysqli_extension(dockerfile: str) -> str:
-    """Add ``mysqli`` to ``docker-php-ext-install`` when the app needs MySQL.
-
-    Repos talking to MySQL through the classic ``mysqli`` API fail at runtime
-    with "Class 'mysqli' not found" when only ``pdo_mysql`` was installed —
-    and because ``php -S`` returns HTTP 200 with the fatal error body, the
-    health probe passes and the deployment "succeeds" while the app is broken
-    (verified live on the EC2 instance). ``mysqli`` costs nothing, so append
-    it whenever a ``docker-php-ext-install`` list has pdo_mysql but not it.
-    """
+    """Append ``mysqli`` when ``docker-php-ext-install`` lists pdo_mysql: mysqli-API
+    apps die with "Class 'mysqli' not found", and since ``php -S`` answers HTTP 200
+    with the fatal-error body the probe passes while broken (verified live)."""
     if not dockerfile:
         return dockerfile
     lines = dockerfile.splitlines()
@@ -499,15 +433,9 @@ def _fix_missing_mysqli_extension(dockerfile: str) -> str:
 
 
 def _fix_missing_server_source_copy(dockerfile: str) -> str:
-    """Copy the ``server/`` source when the refiner only copies composer files.
-
-    A runtime image receiving only ``composer.json``/.lock plus the frontend
-    build leaves the ``php -S`` router unable to load (PHP fatal error with
-    HTTP 200), so the health probe passes while the app is broken (verified
-    live on the EC2 instance). Inject a whole-directory
-    ``COPY server/ /app/server/`` when the router path lives under
-    ``/app/server/`` and no full ``server/`` copy exists.
-    """
+    """Copy ``server/`` when the refiner only copies composer files: otherwise the
+    ``php -S`` router can't load (PHP fatal with HTTP 200 — probe passes, app
+    broken, verified live). Injects COPY server/ /app/server/ under /app/server/."""
     if not dockerfile:
         return dockerfile
     if "COPY server/ /app/server/" in dockerfile:
@@ -531,14 +459,9 @@ def _fix_missing_server_source_copy(dockerfile: str) -> str:
 
 
 def _fix_healthcheck_localhost(dockerfile: str) -> str:
-    """Replace ``localhost`` with ``127.0.0.1`` in HEALTHCHECK commands.
-
-    On Alpine-based official PHP images ``localhost`` resolves to IPv6
-    ``::1``, but the app server binds IPv4 only, so the probe never connects,
-    the container is permanently unhealthy and DeployOps rolls back even
-    though the app is up. Verified live on ``php:8.2-cli-alpine``: the exact
-    HEALTHCHECK failed against ``localhost`` while ``127.0.0.1`` returned 200.
-    """
+    """Replace ``localhost`` with ``127.0.0.1`` in HEALTHCHECK commands: on Alpine
+    PHP images localhost resolves to IPv6 ::1 but the app binds IPv4 only, so the
+    probe never connects -> unhealthy -> rollback (verified live on 8.2-cli-alpine)."""
     if not dockerfile:
         return dockerfile
     return re.sub(
@@ -549,21 +472,10 @@ def _fix_healthcheck_localhost(dockerfile: str) -> str:
 
 
 def _fix_inline_frontend_build(dockerfile: str, repo_context: str | None = None) -> str:
-    """Move an inline ``npm build`` out of a PHP image into a Node builder stage.
-
-    Building the React frontend *inside* the PHP runtime image (apt-get
-    nodejs npm + npm run build) fails: php:8.2-cli (Debian) ships an old
-    Node whose distro npm's old eslint dies
-    compiling with "Environment key jest/globals is unknown" (verified live),
-    while good runs use a ``node:20-alpine`` builder stage. Rewrite this image
-    the same way: strip nodejs/npm from the apt-get install, drop the inline
-    build lines, add a ``node:20-alpine AS frontend-builder`` stage, and
-    replace the ``cp -r`` copy with ``COPY --from``.
-
-    Only fires when the PHP stage actually builds the frontend inline (has a
-    ``npm run build`` and no ``node:`` stage), so an existing Node-builder
-    Dockerfile is left untouched.
-    """
+    """Move an inline ``npm build`` out of a PHP image into a Node builder stage:
+    apt-installed nodejs/npm in php:8.2-cli is too old (npm's eslint dies: unknown
+    key "jest/globals", verified live); rewrite to the good shape — node:20-alpine
+    AS frontend-builder. Only fires on inline builds (no node stage yet)."""
     if not dockerfile:
         return dockerfile
     if "npm run build" not in dockerfile and "npm ci" not in dockerfile:
@@ -591,10 +503,8 @@ def _fix_inline_frontend_build(dockerfile: str, repo_context: str | None = None)
         dockerfile = "\n".join(pruned)
         has_node_stage = False
 
-    # Root-layout guard (no front/ dir): strip inline node-build lines from
-    # the PHP stage instead of injecting a front/-layout builder stage. The
-    # app serves fine without compiled vite assets; keeping them guaranteed
-    # a dead build.
+    # Root-layout guard (no front/ dir): strip inline node-build lines — the app
+    # serves fine without compiled vite assets; keeping them guaranteed a dead build.
     if not has_node_stage and "front/" not in dockerfile:
         out: list[str] = []
         skipping_comment = False
@@ -647,9 +557,8 @@ def _fix_inline_frontend_build(dockerfile: str, repo_context: str | None = None)
                     "",
                 ])
                 inserted = True
-        # Detect the start of the inline frontend build inside the PHP stage.
-        # Two shapes occur in the wild: `RUN cd /app/front && npm ...` and
-        # `WORKDIR /app/front` + `COPY front/... ./` + `RUN npm run build`.
+        # Start of an inline frontend build in the PHP stage — two wild shapes:
+        # `RUN cd /app/front && npm ...` or WORKDIR/COPY front + `npm run build`.
         if in_php_stage and (
             s.startswith("RUN cd /app/front")
             or s == "WORKDIR /app/front"
@@ -659,10 +568,8 @@ def _fix_inline_frontend_build(dockerfile: str, repo_context: str | None = None)
             in_inline_build = True
             continue
         if in_inline_build:
-            # Consume every line of the inline build until the copy-out line
-            # (which references the build output and a public dir) or a real
-            # stage/section boundary. Comments and blank lines inside the block
-            # are part of the block.
+            # Consume inline-build lines until the copy-out line (build output +
+            # public dir) or a real boundary; comments/blanks belong to the block.
             if "cp -r" in s and "build" in s and "public" in s:
                 new_lines.append(
                     "COPY --from=frontend-builder /app/front/build/ /app/server/public/"
@@ -705,11 +612,9 @@ def _strip_apt_nodejs_block(lines: list[str]) -> list[str]:
 
 
 def _fix_dev_mode_cmd(dockerfile: str) -> str:
-    """Rewrite dev-mode CMDs to production equivalents (fail-soft).
-
-    Maps npm run dev -> npm start, uvicorn --reload -> uvicorn, flask run ->
-    gunicorn, ng serve -> ng serve --configuration production. Only CMD/ENTRYPOINT.
-    """
+    """Rewrite dev-mode CMD/ENTRYPOINTs to production equivalents (fail-soft):
+    npm run dev -> npm start, uvicorn --reload -> uvicorn, flask run -> gunicorn,
+    ng serve -> ng serve --configuration production."""
     if not dockerfile:
         return dockerfile
     lines = dockerfile.splitlines()
@@ -720,10 +625,8 @@ def _fix_dev_mode_cmd(dockerfile: str) -> str:
         if not (stripped.startswith("CMD") or stripped.startswith("ENTRYPOINT")):
             out.append(line)
             continue
-        # Normalize JSON-array form tokens so the dev-mode patterns match both
-        # `CMD ["npm", "run", "dev"]` and `CMD npm run dev`. A match on the
-        # normalized argument rebuilds the line in shell form; a non-match
-        # keeps the original line byte-for-byte.
+        # Normalize JSON-array tokens so patterns match both `CMD ["npm", ...]`
+        # and shell form; a match rebuilds the line, a non-match keeps it verbatim.
         prefix = "CMD" if stripped.startswith("CMD") else "ENTRYPOINT"
         arg_text = stripped[len(prefix):]
         normalized = arg_text
@@ -737,8 +640,7 @@ def _fix_dev_mode_cmd(dockerfile: str) -> str:
             line = f"{prefix} {normalized}"
             changed = True
         elif re.search(r"\buvicorn\b.*\b--reload\b", normalized) or re.search(r"\buvicorn\b.*--reload", normalized):
-            # Strip --reload and --reload-dir <path> in both shell form
-            # ("uvicorn ... --reload") and JSON-array form ("--reload"]).
+            # Strip --reload/--reload-dir <path> in shell and JSON-array form.
             normalized = re.sub(r"--reload-dir\s+\S+", "", normalized)
             normalized = re.sub(r"--reload", "", normalized)
             line = f"{prefix} {normalized}"
@@ -752,9 +654,8 @@ def _fix_dev_mode_cmd(dockerfile: str) -> str:
             line = f"{prefix} {normalized}"
             changed = True
         out.append(line)
-    # Fail-soft and diff-minimal: no dev-mode CMD -> return the Dockerfile
-    # byte-for-byte (other fixers here behave the same way, and the pipeline
-    # applies this to every image's Dockerfile on every render).
+    # Fail-soft/diff-minimal: no dev-mode CMD -> byte-for-byte original (applied
+    # to every image's Dockerfile on every render).
     if not changed:
         return dockerfile
     return "\n".join(out)
@@ -786,16 +687,32 @@ def _fix_bun_without_lockfile(dockerfile: str, repo_context: str | None) -> str:
     return dockerfile
 
 
-def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None) -> str:
-    """Rewrite dependency installs that reference files absent from the repo context.
+def _fix_gradle_maven_mismatch(dockerfile: str, repo_context: str | None) -> str:
+    """Rewrite Gradle build to Maven when the repo has pom.xml but no build.gradle.
+    The refiner sometimes guesses wrong on Java repos — build dies at COPY."""
+    if not dockerfile or not repo_context:
+        return dockerfile
+    if "gradle" not in dockerfile.lower():
+        return dockerfile
+    if "pom.xml" not in repo_context:
+        return dockerfile
+    if "build.gradle" in repo_context or "build.gradle.kts" in repo_context:
+        return dockerfile
+    dockerfile = re.sub(r"(?mi)^(FROM\s+\S*gradle:\S+)(.*)$",
+                        lambda m: m.group(1).replace("gradle:", "maven:") + " AS builder",
+                        dockerfile)
+    dockerfile = re.sub(r"(?mi)^(\s*RUN\s+)gradle\s+build\s+(.*$)",
+                        r"\1mvn -B package -DskipTests && mv target/*.jar app.jar", dockerfile)
+    dockerfile = re.sub(r'(?mi)^(\s*COPY\s+)(build\.gradle|settings\.gradle|gradle\.properties)\s+(.*)$',
+                        r"\1pom.xml \3", dockerfile)
+    dockerfile = re.sub(r"(?mi)^\s*COPY\s+gradle/\s+.*$", "", dockerfile)
+    return dockerfile
 
-    Also hardens the package-manager invocations so the resulting Dockerfile
-    builds on the DeployOps host:
-    - Composer 2.3+ *blocks* ``composer install`` when any required package is
-      affected by a security advisory (e.g. ``firebase/php-jwt``), aborting the
-      build with exit 2 unless ``--no-blocking`` is passed. The refiner reliably
-      omits that flag, so it is injected here when the repo has a composer.json.
-    """
+
+def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None) -> str:
+    """Rewrite dependency installs referencing files absent from the repo context;
+    also inject Composer's ``--no-blocking`` (Composer 2.3+ blocks installs on
+    security advisories with exit 2, and the refiner omits the flag)."""
     if not dockerfile or not repo_context:
         return dockerfile
 
@@ -804,6 +721,7 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
     dockerfile = _fix_detached_install_run(dockerfile)
     dockerfile = _fix_mixed_apt_apk(dockerfile)
     dockerfile = _fix_bun_without_lockfile(dockerfile, repo_context)
+    dockerfile = _fix_gradle_maven_mismatch(dockerfile, repo_context)
     if "composer.json" in repo_context:
         dockerfile = _ensure_debian_git_for_composer(dockerfile)
     dockerfile = _fix_php_alpine_apk_extensions(dockerfile)
@@ -848,9 +766,8 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
         # Skip COPY lines for missing dependency files
         if stripped.startswith("COPY") and any(f" {fname} " in stripped or stripped.endswith(f" {fname}") for fname in missing_deps):
             continue
-        # Composer 2.3+ blocks on security advisories by default; the refiner
-        # omits --no-blocking and the build dies with exit 2. Inject it when
-        # the repo actually has a composer manifest.
+        # Composer 2.3+ blocks on security advisories (exit 2); the refiner omits
+        # --no-blocking, so inject it when the repo has a composer manifest.
         if (
             "composer.json" in repo_context
             and stripped.startswith("RUN")
@@ -861,13 +778,8 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
             if "--no-blocking" not in stripped:
                 stripped = stripped.rstrip() + " --no-blocking"
             line = stripped
-        # GitHub rate-limits unauthenticated zipball downloads (codeload /
-        # api.github.com) per IP; a lockfile that pins dist to GitHub URLs can
-        # make composer install die with "Failed to download ... (HTTP/2 429)"
-        # even though the same package is fetchable via git. Composer's default
-        # preferred-install is dist, and it does NOT fall back to source on a
-        # 429. Rewrite the install into a dist-then-source fallback so the
-        # build survives transient rate limits (git protocol isn't API-limited).
+        # GitHub rate-limits zipball downloads (429) and Composer's dist install
+        # never falls back to source on 429 — rewrite as dist || source (git works).
         if (
             "composer.json" in repo_context
             and stripped.startswith("RUN")
@@ -883,11 +795,8 @@ def _sanitize_dockerfile_dependencies(dockerfile: str, repo_context: str | None)
     return "\n".join(new_lines)
 
 
-# Feedback only rewrites the Dockerfile when it explicitly targets container
-# concerns. The repo's real Dockerfile (captured by CodeSec) is otherwise
-# preserved verbatim — a free-tier LLM happily rewrites an unknown repo's
-# Dockerfile into something generic and broken when asked only to "make it
-# cheaper" (that bug ships a Dockerfile whose build context can't satisfy it).
+# Feedback rewrites the Dockerfile only when it targets container concerns; else
+# the captured original ships verbatim (a free-tier LLM broke a valid one once).
 _DOCKER_FEEDBACK_TERMS: Final[tuple[str, ...]] = (
     "docker",
     "container",
@@ -901,12 +810,9 @@ _DOCKER_FEEDBACK_TERMS: Final[tuple[str, ...]] = (
 
 
 def _feedback_targets_dockerfile(feedback: str) -> bool:
-    """True when the user's request plausibly concerns the Dockerfile.
-
-    Conservative keyword scan, not NLP: a mention of any container term means
-    the LLM may rewrite the Dockerfile; anything else (cost, AZs, region,
-    instance type, "regenerate") leaves it untouched.
-    """
+    """True when the user's request plausibly concerns the Dockerfile — a
+    conservative keyword scan, not NLP: cost/AZ/region/"regenerate" requests
+    leave it untouched."""
     lower = (feedback or "").lower()
     return any(term in lower for term in _DOCKER_FEEDBACK_TERMS)
 
@@ -918,15 +824,9 @@ def _refine_dockerfiles(
     repo_context: str | None,
     force_dockerfile: bool,
 ) -> dict[str, str] | None:
-    """Apply the LLM's Dockerfile edits (plural mode) with per-file
-    sanitization.
-
-    Each Dockerfile in the refined output is validated and run through
-    ``_sanitize_dockerfile_dependencies`` exactly like the singular path.
-    Anything invalid keeps that file's original content (fail-soft, per
-    file). Returns the updated path -> content map, or ``None`` when no
-    Dockerfiles were supplied in the first place.
-    """
+    """Apply the LLM's plural Dockerfile edits with per-file sanitization: each
+    candidate is validated + sanitized like the singular path, anything invalid
+    keeps that file's original (per-file fail-soft); None if none were supplied."""
     if not dockerfiles:
         return None
     if not (force_dockerfile or _feedback_targets_dockerfile(feedback)):
@@ -958,33 +858,10 @@ def refine_terraform(
     repo_context: str | None = None,
     force_dockerfile: bool = False,
 ) -> tuple[TerraformFiles, str | None] | tuple[TerraformFiles, dict[str, str] | None]:
-    """Refine the rendered artifacts from a user prompt.
-
-    Args:
-        current: the Terraform files produced by ``generate_terraform``.
-        feedback: the user's free-form change request from Gate 2 (or the
-            pipeline's first-try "make it match the repo" instruction).
-        dockerfile: the effective Dockerfile content (if this is a container
-            deployment), refined alongside the Terraform when the LLM edits
-            it. Legacy singular mode — return type matches (``str``).
-        dockerfiles: multi-container mode — a dict of repo-relative path to
-            Dockerfile content, one entry per detected container. When set,
-            the return type is the path -> content map instead. Mutually
-            exclusive with ``dockerfile``.
-        repo_context: the whole-repo digest (``core.repo_ingestor``) so the
-            LLM can honor the request against the real code, not just the
-            rendered artifacts.
-        force_dockerfile: when True, always let the LLM rewrite the Dockerfile
-            regardless of whether the feedback mentions container terms. Used
-            on the FIRST try, where the Dockerfile is a bare deterministic
-            stub (``FROM python:3.12-slim COPY . /app``) that cannot run the
-            app — the whole point is to replace it with a real one.
-
-    Returns:
-        A ``(TerraformFiles, dockerfile)`` pair honoring the request, or — on
-        any LLM failure or invalid output — ``(current, dockerfile)``
-        unchanged (fail-soft, same contract as every other LLM call here).
-    """
+    """Refine rendered artifacts from a prompt (Gate-2 feedback, or the first-try "match the repo"
+    instruction). Legacy ``dockerfile`` vs multi-container ``dockerfiles`` map sets the return shape;
+    ``repo_context`` feeds the real code; ``force_dockerfile=True`` replaces even a captured Dockerfile
+    (first try: the stub can't run). Fail-soft: any LLM failure/invalid output returns inputs unchanged."""
     # Plural mode: every caller passing dockerfiles gets a dict back.
     plural = dockerfiles is not None
     prompt_files = dict(dockerfiles) if dockerfiles else (
@@ -1008,11 +885,9 @@ def refine_terraform(
                     dockerfiles, refined, feedback, repo_context, force_dockerfile
                 )
             else:
-                # Dockerfile: refine only when one exists, the feedback explicitly
-                # targets container concerns (or force_dockerfile is set — first
-                # try), AND the LLM returned a valid replacement. Anything else
-                # keeps the original Dockerfile untouched. Backward-compatible:
-                # Terraform-only responses keep the original Dockerfile too.
+                # Dockerfile: refine only when one exists, feedback targets container
+                # concerns (or force_dockerfile — first try), AND the LLM returned a
+                # valid replacement; anything else keeps the original untouched.
                 refined_dockerfile = dockerfile
                 if dockerfile is not None and (force_dockerfile or _feedback_targets_dockerfile(feedback)):
                     if refined.dockerfile is None or not _valid_file(refined.dockerfile):

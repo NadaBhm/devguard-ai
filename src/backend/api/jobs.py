@@ -1,11 +1,9 @@
 """
 Job endpoints.
 
-The FastAPI process drives the LangGraph orchestrator in-process
-(get_orchestrator_graph built once at startup). Each call to
-run_workflow / resume_workflow returns at the next human gate; the API
-persists the resulting state to Postgres when the run reaches a terminal
-state.
+The FastAPI process drives the LangGraph orchestrator in-process (graph built
+once at startup); run_workflow / resume_workflow return at the next human gate,
+and terminal-state results are persisted to Postgres.
 """
 
 
@@ -61,8 +59,7 @@ class ArtifactEditRequest(BaseModel):
 
 
 class ArtifactsEditRequest(BaseModel):
-    """A batch of artifact edits, all applied atomically to the paused run's
-    state (and its materialized rows)."""
+    """Batch of artifact edits applied atomically to the paused run's state and rows."""
 
     files: list[ArtifactEditRequest]
 
@@ -123,8 +120,7 @@ def _store_uploaded_files(files: list[UploadFile], job_id: str) -> Path:
 
 
 def _get_owned_run(db: Session, job_id: str, user_id: str) -> models.AnalysisRun:
-    """Fetch a run belonging to ``user_id`` or 404, without revealing the
-    run's existence to other tenants."""
+    """Fetch a run owned by ``user_id`` or 404, without revealing existence."""
     run = (
         db.query(models.AnalysisRun)
         .filter(
@@ -144,8 +140,7 @@ def _publish(state: dict, progress: int, message: str) -> None:
     publish_progress(job_id, phase=phase, progress=progress, message=message)
 
 
-# Coarse per-node progress percentages so clients get streaming instead of
-# only the 5/30/60/100 milestones.
+# Coarse per-node percentages so clients stream beyond the 5/30/60/100 milestones.
 _NODE_PROGRESS = {
     "codesec_agent": 15,
     "human_gate_1": 25,
@@ -222,8 +217,8 @@ def create_job(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Start a job: create Project + AnalysisRun, run the orchestrator up to
-    the first human gate, and persist the resulting state."""
+    """Create Project + AnalysisRun, run the orchestrator to the first human
+    gate, and persist the resulting state."""
     if not body.repo_url:
         raise HTTPException(status_code=400, detail="A repository URL is required")
     return _create_job_for_repo(
@@ -266,8 +261,8 @@ def check_update(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Compare the project's most recently analyzed commit against the tip
-    of its default branch, without cloning or starting a run."""
+    """Compare the last analyzed commit against the default-branch tip, with
+    no cloning or run started."""
     run = _get_owned_run(db, job_id, str(current_user.id))
     project = run.project
 
@@ -304,14 +299,12 @@ def trigger_update(
 ):
     """Start a new run for the same project as an in-place update: full
     CodeSec + InfraCost re-analysis of the latest commit, then a lightweight
-    redeploy onto the currently live ECS service instead of provisioning
-    fresh infrastructure from scratch."""
+    redeploy onto the currently live ECS service, not fresh infrastructure."""
     run = _get_owned_run(db, job_id, str(current_user.id))
     project = run.project
 
-    # "rolled_back" still counts as live: rollback swaps the ECS service to a
-    # previous task-definition revision without tearing down, so a real running
-    # service remains; only "failed" and "destroyed" mean "nothing to update".
+    # "rolled_back" still counts as live: rollback swaps ECS to a previous
+    # task-def revision without teardown; only "failed"/"destroyed" mean nothing to update.
     deployment = (
         db.query(models.Deployment)
         .join(models.AnalysisRun, models.Deployment.run_id == models.AnalysisRun.id)
@@ -421,8 +414,7 @@ def approve_job(
             on_node_progress=_publish_node_progress(job_id),
         )
         # Keep the orchestrator job_id aligned with the DB run id (create_job
-        # does the same), so report/SBOM files are keyed by the run the API
-        # actually exposes.
+        # does the same) so report/SBOM files key to the run the API exposes.
         state["job_id"] = job_id
         final_report = state.get("final_report")
         if isinstance(final_report, dict):
@@ -434,8 +426,7 @@ def approve_job(
     run = update_run_state(db, job_id, dict(state))
 
     if state.get("status") in ("completed", "rolled_back", "failed", "rejected"):
-        # The orchestrator runs in-process, so write results synchronously to
-        # the schema tables (persist_results is idempotent).
+        # In-process orchestrator: write results synchronously to schema tables (idempotent).
         persist_results(db, job_id, dict(state))
         _publish(dict(state), 100, f"Run finished: {state.get('status')}")
         publish_results_ready(job_id)
@@ -462,14 +453,10 @@ def edit_artifacts(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Apply manual artifact edits to a run paused at Gate 2.
-
-    Edits go into BOTH the orchestrator's ``_deploy_inputs`` (what DeployOps
-    consumes on resume) and the ``generated_terraform`` shape (what the tabs
-    read), then the materialized artifact rows are rewritten with an
-    edit-audit trail. Only allowed while the run is paused at Gate 2 -- before
-    then there are no artifacts, after approval the deployment is in flight.
-    """
+    """Apply manual artifact edits to a run paused at Gate 2: writes into BOTH
+    ``_deploy_inputs`` (what DeployOps consumes on resume) and the
+    ``generated_terraform`` shape the tabs read, rewriting materialized rows with
+    an audit trail. Gate 2 only: before it no artifacts exist; after, in flight."""
     if not body.files:
         raise HTTPException(status_code=422, detail="No artifact edits supplied")
 
@@ -486,8 +473,8 @@ def edit_artifacts(
             ),
         )
 
-    # Validate every edit up front so a batch fails atomically â€” never a
-    # partial write of broken files.
+    # Validate every edit up front so a batch fails atomically -- never partial
+    # writes of broken files.
     for edit in body.files:
         if not allowed_file_path(edit.file_path):
             raise HTTPException(
@@ -503,9 +490,8 @@ def edit_artifacts(
     _apply_artifact_edits(dict(state), body.files)
     update_run_state(db, job_id, dict(state))
 
-    # Rewrite the materialized artifact rows with the audit trail (bear in
-    # mind persist_results deletes/recreates rows at terminal status, so the
-    # audit is only visible while the run is paused).
+    # Rewrite materialized artifact rows with an audit trail (persist_results
+    # deletes/recreates rows at terminal status, so it's visible only while paused).
     db.query(models.TerraformArtifact).filter(models.TerraformArtifact.run_id == job_id).delete()
     edited_paths = {edit.file_path for edit in body.files}
     written = 0
@@ -534,10 +520,9 @@ def edit_artifacts(
 
 
 def _apply_artifact_edits(state: dict, edits: list[ArtifactEditRequest]) -> None:
-    """Apply file edits to the orchestrator state in place, into both the
+    """Apply file edits to orchestrator state in place, into both the
     ``_deploy_inputs`` block DeployOps reads and the ``generated_terraform``
-    block the tabs read (supporting both the nested ``files`` shape and the
-    mock's flat keys)."""
+    block the tabs read (nested ``files`` shape and mock's flat keys)."""
     infracost = state.setdefault("infracost_result", {})
     deploy_inputs = infracost.setdefault("_deploy_inputs", {})
     artifacts = deploy_inputs.setdefault("artifacts", {})
@@ -592,14 +577,13 @@ def _apply_artifact_edits(state: dict, edits: list[ArtifactEditRequest]) -> None
 
 
 def _apply_dockerfile_edit(images: list[dict], context: str, content: str) -> None:
-    """Route a Dockerfile edit to the plural image whose build context
-    matches. Root-level Dockerfile edits target the image with context "."."""
+    """Route a Dockerfile edit to the plural image whose build context matches
+    ("." for root-level Dockerfiles); falls back to the primary (first) image."""
     for image in images:
         img_context = (image.get("context") or ".").rstrip("/")
         if img_context == context:
             image["dockerfile"] = content
             return
-    # No exact context match: apply to the primary (first) image.
     if images:
         images[0]["dockerfile"] = content
 
@@ -617,8 +601,7 @@ def rollback_job(
     current_user: models.User = Depends(get_current_user),
 ):
     """Roll back a run's most recent deployment to a previous ECS
-    task-definition revision, delegating to DeployOpsAgent using the AWS
-    config captured in the persisted deployment record."""
+    task-definition revision via DeployOpsAgent, using the recorded AWS config."""
     run = _get_owned_run(db, job_id, str(current_user.id))
 
     deployment = (
@@ -630,8 +613,7 @@ def rollback_job(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    # deployops_result stores terraform_outputs, not aws_config; use the same
-    # _extract_aws_config() helper that destroy_job already uses.
+    # deployops_result stores terraform_outputs, not aws_config; reuse destroy_job's helper.
     resolved = _extract_aws_config(deployment)
     region = resolved.get("region") or "us-east-1"
     ecs_cluster = resolved.get("ecs_cluster")
@@ -697,10 +679,9 @@ class DestroyRequest(BaseModel):
 
 def _extract_aws_config(deployment: models.Deployment) -> dict:
     """Resolve ecs_cluster/service_name/region from a deployment's
-    infrastructure_json, trying the DeployOps-native `aws_config` shape
-    first and falling back to the `terraform_outputs` shape (with the same
-    suffix-derivation workaround as the /monitoring endpoint) for older
-    deployments where ecs_cluster_name was stored empty."""
+    infrastructure_json: DeployOps-native ``aws_config`` shape first, falling
+    back to ``terraform_outputs`` (same suffix-derivation workaround as the
+    /monitoring endpoint) for older records with ecs_cluster_name empty."""
     infra = deployment.infrastructure_json or {}
     aws_config = infra.get("aws_config") or {}
     region = aws_config.get("region") or deployment.aws_region or "us-east-1"
@@ -721,11 +702,8 @@ def _extract_aws_config(deployment: models.Deployment) -> dict:
         "region": region,
         "ecs_cluster": ecs_cluster,
         "service_name": service_name,
-        # True only when ecs_cluster came from the suffix-derivation
-        # workaround above rather than being read directly from stored data.
-        # Callers that mutate a live service (update) should treat this as a
-        # reason to refuse rather than risk targeting the wrong cluster --
-        # callers that only read (rollback/destroy) can ignore it.
+        # True only when ecs_cluster came from the suffix-derivation workaround,
+        # not stored data; mutators (update) should refuse, read-only callers may ignore.
         "cluster_was_guessed": cluster_was_guessed,
     }
 
@@ -737,10 +715,9 @@ def destroy_job(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Destroy a job's deployed infrastructure. Requires the caller to type
-    the exact service_name as confirmation (feature/destroy-deployment
-    decision #2) -- enforced server-side, not just via a disabled UI button.
-    """
+    """Destroy a job's deployed infrastructure. Requires typing the exact
+    service_name as confirmation (feature/destroy-deployment decision #2) --
+    enforced server-side, not just a disabled UI button."""
     run = _get_owned_run(db, job_id, str(current_user.id))
 
     deployment = (
@@ -787,11 +764,8 @@ def destroy_job(
         publish_results_ready(job_id)
         return {"job_id": job_id, "status": "destroyed", "result": result}
 
-    # no_state / failed / partial_failure: don't touch deployment.status --
-    # leaving it as-is is more honest than silently marking it destroyed
-    # when resources may still be live. remaining_resources lets the UI
-    # show exactly what's left and where (feature/destroy-deployment
-    # decision #3).
+    # no_state/failed/partial_failure: don't mutate deployment.status -- resources
+    # may still be live; remaining_resources shows UI what remains (destroy-decision #3).
     return {"job_id": job_id, "status": status, "result": result}
 
 @router.get("/{job_id}/deployments/revisions")
@@ -908,8 +882,7 @@ def get_job_results(
         db.query(models.AgentTask).filter(models.AgentTask.run_id == job_id)
     )
 
-    # In-flight/gate-paused runs have no materialized rows yet; derive live
-    # views from run_metadata (see derive_results_from_state in persistence.py).
+    # In-flight/gate-paused runs have no materialized rows yet; derive live views.
     live = derive_results_from_state(dict(run.run_metadata or {}))  # type: ignore
     if not findings and live["codesec_findings"]:
         findings = live["codesec_findings"]
@@ -970,8 +943,7 @@ def download_report(
         return FileResponse(pdf_path, media_type="application/pdf", filename=f"report-{job_id}.pdf")
 
     if not html_path.is_file():
-        # The report is keyed by job_id (normalized to the DB run id on resume),
-        # so regenerate it from the persisted state if the file is missing.
+        # Reports key on job_id (normalized to the DB run id), so regenerate if missing.
         try:
             generate_report(dict(run.run_metadata or {}), output_dir=report_dir, want_pdf=False)  # type: ignore
         except Exception as exc:
@@ -1035,17 +1007,13 @@ def list_jobs(
 
 
 def _current_gate(state: dict) -> str | None:
-    """Return the gate the run is paused at, if any.
-
-    LangGraph signals paused gates via ``__interrupt__`` (a list of interrupt
-    payloads); fall back to the status string, then to human_gates.
-    """
+    """Return the gate the run is paused at, if any: ``__interrupt__`` payload
+    first (LangGraph's paused-gate signal), then the status string, then human_gates."""
     interrupts = state.get("__interrupt__")
     if isinstance(interrupts, list) and interrupts:
         entry = interrupts[0]
-        # graph.py normalizes Interrupt objects to plain dicts up front, storing
-        # {"gate": ..., "context": ...} unwrapped -- mirror RunDetailPage.tsx's
-        # interruptInfo(), which handles both shapes for older checkpoints.
+        # graph.py normalizes Interrupts to unwrapped {"gate": ..., "context": ...} dicts;
+        # mirror RunDetailPage.tsx interruptInfo(), which handles both shapes for old runs.
         if isinstance(entry, dict) and "value" in entry:
             value = entry.get("value", {})
         elif isinstance(entry, dict):
@@ -1059,8 +1027,7 @@ def _current_gate(state: dict) -> str | None:
     status = state.get("status")
     if status and status.startswith("awaiting_approval_gate"):
         return status
-    # Fallback: check human_gates so artifact-edit validation agrees with
-    # the frontend.
+    # Fallback: human_gates, so artifact-edit validation agrees with the frontend.
     for gate_name in ("gate_1_pre_infracost", "gate_2_pre_deployops"):
         gate = (state.get("human_gates") or {}).get(gate_name)
         if isinstance(gate, dict) and gate.get("required") and gate.get("approved") is None:

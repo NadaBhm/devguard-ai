@@ -1,9 +1,9 @@
 """
 Database persistence helpers for orchestrator state.
 
-The light writes (status + run_metadata on analysis_runs) and the heavier
-materialization into the child tables both happen in the request path, since
-the orchestrator runs in-process inside the API.
+Light writes (status + run_metadata on analysis_runs) and heavier child-table
+materialization both happen in the request path, since the orchestrator runs
+in-process inside the API.
 """
 import json
 import logging
@@ -26,9 +26,8 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = ("completed", "rolled_back", "failed", "rejected")
 
-# The codesec agent's Severity enum has "info", but the severity CHECK
-# constraint only accepts the classic four; map into the constrained set so
-# real scans can't 500 on commit.
+# The codesec agent's Severity enum has "info", but the severity CHECK constraint
+# only accepts the classic four; map down so real scans can't 500 on commit.
 _ALLOWED_SEVERITIES = ("critical", "high", "medium", "low")
 
 
@@ -53,8 +52,7 @@ _ALLOWED_SCANNERS = ("semgrep", "gitleaks", "trivy", "bandit")
 
 
 def _normalize_scanner(scanner: str | None) -> str:
-    """Map scanner names into the constrained codesec_findings set (the
-    built-in secrets scanner's ``regex-fallback`` maps to ``gitleaks``)."""
+    """Map scanner names into the constrained codesec_findings set (regex-fallback -> gitleaks)."""
     value = (scanner or "").strip().lower()
     if value in _ALLOWED_SCANNERS:
         return value
@@ -62,11 +60,10 @@ def _normalize_scanner(scanner: str | None) -> str:
 
 
 def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
-    """Docker artifacts from an orchestrator ``state`` as
-    ``(file_path, artifact_type, content)`` tuples (content None when absent).
-    Real InfraCost stashes them at ``infracost_result._deploy_inputs.artifacts``
-    with the plural ``docker_images`` list; the mock/legacy shape lives at
-    ``deployops_result.artifacts`` with singular ``dockerfile`` + ``docker_image``.
+    """Docker artifacts from ``state`` as ``(file_path, artifact_type, content)``
+    tuples (content None when absent). Real InfraCost: plural ``docker_images``
+    at ``infracost_result._deploy_inputs.artifacts``; mock/legacy: singular
+    ``dockerfile`` + ``docker_image`` at ``deployops_result.artifacts``.
     """
     artifacts: dict[str, Any] = {}
     infracost = cast(dict[str, Any], state.get("infracost_result") or {})
@@ -104,10 +101,8 @@ def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
 
 
 def _artifact_specs(state: dict) -> list[tuple[str, str, str]]:
-    """The ``(file_path, artifact_type, content)`` rows for a state: the
-    generated Terraform files (nested ``files`` from the real agent, flat
-    keys from the mock) plus the Docker artifacts from ``_docker_artifacts``.
-    """
+    """``(file_path, artifact_type, content)`` rows for a state: generated
+    Terraform files (nested ``files`` real, flat keys mock) plus docker artifacts."""
     infracost = cast(dict[str, Any], state.get("infracost_result") or {})
     terraform_raw = cast(dict[str, Any], infracost.get("generated_terraform") or {})
     terraform_files = terraform_raw.get("files")
@@ -149,8 +144,7 @@ def coarse_status(orch_status: str) -> str:
 
 
 def _jsonable_interrupt(entry: Any) -> Any:
-    """LangGraph ``Interrupt`` objects -> the dict shape the frontend expects
-    (``state.__interrupt__[i].value``); plain dicts pass through."""
+    """``Interrupt`` -> frontend shape (``__interrupt__[i].value``); dicts pass through."""
     if isinstance(entry, dict):
         return entry
     value = getattr(entry, "value", None)
@@ -160,9 +154,8 @@ def _jsonable_interrupt(entry: Any) -> Any:
 
 
 def serialize_state(state: dict) -> dict:
-    """JSON-safe state, preserving the ``__interrupt__`` payload the frontend
-    GateApproval reads (it carries gate context that would otherwise be lost,
-    leaving the approval card blank)."""
+    """JSON-safe state preserving ``__interrupt__`` (GateApproval reads its gate
+    context; without it the approval card goes blank)."""
     clean = {k: v for k, v in state.items() if not k.startswith("__")}
     interrupt = state.get("__interrupt__")
     if interrupt is not None:
@@ -189,9 +182,8 @@ def update_run_state(db: Session, run_id: str, state: dict) -> AnalysisRun:
 
 
 def persist_results(db: Session, run_id: str, state: dict) -> int:
-    """Materialize a completed orchestrator state into the child result
-    tables. Idempotent: existing child rows for the run are replaced first.
-    Returns the number of rows written."""
+    """Materialize a completed orchestrator state into the child result tables;
+    idempotent (existing rows replaced first). Returns the number of rows written."""
     db.query(Deployment).filter(Deployment.run_id == run_id).delete()
     db.query(TerraformArtifact).filter(TerraformArtifact.run_id == run_id).delete()
     db.query(InfracostEstimate).filter(InfracostEstimate.run_id == run_id).delete()
@@ -300,12 +292,10 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
 
 
 def derive_results_from_state(metadata: dict) -> dict:
-    """Build normalized result rows straight from orchestrator state.
-
-    The child tables are only materialized at a terminal status (see
-    ``persist_results``); for an in-flight or gate-paused run the UI still
-    needs these row shapes, so derive them from ``run_metadata``.
-    """
+    """Build normalized result rows straight from orchestrator state: child
+    tables are only materialized at a terminal status (see ``persist_results``),
+    so for an in-flight or gate-paused run the UI derives these row shapes
+    from ``run_metadata``."""
     from uuid import uuid4
 
     codesec = cast(dict[str, Any], metadata.get("codesec_result") or {})
@@ -351,8 +341,7 @@ def derive_results_from_state(metadata: dict) -> dict:
         estimates.append(_estimate_row(
             item.get("service", "unknown"), item.get("service", "unknown"), monthly
         ))
-    # Derive a total row when the breakdown is empty so the UI shows a
-    # non-zero cost.
+    # Derive a total row when the breakdown is empty so the UI shows non-zero cost.
     if not estimates and cost_estimate.get("monthly_cost_usd"):
         estimates.append(_estimate_row(
             "Estimated total", "total", float(cost_estimate["monthly_cost_usd"])

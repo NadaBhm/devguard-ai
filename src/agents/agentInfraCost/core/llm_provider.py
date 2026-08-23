@@ -1,18 +1,9 @@
-"""Phase B (post-mission extension): provider-agnostic LLM call abstraction.
+"""Provider-agnostic LLM call abstraction over OpenRouter's chat endpoint.
 
-Wraps OpenRouter's OpenAI-compatible chat-completions endpoint. The model is
-always a parameter (default ``_DEFAULT_MODEL``, overridable per call or via
-``OPENROUTER_MODEL``), so swapping models never touches a caller. Same
-failure contract as ``core.llm_enrichment``: every failure mode collapses to
-``None`` so callers write exactly one fallback branch.
-
-Retry policy (exponential backoff, so one provider hiccup doesn't drop an LLM
-stage): 5xx/429/408 and OpenRouter's *provider-side* 404s ("Provider returned
-error" — the upstream Nvidia/etc. endpoint flaked; observed intermittently on
-free-tier models) are retried, as are dropped/
-truncated connections (``httpx.TransportError``) and 200s whose body lacks the
-``choices`` shape. Permanent failures never waste an attempt: a plain 404
-(unknown model slug), other 4xx, and timeouts fail immediately.
+Model always a parameter (default / per-call / ``OPENROUTER_MODEL``), failures
+collapse to ``None``. Exponential-backoff retries cover 5xx/429/408, provider-side
+404s ("Provider returned error"), transport errors and choice-less 200s; other 4xx
+and timeouts fail immediately.
 """
 
 from __future__ import annotations
@@ -32,12 +23,8 @@ _OPENROUTER_URL: Final[str] = "https://openrouter.ai/api/v1/chat/completions"
 _DEFAULT_MODEL: Final[str] = "nvidia/nemotron-3-ultra-550b-a55b:free"
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 20.0
 
-# Without an explicit max_tokens, OpenRouter caps completion length at a small
-# per-model default (commonly ~2k tokens). The Terraform refiner must echo the
-# whole main.tf/variables.tf/outputs.tf inside a single JSON string — a
-# monitoring stack easily runs to tens of thousands of output tokens — so the
-# refiner passes a large budget and truncation mid-JSON is what previously
-# produced "Unterminated string" validation failures and a retry loop.
+# Without explicit max_tokens OpenRouter caps completions small (~2k), truncating
+# the refiner's whole-files echo mid-JSON ("Unterminated string" retry loop).
 _DEFAULT_MAX_TOKENS: Final[int] = 16_384
 
 _MAX_LLM_RETRIES: Final[int] = 3
@@ -45,9 +32,8 @@ _RETRY_BASE_DELAY_SECONDS: Final[float] = 1.0
 _RETRY_FACTOR: Final[float] = 2.0
 _RETRY_JITTER_SECONDS: Final[float] = 0.1
 
-# Status codes worth another attempt. 404 is only retryable when OpenRouter
-# attributes it to the upstream provider (see _is_transient_status) — an
-# unknown-model 404 comes from OpenRouter itself and would replay forever.
+# 404 is only retryable when OpenRouter attributes it to the upstream provider
+# (_is_transient_status); an unknown-model 404 comes from OpenRouter itself.
 _RETRYABLE_STATUS_CODES: Final[frozenset[int]] = frozenset({408, 429, 500, 502, 503, 504})
 _PROVIDER_404_MARKER: Final[str] = "Provider returned error"
 

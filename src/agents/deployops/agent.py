@@ -31,9 +31,8 @@ from src.agents.deployops.models import (
 
 logging.basicConfig(level=logging.INFO)
 
-# agentInfraCost's generated ecs/variables.tf.j2 declares vpc_id, subnet_ids and
-# db_* as required vars with no defaults; inject env values into tfvars so
-# `terraform plan` never blocks on interactive input.
+# InfraCost's ecs/variables.tf.j2 declares vpc_id/subnet_ids/db_* required with no defaults;
+# inject env values into tfvars so `terraform plan` never blocks on interactive input.
 _ENV_TF_VARS = (
     ("DEVGUARD_VPC_ID", "vpc_id"),
     ("DEVGUARD_SUBNET_IDS", "subnet_ids"),
@@ -64,17 +63,14 @@ def _terraform_env_vars() -> Dict[str, Any]:
                 continue
         tf_vars[tf_name] = value
 
-    # Standing sandbox DB supplied via DEVGUARD_DB_*: skip provisioning a
-    # fresh RDS (10-min readiness race crashed ECS tasks before the app
-    # could ever connect).
+    # Standing sandbox DB supplied via DEVGUARD_DB_*: skip provisioning a fresh RDS (its 10-min
+    # readiness race crashed ECS tasks before the app could ever connect).
     required_db_envs = {"DEVGUARD_DB_HOST", "DEVGUARD_DB_PORT"}
     if required_db_envs.issubset(set(db_envs_present)):
         tf_vars["create_db"] = False
 
-    # The EC2 template declares a single required `subnet_id` (singular) while
-    # the ECS/S3 templates take `subnet_ids` (plural). DeployOps only knows the
-    # plural env var, so derive the singular value from the first subnet when
-    # the EC2 var isn't set explicitly.
+    # The EC2 template requires a singular `subnet_id` while ECS/S3 take plural `subnet_ids`;
+    # DeployOps only knows the plural env var, so derive the singular from the first subnet.
     if "subnet_id" not in tf_vars and tf_vars.get("subnet_ids"):
         tf_vars["subnet_id"] = tf_vars["subnet_ids"][0]
     return tf_vars
@@ -86,16 +82,10 @@ class DeployOpsAgent:
 
     @staticmethod
     def _check_db_vars_available(tf_dir: Path) -> Optional[str]:
-        """Return an error message when terraform requires DB vars the
-        deployer didn't supply, else None.
-
-        The ECS template declares db_host/db_port/db_name/db_user/db_password
-        as required variables (no default) whenever a database was detected.
-        DeployOps fills them from DEVGUARD_DB_* env vars; if any are missing,
-        `terraform plan` fails on a cryptic "required variable is not set"
-        error after a full image build/push. Detect the requirement from the
-        generated variables.tf and fail fast with a clear message.
-        """
+        """Return an error message when terraform requires DB vars the deployer didn't supply.
+        The ECS template declares db_* as required (no default) whenever a database was detected,
+        filled from DEVGUARD_DB_* env vars; if any are missing, `terraform plan` fails cryptically
+        after a full build/push -- detect from variables.tf and fail fast with a clear message."""
         variables_tf = tf_dir / "variables.tf"
         if not variables_tf.exists():
             return None
@@ -151,9 +141,8 @@ class DeployOpsAgent:
         workspace_dir = self._workspace_dir(job_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
 
-        # Payload carries only Dockerfile + terraform; without a checkout the build
-        # context lacks app code and real image builds fail (npm ci). Clone when
-        # a repo_url is provided.
+        # Payload carries only Dockerfile + terraform; without a checkout real image builds
+        # fail (npm ci lacks app code). Clone when a repo_url is provided.
         repo_url = (deploy_payload.metadata or {}).get("repo_url")
         if repo_url:
             from src.lib.repo import clone_repo
@@ -264,11 +253,9 @@ class DeployOpsAgent:
     def _resolve_deployed_url(
         self, output: Dict[str, Any], payload: DeployPayload
     ) -> Optional[str]:
-        """Pick the reachable URL from Terraform outputs for any compute type.
-
-        EC2 uses the first of public_ips, S3 its website endpoint; ECS and other
-        types fall back to the legacy output keys DeployOps historically read.
-        """
+        """Pick the reachable URL from Terraform outputs for any compute type: EC2 uses the first
+        of public_ips, S3 its website endpoint; ECS and other types fall back to the legacy
+        output keys DeployOps historically read."""
         compute = payload.compute_type
 
         if compute == "ec2":
@@ -346,13 +333,9 @@ class DeployOpsAgent:
 
     @staticmethod
     def _static_source_dir(workspace_dir: Path) -> Path:
-        """Pick the directory whose contents should be uploaded to the S3 site.
-
-        Tries conventional build output dirs (dist/, public/, _site/, build/,
-        out/, static/) at the workspace root; the first one that exists and
-        actually holds the site's index document wins. Otherwise the whole
-        workspace is used so bare "just HTML in a folder" repos still work.
-        """
+        """Pick the directory whose contents should be uploaded to the S3 site: the first
+        existing conventional build dir (dist/, public/, _site/, build/, out/, static/) holding an
+        index document wins; else the whole workspace so bare HTML-folder repos still work."""
         for candidate in ("dist", "public", "_site", "build", "out", "static"):
             candidate_dir = workspace_dir / candidate
             if not candidate_dir.is_dir():
@@ -391,18 +374,10 @@ class DeployOpsAgent:
 
     @xray_recorder.capture("_deploy_existing_ecs_revision")  # type: ignore[reportCallIssue]
     async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
-        """Redeploy the current commit onto an EXISTING ECS service: build/push
-        fresh image(s) via the normal _build_and_push_image() path, register a
-        new task-definition revision pointing at them, and update the service,
-        skipping Terraform entirely since no infrastructure changes.
-
-        FIX (previously): this method only bumped a DEPLOYMENT_REVISION env var
-        and left containerDefinitions[].image untouched, so it silently kept
-        redeploying the OLD image on every "update".
-
-        See ExistingDeploymentInfo in src/agents/orchestrator/state.py for how
-        the target cluster/service is resolved before this method runs.
-        """
+        """Redeploy the current commit onto an EXISTING ECS service: build/push fresh images,
+        register a task-definition revision pointing at them, update the service, skip Terraform.
+        FIX (previously): only bumped DEPLOYMENT_REVISION and left containerDefinitions[].image
+        untouched, silently redeploying the OLD image (see ExistingDeploymentInfo in state.py)."""
         job_id = payload.job_id
         region = payload.aws_config.region
         cluster = payload.aws_config.model_dump().get("ecs_cluster") or "todo-app-cluster"
@@ -448,9 +423,8 @@ class DeployOpsAgent:
                 environment = {item["name"]: item.get("value", "") for item in container.get("environment", [])}
                 environment["DEPLOYMENT_REVISION"] = str(revision)
                 container["environment"] = [{"name": key, "value": value} for key, value in environment.items()]
-                # terraform_generator.py sets containerDefinitions[].name to
-                # the same docker_images[].name it was built from, so this
-                # match is exact -- for one container or several.
+                # terraform_generator.py sets containerDefinitions[].name to the same
+                # docker_images[].name it was built from, so this match is exact.
                 if container.get("name") in built_images:
                     container["image"] = built_images[container["name"]]
 
@@ -598,15 +572,10 @@ class DeployOpsAgent:
         job_id: str,
         aws_config: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Destroy a job's deployed infrastructure via `terraform destroy`,
-        reusing the persisted remote state in TF_STATE_BUCKET (see
-        _write_remote_state_backend). Falls back to reporting "no state" for
-        deployments made before remote state was enabled, rather than
-        pretending to succeed. On failure, describes what's still live in
-        AWS (mirrors rollback()/the /monitoring endpoint) so the caller can
-        tell the user precisely what to clean up manually -- per the
-        feature/destroy-deployment design decisions.
-        """
+        """Destroy a job's deployed infrastructure via `terraform destroy`, reusing persisted
+        remote state in TF_STATE_BUCKET (see _write_remote_state_backend); reports "no state"
+        for pre-remote-state deployments instead of pretending success, and on failure describes
+        what's still live in AWS (mirrors rollback()/monitoring) per its design decisions."""
         workspace_dir = self._workspace_dir(job_id)
         tf_dir = workspace_dir / "terraform"
         tf_dir.mkdir(parents=True, exist_ok=True)
@@ -614,9 +583,8 @@ class DeployOpsAgent:
 
         tf_runner = TerraformRunner(tf_dir)
 
-        # Two state sources: remote S3 (backend.tf, written when
-        # TF_STATE_BUCKET is set) or the local tfstate in the persisted job
-        # workspace. Without this fallback teardown silently no-ops and
+        # Two state sources: remote S3 (backend.tf, written when TF_STATE_BUCKET is set) or the
+        # local tfstate in the persisted workspace; without this teardown silently no-ops and
         # leaks AWS resources.
         if not (tf_dir / "backend.tf").exists() and not (tf_dir / "terraform.tfstate").exists():
             self.logger.warning(f"[{job_id}] Destroy: no backend.tf (TF_STATE_BUCKET unset) and no local tfstate")
@@ -641,9 +609,8 @@ class DeployOpsAgent:
                 "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
             }
 
-        # A job with no prior real `apply` has no state -- init() still
-        # succeeds against an empty backend (or empty local state), so check
-        # for an actual state explicitly rather than trusting init() alone.
+        # A job with no prior real `apply` has no state: init() still succeeds against an empty
+        # backend (or empty local state), so check for actual state rather than trusting init().
         state_output = tf_runner.output()
         if not state_output:
             self.logger.info(f"[{job_id}] Destroy: no Terraform state found (remote backend or local tfstate)")
@@ -684,10 +651,9 @@ class DeployOpsAgent:
     async def _describe_remaining_resources(
         self, job_id: str, aws_config: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Best-effort snapshot of what's still live in AWS after a failed,
-        partial, or unrecoverable-state destroy -- so the caller can tell the
-        user precisely what to clean up manually and where (mirrors the read
-        pattern already used by rollback() and the /monitoring endpoint)."""
+        """Best-effort snapshot of what's still live in AWS after a failed, partial, or
+        unrecoverable-state destroy -- lets the caller tell the user precisely what to clean up
+        manually and where (mirrors rollback() and the /monitoring endpoint)."""
         region = aws_config.get("region") or "us-east-1"
         cluster = aws_config.get("ecs_cluster")
         service_name = aws_config.get("service_name")
@@ -834,6 +800,10 @@ class DeployOpsAgent:
         self.logger.info(
             f"Starting health check for {url} candidates={candidates}"
         )
+        # Extra candidates for common framework-specific health endpoints.
+        for p in ("/actuator/health", "/status", "/api/v1/health", "/up"):
+            if p not in candidates:
+                candidates.append(p)
         last_status = 0
         total_start = time.monotonic()
         consecutive_refused_attempts = 0
@@ -900,15 +870,12 @@ class DeployOpsAgent:
             "checked_at": datetime.now(timezone.utc).isoformat(),
             "health_check_path": health_check_path,
         }
-        
-            
+
     @staticmethod
     def _write_remote_state_backend(tf_dir: Path, job_id: str) -> None:
-        """Write an S3 remote-state backend.tf only when TF_STATE_BUCKET is set.
-
-        Without it, state sits in the job workspace (under /tmp) and is lost on
-        restart, with no locking. When unset, do nothing and keep local state.
-        """
+        """Write an S3 remote-state backend.tf only when TF_STATE_BUCKET is set; without it,
+        state sits in the job workspace (under /tmp, lost on restart) with no locking. When
+        unset, do nothing and keep local state."""
         bucket = os.getenv("TF_STATE_BUCKET")
         if not bucket:
             return
@@ -994,12 +961,9 @@ class DeployOpsAgent:
 
 
     def _prepare_docker_config(self, docker_config: str) -> str:
-        """Provision a DOCKER_CONFIG directory.
-
-        Writes an empty-credsStore config.json (avoids macOS credential-helper
-        hangs) and symlinks the real ~/.docker/cli-plugins into it so
-        ``docker buildx`` remains available. Returns the config dir.
-        """
+        """Provision a DOCKER_CONFIG directory: write an empty-credsStore config.json (avoids
+        macOS credential-helper hangs) and symlink ~/.docker/cli-plugins into it so
+        ``docker buildx`` remains available. Returns the config dir."""
         config_path = Path(docker_config) / "config.json"
         if not config_path.exists():
             config_path.write_text('{"credsStore": ""}')
@@ -1011,13 +975,9 @@ class DeployOpsAgent:
 
     @staticmethod
     def _drop_missing_copy_sources(build_context: Path) -> None:
-        """Drop ``COPY <src>`` lines whose sources don't exist in ``build_context``.
-
-        The refiner hallucinates files (e.g. ``COPY rust-toolchain.toml /``
-        on next.js), which kills the build at checksum time. Also drops
-        dangling ``COPY --from=<name>`` refs where <name> is neither a
-        defined stage nor a registry image.
-        """
+        """Drop ``COPY <src>`` lines whose sources don't exist in ``build_context``: the refiner
+        hallucinates files (e.g. ``COPY rust-toolchain.toml /`` on next.js), killing the build at
+        checksum time. Also drops dangling ``COPY --from=<name>`` refs to undefined stages."""
         dockerfile_path = build_context / "Dockerfile"
         if not dockerfile_path.is_file():
             return
@@ -1080,12 +1040,9 @@ class DeployOpsAgent:
     async def _run_docker_cmd(
         self, cmd: list[str], timeout: float = 300.0, docker_config: str | None = None
     ) -> tuple[int, str, str]:
-        """Run a docker command with a shared DOCKER_CONFIG.
-
-        Avoids macOS credential-helper hangs and 'no basic auth credentials'
-        on push by reusing one config directory across login/build/push.
-        Forces BuildKit for cross-platform multi-stage builds.
-        """
+        """Run a docker command with a shared DOCKER_CONFIG: reusing one config dir across
+        login/build/push avoids macOS credential-helper hangs and 'no basic auth credentials'
+        on push. Forces BuildKit for cross-platform multi-stage builds."""
         if docker_config is not None:
             self._prepare_docker_config(docker_config)
             env = os.environ.copy()
@@ -1165,9 +1122,8 @@ class DeployOpsAgent:
             ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
             image_uri = f"{ecr_repo}:{image_tag}"
 
-            # Build with buildx --load so the image lands in the local store
-            # for push; plain docker build misbehaves with cross-platform
-            # multi-stage builds on hosts with mixed-arch caches.
+            # Build with buildx --load so the image lands in the local store for push; plain
+            # docker build misbehaves with cross-platform multi-stage builds on mixed-arch caches.
             build_context = self._workspace_dir(job_id) / docker_image.context
             self._drop_missing_copy_sources(build_context)
             returncode, stdout, stderr = await self._run_docker_cmd(
@@ -1206,10 +1162,9 @@ class DeployOpsAgent:
         if compute == "ecs":
             ecs_aws = aws_config.get("ecs") or {}
             ecs_dep = dep_config.get("ecs") or {}
-            # The orchestrator adapter already flattens aws_config (top-level
-            # ecs_cluster / service_name) while still tagging compute_type;
-            # prefer those flat values so re-normalization doesn't null them
-            # out. Nested (InfraCost-raw) shapes keep working as before.
+            # The orchestrator adapter flattens aws_config (top-level ecs_cluster/service_name)
+            # while still tagging compute_type; prefer those flat values so re-normalization
+            # doesn't null them out.
             flat_aws = {
                 "region": aws_config.get("region", "us-east-1"),
                 "ecs_cluster": aws_config.get("ecs_cluster") or ecs_aws.get("cluster"),
@@ -1250,9 +1205,8 @@ class DeployOpsAgent:
                     or dep_config.get("health_check_path", "/"),
                 "health_check_port": ec2_dep.get("health_check_port")
                     or dep_config.get("health_check_port", 8080),
-                # EC2 bootstraps from scratch (yum, docker, image pull) —
-                # 15 min expired before the app was even up. Only EC2 pays
-                # this cost; ECS/S3 keep 15.
+                # EC2 bootstraps from scratch (yum, docker, image pull) -- 15 min expired
+                # before the app was even up. Only EC2 pays this cost; ECS/S3 keep 15.
                 "timeout_minutes": ec2_dep.get("timeout_minutes")
                     or dep_config.get("timeout_minutes", 30),
                 "auto_rollback": True,
@@ -1518,7 +1472,3 @@ class DeployOpsAgent:
         
         self.logger.info(f"Payload validated and sanitized for job {job_id}")
         return sanitized
-        
-        
-    
-    

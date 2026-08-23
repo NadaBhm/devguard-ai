@@ -1,26 +1,10 @@
 """
-DevGuard AI - Orchestrator Agent
-LangGraph-based workflow orchestrator for the DevSecOps pipeline.
-
-This module wires the graph together: nodes (nodes.py), human gates
-(human_gates.py), state shape (state.py), and error handling
-(error_handlers.py). It also exposes the public API used by the backend:
-run_workflow() and resume_workflow().
-
-- CodeSec Agent (Nada) -> Security analysis
-- InfraCost Agent (Karim) -> Infrastructure & cost estimation
-- DeployOps Agent (Oussema) -> Deployment & health checks
-- Human Approval Gates -> Human-in-the-loop validation
-- Chat LLM -> Conversational interface with job context
-- Error Handler -> Retry logic with exponential backoff
-
-IMPORTANT: codesec_result uses the EXACT payload format from Nada's
-codesec-mock-schema.json (Option 1: "Accept everything from Nada" - no
-transformation, direct passthrough).
-
-CDC Reference: Section 4.2 (Epic 2.2: Orchestrator Agent)
-
-Owner: Hbib (Subgroup 2 - Execution & Control)
+DevGuard AI - Orchestrator Agent: LangGraph workflow wiring nodes.py, human_gates.py, state.py,
+and error_handlers.py; exposes the backend API run_workflow()/resume_workflow().
+Pipeline: CodeSec -> InfraCost -> DeployOps with human approval gates, a chat LLM, and a
+retrying error handler.
+IMPORTANT: codesec_result passes through Nada's codesec-mock-schema.json payload untransformed.
+CDC Reference: Section 4.2 (Epic 2.2). Owner: Hbib (Subgroup 2 - Execution & Control).
 """
 
 from __future__ import annotations
@@ -55,21 +39,16 @@ logger = logging.getLogger(__name__)
 
 
 # === PERSISTENT CHECKPOINTER (replaces MemorySaver - T-4.3) ===
-# MemorySaver kept paused jobs' state only in-process: any backend restart
-# silently lost every job waiting at a human gate. SqliteSaver persists the same
-# checkpoints to disk so a fresh process resumes where the last left off;
-# chosen over PostgresSaver because it needs no running Postgres (matches
-# devguard.db), and swapping to PostgresSaver later (T-5.12) is a one-line change.
+# MemorySaver held paused jobs only in-process: a backend restart lost every gate-waiting job.
+# SqliteSaver persists checkpoints to disk so fresh processes resume; needs no Postgres (T-5.12).
 
 CHECKPOINT_DB_PATH = os.getenv("DEVGUARD_CHECKPOINT_DB", "orchestrator_checkpoints.sqlite")
 
 def _build_checkpointer() -> SqliteSaver:
     """
-    check_same_thread=False: FastAPI's sync endpoints (jobs.py's create_job /
-    approve_job) run in a threadpool, so different requests may reach this
-    connection from different threads. WAL mode reduces "database is locked"
-    contention under that - still SQLite-grade concurrency, not meant for
-    heavy production load.
+    check_same_thread=False: FastAPI sync endpoints run in a threadpool, so different requests
+    reach this connection from different threads; WAL mode reduces "database is locked" contention
+    under that (still SQLite-grade concurrency, not for heavy production load).
     """
     conn = sqlite3.connect(CHECKPOINT_DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -142,19 +121,17 @@ def build_orchestrator_graph() -> Any:
 
 
 # === GRAPH SINGLETON ===
-# The graph (and its checkpointer) must be built ONCE and reused: rebuilding
-# per call creates a fresh, empty checkpoint store, making jobs paused at an
-# interrupt() unresumable. Built lazily on first use.
+# Build the graph/checkpointer ONCE and reuse it: rebuilding per call creates a fresh, empty
+# checkpoint store, making jobs paused at interrupt() unresumable. Built lazily on first use.
 
 _graph_singleton: Optional[Any] = None
 
 
 def get_orchestrator_graph() -> Any:
     """
-    Return the single shared, compiled graph, building it once (lazily) so
-    checkpoints survive across run_workflow / resume_workflow calls in the
-    same process. In FastAPI, prefer building once in a startup/lifespan
-    hook rather than relying on this lazy fallback.
+    Return the single shared, compiled graph, building it once (lazily) so checkpoints survive
+    across run_workflow / resume_workflow calls. In FastAPI, prefer building once in a
+    startup/lifespan hook rather than relying on this lazy fallback.
     """
     global _graph_singleton
     if _graph_singleton is None:
@@ -164,8 +141,8 @@ def get_orchestrator_graph() -> Any:
 
 def reset_orchestrator_graph() -> None:
     """
-    Force the next get_orchestrator_graph() call to rebuild a fresh graph and
-    checkpointer. Useful for tests that need isolated checkpoint state.
+    Force the next get_orchestrator_graph() call to rebuild; useful for tests needing
+    isolated checkpoint state.
     """
     global _graph_singleton
     _graph_singleton = None
@@ -192,21 +169,10 @@ def run_workflow(
     previous_monthly_cost_usd: Optional[float] = None,
 ) -> OrchestratorState:
     """
-    Run the complete orchestrator workflow for a repository.
-
-    For human gates, execution pauses at interrupt points; resume with
-    resume_workflow(thread_id, resume_data) below - do NOT call run_workflow()
-    again for the same job, it would start a brand new job with a new job_id.
-
-    on_node_progress: optional callback invoked as each graph node completes,
-    (node_name, state_snapshot). The backend uses it to stream per-node
-    progress over WebSocket instead of only coarse milestones.
-
-    is_update / existing_deployment / previous_monthly_cost_usd: set by the
-    backend for an "update deployment" run (a brand-new job for a project
-    that's already deployed) -- resolved from the DB before this call, since
-    the orchestrator itself never touches the database. Threaded straight
-    into the initial state; see ExistingDeploymentInfo in state.py.
+    Run the complete orchestrator workflow for a repository; pauses at human gates -- resume via
+    resume_workflow(thread_id, resume_data), never by re-calling run_workflow() (new job_id).
+    on_node_progress(node, state) streams per-node progress; is_update/existing_deployment/
+    previous_monthly_cost_usd arrive pre-resolved from the DB for update runs (state.py).
     """
     graph = get_orchestrator_graph()
     state = create_initial_state(
@@ -225,9 +191,8 @@ def run_workflow(
         for event in graph.stream(state, config):
             for node_name, node_state in event.items():
                 if node_name == "__interrupt__":
-                    # CRITICAL FIX: fetch the REAL checkpointed state, not the
-                    # initial input state. Otherwise all progress before the
-                    # human gate is lost and resumption breaks.
+                    # CRITICAL FIX: fetch the REAL checkpointed state, not the initial input,
+                    # or all pre-gate progress is lost and resumption breaks.
                     final_state = _get_current_state(graph, config, state)
 
                     # Normalize LangGraph >=1.x Interrupt objects to plain dicts
@@ -272,12 +237,9 @@ def resume_workflow(
     on_node_progress: Optional[Callable[[str, dict], None]] = None,
 ) -> OrchestratorState:
     """
-    Resume a workflow paused at a human gate (interrupt()).
-
-    thread_id must match the one used in the original run_workflow() call
-    (defaults to the job_id if none was passed explicitly). resume_data is
-    handed back as the return value of interrupt(...) inside the paused node,
-    e.g. {"approved": True, "comment": "OK", "approved_by": "user@email.com"}.
+    Resume a workflow paused at a human gate (interrupt()). thread_id must match the original
+    run_workflow() call; resume_data is handed back as interrupt(...)'s return value, e.g.
+    {"approved": True, "comment": "OK", "approved_by": "user@email.com"}.
     """
     from langgraph.types import Command
 
@@ -355,10 +317,8 @@ if __name__ == "__main__":
         for event in graph.stream(state, config):
             for node_name, node_state in event.items():
                 if node_name == "__interrupt__":
-                    # langgraph >=1.x streams a real Interrupt object here
-                    # (with a .value attribute), not a plain dict - so we
-                    # need attribute access on the Interrupt itself, then
-                    # dict-style access into its .value payload.
+                    # langgraph >=1.x streams a real Interrupt object (with a .value attribute),
+                    # not a plain dict -- access .value, then dict-style into its payload.
                     interrupt_payload = node_state[0].value
                     print(f"\n  \u23f8\ufe0f  INTERRUPT at gate: {interrupt_payload['gate']}")
                     print(f"     Message: {interrupt_payload['message']}")

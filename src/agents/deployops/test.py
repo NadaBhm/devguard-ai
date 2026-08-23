@@ -1,8 +1,6 @@
 """Mocked tests of DeployOps, run before live AWS testing."""
 
 
-
-
 import asyncio
 import json
 import subprocess
@@ -162,11 +160,10 @@ def test_normalize_payload_preserves_deploy_approved(agent, sample_payload):
 
 
 def test_normalize_payload_ec2_preserves_flat_health_check(agent, sample_payload):
-    """Regression (live rakcha14): translate_infracost_to_deploy_payload emits a
-    FLAT deployment_config (health_check_path="/", health_check_port=8000) that
-    the refiner already corrected to match the app. _normalize_payload must not
-    clobber it with the nested-ec2 default of 8080 + "/health", or DeployOps
-    probes the wrong port/path, times out, and rolls back a healthy deploy."""
+    """Regression (live rakcha14): translate_infracost_to_deploy_payload emits a FLAT
+    deployment_config ("/" + 8000) the refiner already corrected to match the app;
+    _normalize_payload must not clobber it with the nested-ec2 default (8080 + "/health") or
+    DeployOps probes the wrong port/path, times out, and rolls back a healthy deploy."""
     payload = sample_payload.copy()
     payload["compute_type"] = "ec2"
     payload["aws_config"] = {
@@ -210,11 +207,10 @@ def test_normalize_payload_ec2_nested_config_still_works(agent, sample_payload):
 
 
 def test_normalize_payload_ecs_preserves_flat_health_check(agent, sample_payload):
-    """Regression (live E2E): translate_infracost_to_deploy_payload emits a
-    FLAT deployment_config (health_check_path="/", health_check_port=3000) for
-    ECS too. _normalize_payload's ECS branch must not clobber it with the
-    nested-ecs default of 8080 + "/health" (jupyter's healthy app on "/" was
-    probed at "/health", timed out, and rolled back a live deployment)."""
+    """Regression (live E2E): translate_infracost_to_deploy_payload emits a FLAT
+    deployment_config ("/" + 3000) for ECS too; _normalize_payload's ECS branch must not clobber
+    it with the nested-ecs default (8080 + "/health") -- jupyter's healthy app on "/" was probed
+    at "/health", timed out, and rolled back a live deployment."""
     payload = sample_payload.copy()
     payload["compute_type"] = "ecs"
     payload["deployment_config"] = {
@@ -777,11 +773,9 @@ async def test_moto_rollback_uses_prior_revision(agent, moto_ecs, sample_payload
 
 @pytest.mark.asyncio
 async def test_run_docker_cmd_forces_buildkit(agent, monkeypatch, tmp_path):
-    """Every docker command must run with BuildKit enabled. The legacy builder
-    cannot pull multi-arch images for a multi-stage Dockerfile built with
-    --platform linux/amd64 when a base image is cached for another platform,
-    dying with "image ... does not provide the specified platform";
-    DOCKER_BUILDKIT=1 fixes it (confirmed live)."""
+    """Every docker command must run with BuildKit: the legacy builder cannot pull multi-arch
+    images for a multi-stage Dockerfile with --platform linux/amd64 when a base image is cached
+    for another platform ("does not provide the specified platform"); DOCKER_BUILDKIT=1 fixes it."""
     docker_config = str(tmp_path / "docker-config")
     Path(docker_config).mkdir(parents=True, exist_ok=True)
     captured_env = {}
@@ -803,9 +797,8 @@ async def test_run_docker_cmd_forces_buildkit(agent, monkeypatch, tmp_path):
     assert code == 0
     assert captured_env.get("DOCKER_BUILDKIT") == "1"
     assert captured_env.get("DOCKER_CONFIG") == docker_config
-    # The throwaway DOCKER_CONFIG dir must expose the real cli-plugins (buildx).
-    # Otherwise `docker buildx build --load` fails from the backend subprocess
-    # with "unknown command: docker buildx" while working fine interactively.
+    # The throwaway DOCKER_CONFIG dir must expose the real cli-plugins (buildx); otherwise
+    # backend-subprocess `docker buildx build --load` dies with "unknown command".
     plugins = Path(docker_config) / "cli-plugins"
     assert plugins.is_symlink(), "cli-plugins must be symlinked into DOCKER_CONFIG"
     assert plugins.resolve().exists(), "cli-plugins symlink must point at the real dir"
@@ -940,10 +933,9 @@ async def test_health_check_fails_when_all_candidates_404():
 def test_db_check_returns_clear_error_when_db_required_but_env_missing(
     tmp_path, monkeypatch
 ):
-    """ECS template declares required db_* vars (no defaults) whenever a
-    database is detected. If the deployer never set DEVGUARD_DB_*, terraform
-    plan fails on a cryptic "required variable" error after a full build/push.
-    _check_db_vars_available must fail fast with a clear message."""
+    """ECS template declares required db_* vars (no defaults) whenever a database is detected;
+    without DEVGUARD_DB_* set, terraform plan fails on a cryptic "required variable" error after
+    a full build/push. _check_db_vars_available must fail fast with a clear message."""
     for env in ("DEVGUARD_DB_HOST", "DEVGUARD_DB_PORT", "DEVGUARD_DB_NAME",
                 "DEVGUARD_DB_USER", "DEVGUARD_DB_PASSWORD"):
         monkeypatch.delenv(env, raising=False)

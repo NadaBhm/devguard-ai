@@ -2,10 +2,10 @@
 Job endpoints.
 
 The FastAPI process drives the LangGraph orchestrator in-process
-(get_orchestrator_graph built once at startup), because the orchestrator
-currently uses an in-memory MemorySaver checkpointer (graph.py). Each call to
-run_workflow / resume_workflow returns at the next human gate; the API persists
-the resulting state to Postgres when the run reaches a terminal state.
+(get_orchestrator_graph built once at startup). Each call to
+run_workflow / resume_workflow returns at the next human gate; the API
+persists the resulting state to Postgres when the run reaches a terminal
+state.
 """
 
 
@@ -188,11 +188,11 @@ def _create_job_for_repo(
 
     try:
         from src.agents.orchestrator.graph import run_workflow
-        state = run_workflow(
-            repo_url=repo_url,
-            thread_id=str(run.id),
-            on_node_progress=_publish_node_progress(str(run.id)),
-        )
+        state = cast(dict[str, Any], run_workflow(
+        repo_url=repo_url,
+        thread_id=str(run.id),
+        on_node_progress=_publish_node_progress(str(run.id)),
+        ))
         state["job_id"] = str(run.id)
     except Exception as exc:
         logger.error(f"run_workflow failed for {run.id}: {exc}", exc_info=True)
@@ -200,10 +200,9 @@ def _create_job_for_repo(
 
     state = cast(dict[Any, Any], state)
 
-    run = update_run_state(db, str(run.id), dict(state))
-    _publish(dict(state), 30, f"Orchestrator status: {state.get('status')}")
-
-    gate = _current_gate(dict(state))
+    run = update_run_state(db, str(run.id), state)
+    _publish(state, 30, f"Orchestrator status: {state.get('status')}")
+    gate = _current_gate(state)
     if gate:
         publish_gate(str(run.id), gate, "awaiting_approval")
 
@@ -269,7 +268,7 @@ def check_update(
 ):
     """Compare the project's most recently analyzed commit against the tip
     of its default branch, without cloning or starting a run."""
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
     project = run.project
 
     from src.lib.git_remote import latest_remote_sha
@@ -307,7 +306,7 @@ def trigger_update(
     CodeSec + InfraCost re-analysis of the latest commit, then a lightweight
     redeploy onto the currently live ECS service instead of provisioning
     fresh infrastructure from scratch."""
-    run = _get_owned_run(db, job_id, current_user.id)
+    run = _get_owned_run(db, job_id, str(current_user.id))
     project = run.project
 
     # "rolled_back" still counts as live: a rollback swaps the ECS service to
@@ -354,9 +353,9 @@ def trigger_update(
     previous_monthly_cost_usd = (
         float(sum(row[0] for row in previous_costs)) if previous_costs else None
     )
-
+    
     new_run = _create_run(
-        db, project, current_user.id, commit_sha="HEAD", commit_message="Update deployment"
+    db, project, str(current_user.id), commit_sha="HEAD", commit_message="Update deployment"
     )
 
     logger.info(
@@ -367,18 +366,18 @@ def trigger_update(
 
     try:
         from src.agents.orchestrator.graph import run_workflow
-        state = run_workflow(
-            repo_url=project.github_url,
-            thread_id=str(new_run.id),
-            on_node_progress=_publish_node_progress(str(new_run.id)),
-            is_update=True,
-            existing_deployment={
-                "region": existing["region"],
-                "ecs_cluster": existing["ecs_cluster"],
-                "service_name": existing["service_name"],
-            },
-            previous_monthly_cost_usd=previous_monthly_cost_usd,
-        )
+        state = cast(dict[str, Any], run_workflow(
+        repo_url=project.github_url,
+        thread_id=str(new_run.id),
+        on_node_progress=_publish_node_progress(str(new_run.id)),
+        is_update=True,
+        existing_deployment={
+            "region": existing["region"],
+            "ecs_cluster": existing["ecs_cluster"],
+            "service_name": existing["service_name"],
+        },
+        previous_monthly_cost_usd=previous_monthly_cost_usd,
+        ))
         state["job_id"] = str(new_run.id)
     except Exception as exc:
         logger.error(f"run_workflow failed for update {new_run.id}: {exc}", exc_info=True)
@@ -634,13 +633,8 @@ def rollback_job(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    # deployops_result never carries an "aws_config" key (mock and real both
-    # go through translate_deployops_result(), whose only output shape is
-    # terraform_outputs{ecs_cluster_name, service_name, alb_dns}) -- reading
-    # infra["aws_config"] here always returned {}, so this endpoint 400'd on
-    # every single deployment. _extract_aws_config() (below, already used by
-    # destroy_job) resolves this correctly with the terraform_outputs
-    # fallback -- reuse it instead of this stale duplicate.
+    # deployops_result stores terraform_outputs, not aws_config; use the same
+    # _extract_aws_config() helper that destroy_job already uses.
     resolved = _extract_aws_config(deployment)
     region = resolved.get("region") or "us-east-1"
     ecs_cluster = resolved.get("ecs_cluster")
@@ -820,10 +814,8 @@ def list_deployment_revisions(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    # Same fix as rollback_job above: read via _extract_aws_config() (which
-    # falls back to terraform_outputs) instead of the never-populated
-    # "aws_config" key, which made this endpoint 400 on every deployment --
-    # including breaking the rollback picker UI that depends on this list.
+    # Use _extract_aws_config() (terraform_outputs fallback) instead of the
+    # unpopulated "aws_config" key.
     resolved = _extract_aws_config(deployment)
     region = resolved.get("region") or "us-east-1"
     ecs_cluster = resolved.get("ecs_cluster")
@@ -1076,10 +1068,8 @@ def _current_gate(state: dict) -> str | None:
     status = state.get("status")
     if status and status.startswith("awaiting_approval_gate"):
         return status
-    # The orchestrator also records pending gates in human_gates (required +
-    # approved=None). The frontend resolves the active gate the same way, so
-    # the backend must agree or artifact edits get rejected with a confusing
-    # "not paused" error.
+    # Fallback: check human_gates so artifact-edit validation agrees with
+    # the frontend.
     for gate_name in ("gate_1_pre_infracost", "gate_2_pre_deployops"):
         gate = (state.get("human_gates") or {}).get(gate_name)
         if isinstance(gate, dict) and gate.get("required") and gate.get("approved") is None:

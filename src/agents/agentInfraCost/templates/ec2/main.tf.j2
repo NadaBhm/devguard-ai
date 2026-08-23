@@ -109,38 +109,41 @@ resource "aws_instance" "this" {
   key_name        = "{{ key_pair_name }}"
 {% endif %}
   subnet_id       = var.subnet_id
+  associate_public_ip_address = true
   vpc_security_group_ids = [aws_security_group.instance.id]
   iam_instance_profile    = aws_iam_instance_profile.instance.name
 
+  # Heredoc body must start at column 0: <<- strips tabs only, so indented
+  # "#!/bin/bash" is an invalid shebang and cloud-init skips the script.
   user_data = <<-EOF
-    #!/bin/bash
-    set -e
-    yum update -y
-    yum install -y -q amazon-linux-extras jq yum-utils unzip
-    # Amazon Linux 2 bundles Docker 25.x via amazon-linux-extras; it handles
-    # the mixed Docker/OCI manifests this pipeline pushes and needs no external
-    # repo. (Docker CE from the official centos/7 repo is NOT usable here: it
-    # pulls container-selinux/slirp4netns/fuse-overlayfs that no longer resolve
-    # on AL2 - EL7 EPEL is archived and the packages are gone.)
-    amazon-linux-extras install -y docker
-    systemctl enable docker
-    systemctl start docker
-    usermod -a -G docker ec2-user
+#!/bin/bash
+set -e
+yum update -y
+yum install -y -q amazon-linux-extras jq yum-utils unzip
+# Amazon Linux 2 bundles Docker 25.x via amazon-linux-extras; it handles
+# the mixed Docker/OCI manifests this pipeline pushes and needs no external
+# repo. (Docker CE from the official centos/7 repo is NOT usable here: it
+# pulls container-selinux/slirp4netns/fuse-overlayfs that no longer resolve
+# on AL2 - EL7 EPEL is archived and the packages are gone.)
+amazon-linux-extras install -y docker
+systemctl enable docker
+systemctl start docker
+usermod -a -G docker ec2-user
 
-    # AL2 ships no aws-cli, so install v2 for `ecr get-login-password`. The
-    # instance role supplies ECR credentials via the metadata service.
-    curl -sL -o /tmp/awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
-    unzip -q /tmp/awscliv2.zip -d /tmp/awscliv2
-    /tmp/awscliv2/aws/install
-    TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-    REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
-    aws_ecr_endpoint="{{ ecr_registry_host }}"
-    aws ecr get-login-password --region "{{ region }}" | docker login --username AWS --password-stdin "$aws_ecr_endpoint"
+# AL2 ships no aws-cli, so install v2 for `ecr get-login-password`. The
+# instance role supplies ECR credentials via the metadata service.
+curl -sL -o /tmp/awscliv2.zip https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+unzip -q /tmp/awscliv2.zip -d /tmp/awscliv2
+/tmp/awscliv2/aws/install
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+aws_ecr_endpoint="{{ ecr_registry_host }}"
+aws ecr get-login-password --region "{{ region }}" | docker login --username AWS --password-stdin "$aws_ecr_endpoint"
 
-    docker pull "{{ docker_image }}"
-    docker run -d --restart unless-stopped -p ${local.health_check_port}:${local.health_check_port} --name {{ instance_name }} "{{ docker_image }}"
+docker pull "{{ docker_image }}"
+docker run -d --restart unless-stopped -p ${local.health_check_port}:${local.health_check_port} --name {{ instance_name }} "{{ docker_image }}"
 
-    echo "devguard bootstrap complete" > /var/log/devguard-bootstrap.log
+echo "devguard bootstrap complete" > /var/log/devguard-bootstrap.log
   EOF
 
   tags = {

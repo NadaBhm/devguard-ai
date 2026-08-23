@@ -317,7 +317,7 @@ class TestTranslationFailsLoudly:
         deploy_inputs["compute_type"] = "lambda"
         deploy_inputs["aws_config"]["ecs"] = None
         monkeypatch.setenv("DEVGUARD_FORCE_COMPUTE_ECS", "0")
-        with pytest.raises(ValueError, match="No 'lambda' mapping"):
+        with pytest.raises(ValueError, match="only supports ecs, ec2, and s3"):
             translate_infracost_to_deploy_payload("j", deploy_inputs, approved_by="x")
 
     def test_lambda_falls_back_to_ec2_when_guard_enabled(self, deploy_inputs):

@@ -200,6 +200,25 @@ class CodeSecAgent:
                     timeout=60,
                     check=False,
                 )
+            if result.returncode != 0:
+                # Some repos default to neither main nor master (e.g. canary).
+                # Fall back to the remote's default branch.
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                fallback_cmd = [
+                    "git",
+                    "clone",
+                    "--depth=1",
+                    repo_url,
+                    str(target_dir),
+                ]
+                result = subprocess.run(
+                    fallback_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
                 if result.returncode != 0:
                     raise RuntimeError(f"Git clone failed: {result.stderr}")
         except subprocess.TimeoutExpired:

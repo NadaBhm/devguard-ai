@@ -1,0 +1,142 @@
+[
+  {
+    "repo_url": "https://github.com/socketio/chat-example",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-chat-example",
+    "language": "node"
+  },
+  {
+    "repo_url": "https://github.com/heroku/node-js-sample",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-node-js-sample",
+    "language": "node"
+  },
+  {
+    "repo_url": "https://github.com/gothinkster/node-express-realworld-example-app",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-node-express-realworld-example-app",
+    "language": "node"
+  },
+  {
+    "repo_url": "https://github.com/bradtraversy/node_passport_login",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-node_passport_login",
+    "language": "node"
+  },
+  {
+    "repo_url": "https://github.com/eddycjy/go-gin-example",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-go-gin-example",
+    "language": "go"
+  },
+  {
+    "repo_url": "https://github.com/gothinkster/golang-gin-realworld-example-app",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-golang-gin-realworld-example-app",
+    "language": "go"
+  },
+  {
+    "repo_url": "https://github.com/gin-gonic/gin",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-gin",
+    "language": "go"
+  },
+  {
+    "repo_url": "https://github.com/miguelgrinberg/microblog",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-microblog",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/mjhea0/flaskr-tdd",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-flaskr-tdd",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/testdrivenio/flask-on-docker",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-flask-on-docker",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/greyli/bootstrap-flask",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-bootstrap-flask",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/pallets/flask",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-flask",
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/slimphp/Slim-Skeleton",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-Slim-Skeleton",
+    "language": "php"
+  },
+  {
+    "repo_url": "https://github.com/spring-guides/gs-rest-service",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-gs-rest-service",
+    "language": "java"
+  },
+  {
+    "repo_url": "https://github.com/spring-guides/gs-serving-web-content",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "new-gs-serving-web-content",
+    "language": "java"
+  },
+  {
+    "repo_url": "https://github.com/startbootstrap/startbootstrap-agency",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-startbootstrap-agency",
+    "language": "html"
+  },
+  {
+    "repo_url": "https://github.com/startbootstrap/startbootstrap-clean-blog",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-startbootstrap-clean-blog",
+    "language": "html"
+  },
+  {
+    "repo_url": "https://github.com/startbootstrap/startbootstrap-resume",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-startbootstrap-resume",
+    "language": "html"
+  },
+  {
+    "repo_url": "https://github.com/startbootstrap/startbootstrap-creative",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-startbootstrap-creative",
+    "language": "html"
+  },
+  {
+    "repo_url": "https://github.com/startbootstrap/startbootstrap-sb-admin-2",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "new-startbootstrap-sb-admin-2",
+    "language": "html"
+  }
+]

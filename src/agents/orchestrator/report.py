@@ -1,42 +1,18 @@
 """
-DevGuard AI - Final Report Generation (T-3.12)
-================================================
+DevGuard AI - Final Report Generation
 Renders the pipeline's results into a shareable HTML report, and a PDF when
 the environment can produce one.
 
-CDC Reference:
-    US-2.2.6 "As a user, I want a final report so that I can share results
-    with stakeholders. Given a completed deployment, When report generates,
-    Then it produces PDF/HTML with all agent results, architecture diagram,
-    and cost breakdown."
-    NFR: report generation < 10 seconds.
-
-DESIGN NOTES
-------------
-1. HTML is the primary artifact; PDF is best-effort.
-   The CDC tech stack says Jinja2 + WeasyPrint. WeasyPrint is a pure-Python
-   package but binds to system libraries (cairo, pango, gdk-pixbuf) that are
-   frequently absent - notably on Windows, where several of us develop. A
-   hard PDF dependency would mean report generation fails on half the team's
-   machines for a format that is a "Should", not a "Must" (US-2.2.6 says
-   "PDF/HTML"). So: HTML always succeeds; PDF is attempted and its absence is
-   reported in the result rather than raised.
-
-2. The architecture diagram is hand-built SVG, not a rendered image.
-   Options were graphviz (system binary), matplotlib (heavy, and a poor fit
-   for box diagrams) or diagrams (needs graphviz too). Inline SVG has no
-   dependency at all, scales cleanly in print, and WeasyPrint renders it
-   natively. The diagram is simple by nature - a handful of labelled boxes -
-   so a drawing library would buy nothing.
-
-3. The template is a separate .j2 file, not a string in this module,
-   so the frontend owner can restyle the report without touching Python.
-
-4. Secret VALUES are never rendered (only type and location). This report is
-   meant to be emailed and archived; embedding the credentials it just found
-   would turn a security report into a second leak.
-
-Owner: Hbib (Subgroup 2 - Execution & Control)
+Design notes:
+- HTML is the primary artifact; PDF is best-effort. WeasyPrint binds to
+  system libraries (cairo, pango) that are frequently absent, so a missing
+  PDF must not fail a report whose HTML is fine.
+- The architecture diagram is hand-built SVG (no graphviz/matplotlib deps).
+- The template is a separate .j2 file so the frontend can restyle without
+  touching Python.
+- Secret VALUES are never rendered (only type and location). This report is
+  meant to be emailed and archived; embedding the credentials it just found
+  would turn a security report into a second leak.
 """
 
 from __future__ import annotations
@@ -56,22 +32,11 @@ logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = Path(__file__).parent / "templates"
 TEMPLATE_NAME = "report.html.j2"
-
-# Where rendered reports land. Served by the backend at
-# /api/jobs/{job_id}/report/download (see download_url below).
 DEFAULT_REPORT_DIR = Path(os.getenv("DEVGUARD_REPORT_DIR", "/tmp/devguard-reports"))
 
-# How many findings to table before the report becomes unreadable. The full
-# set stays in the job's JSON results; the report is a summary for
-# stakeholders, not a dump.
 MAX_SAST_ROWS = 15
 MAX_SECRET_ROWS = 15
 MAX_DEPENDENCY_ROWS = 15
-
-
-# =============================================================================
-# ARCHITECTURE DIAGRAM
-# =============================================================================
 
 _ARCH_LAYOUTS: dict[str, list[str]] = {
     "ecs_fargate": ["Internet", "ALB", "ECS Fargate", "RDS"],
@@ -82,12 +47,6 @@ _ARCH_LAYOUTS: dict[str, list[str]] = {
 
 
 def build_architecture_svg(architecture: Optional[str], region: str = "") -> str:
-    """
-    Draw the recommended architecture as a left-to-right box diagram.
-
-    Returns inline SVG (a string), or an empty string if the architecture is
-    unknown - an empty diagram is worse than no diagram.
-    """
     boxes = _ARCH_LAYOUTS.get(architecture or "")
     if not boxes:
         return ""
@@ -130,10 +89,6 @@ def build_architecture_svg(architecture: Optional[str], region: str = "") -> str
     return "".join(parts)
 
 
-# =============================================================================
-# STATE -> TEMPLATE CONTEXT
-# =============================================================================
-
 def build_template_context(state: OrchestratorState) -> dict[str, Any]:
     codesec = state.get("codesec_result") or {}
     infracost = state.get("infracost_result") or {}
@@ -156,34 +111,33 @@ def build_template_context(state: OrchestratorState) -> dict[str, Any]:
         )
     )
 
-    # Recommendations: security first, then FinOps.
     recommendations = list(score_block.get("recommendations") or [])
     for option in infracost.get("optimizations") or []:
-        description = option.get("description")
-        if description:
-            recommendations.append(description)
+        if isinstance(option, dict):
+            description = option.get("description")
+            if description:
+                recommendations.append(description)
 
     approvals = []
     for name, gate in (state.get("human_gates") or {}).items():
-        approved = gate.get("approved")
-        approvals.append({
-            "name": name,
-            "approved": bool(approved),
-            "decision": "approved" if approved else ("rejected" if approved is False else "not reached"),
-            "approved_by": gate.get("approved_by"),
-            "approved_at": gate.get("approved_at"),
-            "comment": gate.get("comment"),
-        })
+        if isinstance(gate, dict):
+            approved = gate.get("approved")
+            approvals.append({
+                "name": name,
+                "approved": bool(approved),
+                "decision": "approved" if approved else ("rejected" if approved is False else "not reached"),
+                "approved_by": gate.get("approved_by"),
+                "approved_at": gate.get("approved_at"),
+                "comment": gate.get("comment"),
+            })
 
     architecture = infracost.get("architecture_recommendation")
     region = ""
     for entry in infracost.get("region_comparison") or []:
-        region = entry.get("region", "")
-        break
+        if isinstance(entry, dict):
+            region = entry.get("region", "")
+            break
 
-    # Report mode: never let a demo mix fabricated (mock) and real agent
-    # results silently. "mock" / "mixed" / "real" is stamped into the report
-    # so readers know whether the costs/deployments shown are real.
     from .agent_adapters import (
         report_mode,
         use_real_codesec,
@@ -251,28 +205,13 @@ def build_template_context(state: OrchestratorState) -> dict[str, Any]:
 
         "approvals": approvals,
         "recommendations": recommendations,
-        # Resolved incidents are shown too: "we hit a 503 and recovered" is
-        # useful information for whoever reads this, not noise to hide.
         "errors": state.get("error_log") or [],
     }
 
 
-# =============================================================================
-# RENDERING
-# =============================================================================
-
 def render_html(state: OrchestratorState) -> str:
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
-        # Autoescaping is NOT optional here: every string in this report -
-        # finding messages, file paths, package names - comes from an
-        # arbitrary public repository we just cloned. A finding message of
-        # "<script>alert(1)</script>" must render as text, not execute.
-        #
-        # "j2" MUST stay in this list. select_autoescape() decides from the
-        # FILE EXTENSION, and the template is report.html.j2 -> extension
-        # ".j2". Passing only ("html", "xml") silently disables escaping for
-        # it, which is exactly the bug test_escapes_scanned_content caught.
         autoescape=select_autoescape(
             enabled_extensions=("html", "xml", "j2"),
             default_for_string=True,
@@ -288,22 +227,14 @@ def render_html(state: OrchestratorState) -> str:
 
 
 def render_pdf(html_content: str, output_path: Path) -> bool:
-    """
-    Write `html_content` to `output_path` as PDF. Returns whether it worked.
-
-    Never raises: WeasyPrint's system dependencies (cairo/pango) are commonly
-    missing, and a missing PDF must not fail a report whose HTML is fine.
-    """
     try:
-        from weasyprint import HTML  # lazy: importing it costs ~1s
-
+        from weasyprint import HTML
         HTML(string=html_content).write_pdf(str(output_path))
         return True
     except ImportError:
         logger.warning("WeasyPrint not installed - PDF skipped, HTML report is unaffected")
         return False
     except Exception as exc:
-        # Usually a missing native library (libpango, libcairo).
         logger.warning("PDF rendering failed (%s) - HTML report is unaffected", exc)
         return False
 
@@ -314,12 +245,6 @@ def generate_report(
     *,
     want_pdf: bool = True,
 ) -> dict[str, Any]:
-    """
-    Generate the final report for a job. CDC: US-2.2.6
-
-    Returns a FinalReport-shaped dict, extended with the paths actually
-    written and which formats succeeded.
-    """
     started = datetime.now(timezone.utc)
     job_id = state.get("job_id", "unknown")
 
@@ -343,7 +268,6 @@ def generate_report(
     return {
         "format": "pdf" if pdf_ok else "html",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        # Served by the backend; the file itself lives at html_path/pdf_path.
         "download_url": f"/api/jobs/{job_id}/report/download",
         "html_path": str(html_path),
         "pdf_path": str(pdf_path) if pdf_ok else None,

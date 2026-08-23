@@ -22,6 +22,7 @@ so parallel jobs would serialize anyway) and prints a CSV-style summary at the e
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -32,7 +33,7 @@ BASE_URL = "http://127.0.0.1:8000"
 TOKEN_PATH = Path("/tmp/devguard-token")
 POLL_INTERVAL = 30  # seconds
 GATE_1_TIMEOUT = 300  # codesec + repo ingest
-GATE_2_TIMEOUT = 900  # real InfraCost LLM
+GATE_2_TIMEOUT = 3600  # real InfraCost LLM (big monorepos can take 30min+)
 TERMINAL_TIMEOUT = 2400  # full DeployOps (build/push/apply/health)
 TERMINAL_STATUSES = {"completed", "rolled_back", "failed", "rejected"}
 
@@ -141,7 +142,7 @@ def _terminal_state(job_id: str, timeout: int) -> dict | None:
     return None
 
 
-def run_one(repo: dict) -> dict:
+def run_one(repo: dict, plan_only: bool = False) -> dict:
     label = repo.get("label") or repo["repo_url"]
     print(f"\n=== {label} ===", flush=True)
 
@@ -177,6 +178,9 @@ def run_one(repo: dict) -> dict:
         state = _terminal_state(job_id, 60) or {}
         return {"label": label, "repo": repo["repo_url"], "outcome": state.get("orchestrator_status", "unknown"), "error": state.get("error")}
     warnings = (gate2.get("state") or {}).get("infracost_result", {}).get("warnings") or gate2.get("warnings") or []
+    if plan_only:
+        print("  plan-only: stopping before DeployOps", flush=True)
+        return {"job_id": job_id, "label": label, "repo": repo["repo_url"], "outcome": "plan_only", "warnings": warnings}
     print("gate 2 reached -> approving", flush=True)
     if warnings:
         print(f"  gate 2 warnings: {warnings}", flush=True)
@@ -186,22 +190,42 @@ def run_one(repo: dict) -> dict:
     final = _terminal_state(job_id, TERMINAL_TIMEOUT)
     if final is None:
         return {"label": label, "repo": repo["repo_url"], "outcome": "timeout"}
-    outcome = final.get("orchestrator_status")
-    deployment = final.get("deployment_status") or (final.get("deployops_result") or {}).get("deployment_status")
-    health = final.get("health_check") or (final.get("deployops_result") or {}).get("health_check")
+    # The deployops_result is nested under state (the top-level field mirrors
+    # it only after the persistence flush); read both so the summary isn't
+    # fooled into reporting a successful deploy as deployment_status=None.
+    state = final.get("state") or {}
+    deployment = (
+        final.get("deployment_status")
+        or (final.get("deployops_result") or {}).get("deployment_status")
+        or (state.get("deployops_result") or {}).get("deployment_status")
+    )
+    health = (
+        final.get("health_check")
+        or (final.get("deployops_result") or {}).get("health_check")
+        or (state.get("deployops_result") or {}).get("health_check")
+    )
     # The orchestrator can mark a run terminal a beat before the deployops
     # result is persisted to the job doc — re-fetch briefly to capture it.
+    outcome = final.get("orchestrator_status")
     if outcome == "completed" and not deployment:
-        for _ in range(5):
+        for _ in range(15):
             time.sleep(3)
             late = _status(job_id)
-            deployment = (late.get("deployops_result") or {}).get("deployment_status")
-            health = (late.get("deployops_result") or {}).get("health_check")
+            late_state = late.get("state") or {}
+            deployment = (
+                (late.get("deployops_result") or {}).get("deployment_status")
+                or (late_state.get("deployops_result") or {}).get("deployment_status")
+            )
+            health = (
+                (late.get("deployops_result") or {}).get("health_check")
+                or (late_state.get("deployops_result") or {}).get("health_check")
+            )
             if deployment:
                 break
-    error = final.get("error")
+    error = final.get("error") or (final.get("state") or {}).get("error")
     print(f"  outcome: {outcome} | deployment: {deployment} | error: {error}", flush=True)
     return {
+        "job_id": job_id,
         "label": label,
         "repo": repo["repo_url"],
         "outcome": outcome,
@@ -212,11 +236,76 @@ def run_one(repo: dict) -> dict:
     }
 
 
+def _destroy(job_id: str) -> None:
+    """Destroy a job's AWS resources via the API (service_name jobs) or
+    direct `terraform destroy` (EC2-shaped jobs with local tfstate), falling
+    back to S3 bucket cleanup for static/pre-apply jobs.
+    """
+    try:
+        state = _status(job_id)
+        s = state.get("state") or {}
+        svc = (state.get("deployops_result") or {}).get("terraform_outputs", {}).get("service_name") or \
+              (s.get("deployops_result") or {}).get("terraform_outputs", {}).get("service_name", "")
+        if svc:
+            resp = _http_json("POST", f"/api/jobs/{job_id}/destroy", {"confirm_service_name": svc})
+            status = (resp or {}).get("status", "unknown")
+            if status == "destroyed":
+                print(f"  destroyed {svc}", flush=True)
+            else:
+                print(f"  destroy returned '{status}' for {svc} (may still be live)", flush=True)
+        elif Path(f"/tmp/deployops/{job_id}/terraform/terraform.tfstate").exists():
+            # EC2-shaped: no service_name output, but live resources behind
+            # a local tfstate. Terraform needs creds from .env.
+            print("  no service_name (EC2-shaped) — direct terraform destroy", flush=True)
+            tf_env = dict(os.environ)
+            env_path = Path(__file__).resolve().parent.parent / ".env"
+            if env_path.exists():
+                for line in env_path.read_text().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        tf_env.setdefault(k.strip(), v.strip())
+            proc = subprocess.run(
+                ["terraform", "-chdir=/tmp/deployops/" + job_id + "/terraform",
+                 "destroy", "-auto-approve", "-input=false"],
+                capture_output=True, text=True, timeout=1200,
+                env=tf_env,
+            )
+            ok = "Destroy complete" in (proc.stdout or "")
+            print(f"    {'destroyed' if ok else 'rc=' + str(proc.returncode)}", flush=True)
+        else:
+            print("  no service_name (s3/static or pre-apply) — direct bucket cleanup", flush=True)
+            _destroy_static_bucket(job_id)
+    except Exception as exc:
+        print(f"  destroy failed for {job_id}: {exc} — falling back to rm -rf", flush=True)
+        subprocess.run(f"rm -rf /tmp/deployops/{job_id}", shell=True, check=False)
+
+
+def _destroy_static_bucket(job_id: str) -> None:
+    """Best-effort removal of the job's S3 static bucket + objects (no
+    service_name exists to drive the /destroy endpoint, which 400s for S3)."""
+    try:
+        from src.lib.aws.client import AWSClient
+
+        aws = AWSClient(region="us-east-1")
+        s3 = aws.session.client("s3")
+        bucket = f"devguard-static-{job_id[:32].lower()}"
+        objs = s3.list_objects_v2(Bucket=bucket).get("Contents", [])
+        for o in objs:
+            s3.delete_object(Bucket=bucket, Key=o["Key"])
+        s3.delete_bucket(Bucket=bucket)
+        print(f"  removed s3 bucket {bucket} ({len(objs)} objects)", flush=True)
+    except Exception as exc:
+        print(f"  static bucket cleanup skipped: {exc}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True, help="JSON file: list of {repo_url, branch, commit_sha, label}")
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N repos")
     parser.add_argument("--teardown", action="store_true", help="Terraform-destroy deploy workspaces after each run")
+    parser.add_argument("--plan-only", action="store_true", help="Stop after InfraCost (gate 2) and run terraform plan dry-run without apply")
+    parser.add_argument("--max-cost-usd", type=float, default=None, help="Abort sweep if estimated monthly cost exceeds this (saves budget)")
     args = parser.parse_args()
 
     repos = json.loads(Path(args.corpus).read_text(encoding="utf-8"))
@@ -224,15 +313,25 @@ def main() -> None:
         repos = repos[: args.limit]
 
     results = []
+    total_cost = 0.0
     for repo in repos:
-        result = run_one(repo)
+        result = run_one(repo, plan_only=args.plan_only)
+        # Cost guard: sum estimated monthly cost from infracost_result if available
+        try:
+            state = _status(result.get("job_id", ""))
+            s = state.get("state") or {}
+            cost = (s.get("infracost_result", {}).get("estimated_monthly_cost", {}).get("amount") or 0)
+            total_cost += float(cost)
+            if args.max_cost_usd is not None and total_cost > args.max_cost_usd:
+                print(f"Cost guard tripped: ${total_cost:.2f} > ${args.max_cost_usd:.2f} — aborting sweep", flush=True)
+                break
+        except Exception:
+            pass
         results.append(result)
         if args.teardown:
             job_id = result.get("job_id")
             if job_id:
-                subprocess.run(
-                    f"rm -rf /tmp/deployops/{job_id}", shell=True, check=False
-                )
+                _destroy(job_id)
 
     print("\n\n=== SWEEP SUMMARY ===")
     print("repo,outcome,deployment_status,health_status,error")

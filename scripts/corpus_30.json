@@ -1,0 +1,272 @@
+[
+  {
+    "repo_url": "https://github.com/Nitjsefnie/nitjsefni.eu",
+    "branch": "main",
+    "commit_sha": "d5ea83fa968b5ddba5567e04f19549f18cb7ac36",
+    "label": "nitjsefni.eu-static",
+    "expected_compute": "s3",
+    "has_db": false,
+    "language": "html"
+  },
+  {
+    "repo_url": "https://github.com/h5bp/html5-boilerplate",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "html5-boilerplate-static",
+    "expected_compute": "s3",
+    "has_db": false,
+    "language": "html"
+  },
+  {
+    "repo_url": "https://github.com/hoangsonww/DevVerse-SWE-Blog",
+    "branch": "master",
+    "commit_sha": "7474f6276046229c3ef90f2746f9840364c06f27",
+    "label": "devverse-nextjs",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "typescript"
+  },
+  {
+    "repo_url": "https://github.com/vercel/next.js",
+    "branch": "canary",
+    "commit_sha": "HEAD",
+    "label": "nextjs-monorepo",
+    "expected_compute": "ecs",
+    "has_db": false,
+    "language": "typescript"
+  },
+  {
+    "repo_url": "https://github.com/moissonti/fastapi-hello-world",
+    "branch": "main",
+    "commit_sha": "0e0210404816aa1f9978aeb46b13462ae39e78b7",
+    "label": "fastapi-hello",
+    "expected_compute": "ec2",
+    "has_db": false,
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/Sagargupta16/FARM-APP-TEMPLATE",
+    "branch": "main",
+    "commit_sha": "e833907091755f9b83630d623b7a93f2d13efffb",
+    "label": "farm-mongodb",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/tiangolo/full-stack-fastapi-postgresql",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "fullstack-fastapi-postgres",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/eddycjy/go-gin-example",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "go-gin-mysql",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "go"
+  },
+  {
+    "repo_url": "https://github.com/gin-gonic/examples",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "go-gin-examples",
+    "expected_compute": "ec2",
+    "has_db": false,
+    "language": "go"
+  },
+  {
+    "repo_url": "https://github.com/spring-projects/spring-petclinic",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "spring-petclinic-java",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "java"
+  },
+  {
+    "repo_url": "https://github.com/laravel/laravel",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "laravel-php",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "php"
+  },
+  {
+    "repo_url": "https://github.com/rust-lang/rustlings",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "rustlings-rust",
+    "expected_compute": "ec2",
+    "has_db": false,
+    "language": "rust"
+  },
+  {
+    "repo_url": "https://github.com/Invictify/Jupter-Notebook-REST-API",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "jupyter-rest-api",
+    "expected_compute": "ecs",
+    "has_db": false,
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/nitin27may/mean-docker",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "mean-docker-mongodb",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/cam-spec/docker-microservices-dev-environment",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "docker-microservices",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/engripaye/notes-api",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "notes-api-node",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/kisugez/ecommerce-backend",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "ecommerce-backend",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/Oussama928/RakchaTn",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "rakchatn-fullstack",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/pnpm/pnpm",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "pnpm-monorepo",
+    "expected_compute": "ec2",
+    "has_db": false,
+    "language": "typescript"
+  },
+  {
+    "repo_url": "https://github.com/sveltejs/kit",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "sveltekit-svelte",
+    "expected_compute": "ecs",
+    "has_db": false,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/withastro/astro",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "astro-static",
+    "expected_compute": "s3",
+    "has_db": false,
+    "language": "typescript"
+  },
+  {
+    "repo_url": "https://github.com/gothinkster/realworld",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "realworld-express",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/TheoBrigitte/OuvragesApp",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "ouvrages-php-mysql",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "php"
+  },
+  {
+    "repo_url": "https://github.com/juliens/Flask-RESTful-Boilerplate",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "flask-boilerplate",
+    "expected_compute": "ecs",
+    "has_db": true,
+    "language": "python"
+  },
+  {
+    "repo_url": "https://github.com/masoudsarwar/Golang-Rest-API-With-Gin-Gorm",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "go-gin-gorm",
+    "expected_compute": "ec2",
+    "has_db": true,
+    "language": "go"
+  },
+  {
+    "repo_url": "https://github.com/scalableminds/chatroom",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "chatroom-scala",
+    "expected_compute": "ecs",
+    "has_db": false,
+    "language": "scala"
+  },
+  {
+    "repo_url": "https://github.com/dotnet/samples",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "dotnet-samples-csharp",
+    "expected_compute": "ecs",
+    "has_db": false,
+    "language": "csharp"
+  },
+  {
+    "repo_url": "https://github.com/reactjs/reactjs.org",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "reactjs-org",
+    "expected_compute": "s3",
+    "has_db": false,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/facebook/create-react-app",
+    "branch": "main",
+    "commit_sha": "HEAD",
+    "label": "create-react-app",
+    "expected_compute": "s3",
+    "has_db": false,
+    "language": "javascript"
+  },
+  {
+    "repo_url": "https://github.com/awslabs/aws-serverless-express",
+    "branch": "master",
+    "commit_sha": "HEAD",
+    "label": "serverless-express-lambda",
+    "expected_compute": "lambda",
+    "has_db": false,
+    "language": "javascript"
+  }
+]

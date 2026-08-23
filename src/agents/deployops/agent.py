@@ -9,8 +9,8 @@ import logging
 import os
 import re
 import shutil
+import shlex
 import subprocess
-import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -19,7 +19,6 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from aws_xray_sdk.core import xray_recorder
-from dotenv import load_dotenv
 
 from src.lib.aws.client import AWSClient, RETRY_CONFIG
 from src.lib.terraform.runner import TerraformRunner
@@ -28,9 +27,6 @@ from src.agents.deployops.models import (
     Artifacts,
     AWSConfig,
     DockerImageConfig,
-    RollbackRequest,
-    PromotionRequest,
-    DeploymentStrategy,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -99,6 +95,9 @@ class DeployOpsAgent:
             return None
         if 'variable "db_host"' not in content:
             return None
+        # When the template provisions its own DB (create_db), no external DB is needed.
+        if 'variable "create_db"' in content:
+            return None
         missing = [
             env for env, _ in _ENV_TF_VARS
             if env.startswith("DEVGUARD_DB_") and not os.getenv(env)
@@ -149,7 +148,8 @@ class DeployOpsAgent:
         if repo_url:
             from src.lib.repo import clone_repo
             try:
-                clone_repo(repo_url, workspace_dir)
+                # 50k files: monorepos (next.js = 31k) are legit build contexts.
+                clone_repo(repo_url, workspace_dir, max_files=50_000)
                 self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
             except Exception as exc:  # noqa: BLE001 - surface as failed deploy
                 self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
@@ -325,7 +325,7 @@ class DeployOpsAgent:
                 if not filepath.is_file():
                     continue
                 rel = filepath.relative_to(source)
-                if ".git" in rel.parts or rel.parts[0].startswith("."):
+                if ".git" in rel.parts or "terraform" in rel.parts or ".terraform" in rel.parts or rel.parts[0].startswith("."):
                     skipped += 1
                     continue
                 key = rel.as_posix()
@@ -617,19 +617,24 @@ class DeployOpsAgent:
         tf_dir.mkdir(parents=True, exist_ok=True)
         self._write_remote_state_backend(tf_dir, job_id=job_id)
 
-        if not (tf_dir / "backend.tf").exists():
-            self.logger.warning(f"[{job_id}] Destroy: TF_STATE_BUCKET not configured, cannot recover state")
+        tf_runner = TerraformRunner(tf_dir)
+
+        # Two state sources: remote S3 (backend.tf, written when
+        # TF_STATE_BUCKET is set) or the local tfstate in the persisted job
+        # workspace. Without this fallback teardown silently no-ops and
+        # leaks AWS resources.
+        if not (tf_dir / "backend.tf").exists() and not (tf_dir / "terraform.tfstate").exists():
+            self.logger.warning(f"[{job_id}] Destroy: no backend.tf (TF_STATE_BUCKET unset) and no local tfstate")
             return {
                 "status": "no_state",
                 "job_id": job_id,
                 "message": (
-                    "TF_STATE_BUCKET is not configured; this deployment has no "
-                    "recoverable Terraform state. Manual AWS cleanup required."
+                    "No recoverable Terraform state (TF_STATE_BUCKET is not "
+                    "configured and no local tfstate exists in the job "
+                    "workspace). Manual AWS cleanup required."
                 ),
                 "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
             }
-
-        tf_runner = TerraformRunner(tf_dir)
 
         if not tf_runner.init():
             self.logger.error(f"[{job_id}] Destroy: terraform init failed")
@@ -637,17 +642,16 @@ class DeployOpsAgent:
                 "status": "failed",
                 "job_id": job_id,
                 "error": "terraform_init_failed",
-                "message": "Could not initialize Terraform with the remote state backend.",
+                "message": "Could not initialize Terraform with the state backend.",
                 "remaining_resources": await self._describe_remaining_resources(job_id, aws_config),
             }
 
-        # A job with no prior real `apply` (or one applied before
-        # TF_STATE_BUCKET existed) has no state key in S3 -- init() still
-        # succeeds against an empty backend, so check for an actual state
-        # explicitly rather than trusting init() alone.
+        # A job with no prior real `apply` has no state -- init() still
+        # succeeds against an empty backend (or empty local state), so check
+        # for an actual state explicitly rather than trusting init() alone.
         state_output = tf_runner.output()
         if not state_output:
-            self.logger.info(f"[{job_id}] Destroy: no Terraform state found in remote backend")
+            self.logger.info(f"[{job_id}] Destroy: no Terraform state found (remote backend or local tfstate)")
             return {
                 "status": "no_state",
                 "job_id": job_id,
@@ -803,10 +807,6 @@ class DeployOpsAgent:
             self.logger.error(f"List revisions failed: {exc}")
             return {"status": "failed", "error": str(exc)}
 
-
-
-
-        
     @xray_recorder.capture("health_check")  # type: ignore[reportCallIssue]
     async def health_check(
         self,
@@ -981,13 +981,8 @@ class DeployOpsAgent:
         """Provision a DOCKER_CONFIG directory.
 
         Writes an empty-credsStore config.json (avoids macOS credential-helper
-        hangs / `osxkeychain` prompts) and, critically, symlinks the real
-        ``~/.docker/cli-plugins`` (buildx et al.) into it. Pointing
-        DOCKER_CONFIG at a throwaway directory hides the CLI plugin directory â€”
-        ``docker buildx`` then fails with "unknown command: docker buildx"
-        (reproduced: ``docker buildx build --load`` runs fine from an
-        interactive shell but errors identically from the backend subprocess
-        before this fix). Returns the config dir.
+        hangs) and symlinks the real ~/.docker/cli-plugins into it so
+        ``docker buildx`` remains available. Returns the config dir.
         """
         config_path = Path(docker_config) / "config.json"
         if not config_path.exists():
@@ -998,27 +993,83 @@ class DeployOpsAgent:
             local_plugins.symlink_to(real_plugins, target_is_directory=True)
         return docker_config
 
+    @staticmethod
+    def _drop_missing_copy_sources(build_context: Path) -> None:
+        """Drop ``COPY <src>`` lines whose sources don't exist in ``build_context``.
+
+        The refiner hallucinates files (e.g. ``COPY rust-toolchain.toml /``
+        on next.js), which kills the build at checksum time. Also drops
+        dangling ``COPY --from=<name>`` refs where <name> is neither a
+        defined stage nor a registry image.
+        """
+        dockerfile_path = build_context / "Dockerfile"
+        if not dockerfile_path.is_file():
+            return
+        text = dockerfile_path.read_text(encoding="utf-8", errors="ignore")
+        defined_stages = {
+            m.group(1).lower()
+            for m in re.finditer(r"(?mi)^\s*FROM\s+\S+\s+AS\s+([\w-]+)", text)
+        }
+        kept: list[str] = []
+        dropped: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            m = re.match(r'^COPY\s+((?:--[^\s]+\s+)*)(.+)$', stripped)
+            flags = (m.group(1) or "") if m else ""
+            if not m:
+                kept.append(line)
+                continue
+            from_m = re.search(r"--from=([^\s]+)", flags)
+            if from_m:
+                name = from_m.group(1)
+                # Real image refs (contain '/' or ':') are kept; anything
+                # else must be an in-file stage.
+                if "/" not in name and ":" not in name and name.lower() not in defined_stages:
+                    dropped.append(stripped)
+                    continue
+                kept.append(line)
+                continue
+            rest = m.group(2)
+            if rest.startswith("["):
+                # JSON form: COPY ["src", "dst"]
+                try:
+                    parts = json.loads(rest.replace("'", '"'))
+                except json.JSONDecodeError:
+                    kept.append(line)
+                    continue
+            else:
+                # Shell form: last token is dest, everything before is src.
+                tokens = shlex.split(rest) if "\\" not in rest else rest.split()
+                parts = [t for t in tokens if not t.startswith("--")]
+            sources = parts[:-1] if len(parts) > 1 else []
+            if not sources:
+                kept.append(line)
+                continue
+            missing = [
+                s for s in sources
+                if "*" not in s and "?" not in s
+                and not (build_context / s.lstrip("/")).exists()
+            ]
+            if missing:
+                dropped.append(stripped)
+                continue
+            kept.append(line)
+        if dropped:
+            dockerfile_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            logging.getLogger(__name__).warning(
+                "Dropped %d COPY line(s) referencing files absent from %s: %s",
+                len(dropped), build_context, dropped,
+            )
+
     async def _run_docker_cmd(
         self, cmd: list[str], timeout: float = 300.0, docker_config: str | None = None
     ) -> tuple[int, str, str]:
-        """Run a docker command with a DOCKER_CONFIG (avoids macOS credential
-        helper hangs). Pass the same ``docker_config`` dir across a
-        login/build/push sequence -- each call previously got its own
-        throwaway TemporaryDirectory, so `docker login`'s credentials were
-        gone (directory deleted) by the time `docker push` ran, failing with
-        'no basic auth credentials' on any host without a working global
-        Docker credential store (e.g. Windows/Docker Desktop locally).
+        """Run a docker command with a shared DOCKER_CONFIG.
 
-        Also forces BuildKit (DOCKER_BUILDKIT=1) for every command. The
-        legacy builder cannot pull multi-arch images for a
-        multi-stage Dockerfile built with ``--platform linux/amd64`` when a
-        base image (e.g. node:20-alpine, composer:2) is already cached for
-        another platform (e.g. arm64 on an Apple Silicon dev box): the build
-        dies with "image with reference sha256:... was found but does not
-        provide the specified platform (linux/amd64)". BuildKit handles the
-        cross-platform multi-stage pull/build correctly (confirmed live: the
-        same Dockerfile the legacy builder rejected built cleanly with
-        DOCKER_BUILDKIT=1)."""
+        Avoids macOS credential-helper hangs and 'no basic auth credentials'
+        on push by reusing one config directory across login/build/push.
+        Forces BuildKit for cross-platform multi-stage builds.
+        """
         if docker_config is not None:
             self._prepare_docker_config(docker_config)
             env = os.environ.copy()
@@ -1076,7 +1127,7 @@ class DeployOpsAgent:
         except ecr_client.exceptions.RepositoryAlreadyExistsException:
             pass
 
-# Use ECR authorization token instead of relying on AWS CLI env
+        # Use ECR authorization token instead of relying on AWS CLI env
         auth_response = ecr_client.get_authorization_token()
         auth_data = auth_response["authorizationData"][0]
         token = auth_data["authorizationToken"]
@@ -1084,14 +1135,8 @@ class DeployOpsAgent:
         decoded_token = base64.b64decode(token).decode("utf-8")
         password = decoded_token.split(":", 1)[1]
 
-        # login/build/push must share ONE DOCKER_CONFIG dir: each was
-        # previously calling _run_docker_cmd with its own throwaway
-        # TemporaryDirectory, so the credentials `docker login` just wrote
-        # were gone (directory already deleted) by the time `docker push`
-        # ran -- failed with "no basic auth credentials" on any host without
-        # a working global Docker credential store (confirmed on Windows /
-        # Docker Desktop locally; masked on the EC2 box by a pre-existing
-        # manual `docker login` in the real ~/.docker/config.json).
+        # login/build/push must share ONE DOCKER_CONFIG dir so credentials
+        # survive across commands.
         with tempfile.TemporaryDirectory() as docker_config_dir:
             returncode, stdout, stderr = await self._run_docker_cmd(
                 ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint],
@@ -1105,27 +1150,23 @@ class DeployOpsAgent:
             ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
             image_uri = f"{ecr_repo}:{image_tag}"
 
-            # Build Docker image with platform for Fargate compatibility.
-            # Use `docker buildx build` (BuildKit) directly: plain `docker build`
-            # on a host whose default builder is BuildKit-first, and the legacy
-            # builder both misbehave with cross-platform multi-stage builds
-            # (legacy chokes reusing an image cached for another platform, and
-            # DOCKER_BUILDKIT=1 via `docker build` errors "BuildKit is enabled
-            # but the buildx component is missing or broken"). `--load` lands the
-            # image in the local image store so `docker push` can find it.
+            # Build with buildx --load so the image lands in the local store
+            # for push; plain docker build misbehaves with cross-platform
+            # multi-stage builds on hosts with mixed-arch caches.
             build_context = self._workspace_dir(job_id) / docker_image.context
+            self._drop_missing_copy_sources(build_context)
             returncode, stdout, stderr = await self._run_docker_cmd(
                 ["docker", "buildx", "build", "--load", "--platform", docker_image.platform, "-t", image_uri, str(build_context)],
-                timeout=600.0, docker_config=docker_config_dir,
+                # 1800s: monorepo builds pull multi-GB base images; 600s killed
+                # them mid-pull.
+                timeout=1800.0, docker_config=docker_config_dir,
             )
             if returncode != 0:
                 self.logger.error(f"Docker build failed: {stderr}")
                 return None
 
-            # Push to ECR. A php-ext image with a compiled mysqli/pdo layer can
-            # exceed 400MB compressed across a modest uplink; the 300s default
-            # (which used to be the push timeout) killed a 240MB image at ~534s
-            # (measured live), so push gets a generous 900s budget.
+            # Push to ECR. Large images (400MB+) need more than 300s on modest
+            # uplinks; 900s covers measured worst-case ~534s transfers.
             returncode, stdout, stderr = await self._run_docker_cmd(
                 ["docker", "push", image_uri], timeout=900.0, docker_config=docker_config_dir,
             )
@@ -1135,47 +1176,6 @@ class DeployOpsAgent:
 
         self.logger.info(f"Image pushed: {image_uri}")
         return image_uri
-    
-    async def _build_and_push_backend_image(self, backend_image_uri: str, region: str, account_id: str, job_id: str) -> bool:
-        # URI format: account.dkr.ecr.region.amazonaws.com/repo:tag
-        repo_name = backend_image_uri.split('/')[-1].split(':')[0]
-        ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{repo_name}"
-        
-        backend_dockerfile = Path("testing/three-tier-app/backend/Dockerfile")
-        if not backend_dockerfile.exists():
-            self.logger.warning(f"Backend Dockerfile not found at {backend_dockerfile}")
-            return False
-        
-        build_cmd = ["docker", "buildx", "build", "--load", "--platform", "linux/amd64", "-t", backend_image_uri, str(backend_dockerfile.parent)]
-        result = await asyncio.create_subprocess_exec(
-            *build_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.logger.error(
-                "Backend Docker build failed: %s",
-                stderr.decode("utf-8", errors="replace"),
-            )
-            return False
-        
-        push_cmd = ["docker", "push", backend_image_uri]
-        result = await asyncio.create_subprocess_exec(
-            *push_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await result.communicate()
-        if result.returncode != 0:
-            self.logger.error(
-                "Backend Docker push failed: %s",
-                stderr.decode("utf-8", errors="replace"),
-            )
-            return False
-        
-        self.logger.info(f"Backend image pushed: {backend_image_uri}")
-        return True
 
 
     def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1232,11 +1232,14 @@ class DeployOpsAgent:
             flat_dep = {
                 "strategy": ec2_dep.get("strategy") or dep_config.get("strategy", "rolling"),
                 "health_check_path": ec2_dep.get("health_check_path")
-                    or dep_config.get("health_check_path", "/health"),
+                    or dep_config.get("health_check_path", "/"),
                 "health_check_port": ec2_dep.get("health_check_port")
                     or dep_config.get("health_check_port", 8080),
+                # EC2 bootstraps from scratch (yum, docker, image pull) —
+                # 15 min expired before the app was even up. Only EC2 pays
+                # this cost; ECS/S3 keep 15.
                 "timeout_minutes": ec2_dep.get("timeout_minutes")
-                    or dep_config.get("timeout_minutes", 15),
+                    or dep_config.get("timeout_minutes", 30),
                 "auto_rollback": True,
                 "rollback_on_alarm": True,
             }
@@ -1274,9 +1277,7 @@ class DeployOpsAgent:
             }
 
         docker_images: List[Dict[str, Any]] = []
-        # Preserve an already-correct plural docker_images list (DeployOps-native
-        # payloads) instead of rebuilding from the older singular docker_image
-        # shape, which silently emptied it and broke every real deployment.
+        # Prefer the plural docker_images list if already present.
         existing = artifacts.get("docker_images")
         if isinstance(existing, list) and existing:
             docker_images = existing

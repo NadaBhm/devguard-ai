@@ -1,41 +1,18 @@
 """
-DevGuard AI - Orchestrator Chat (T-3.10 / T-3.11)
-===================================================
+DevGuard AI - Orchestrator Chat
 Conversational interface over a running or finished analysis job.
 
-CDC Reference:
-    US-2.2.5 "As a user, I want to chat with the orchestrator so that I can
-    ask questions during analysis. Given an active job, When I send a
-    message, Then the LLM responds in < 2s using job context and RAG
-    retrieval."
+RAG (lib.rag) knows the repo's README and code samples.
+The orchestrator state knows the analysis results: security score, CVEs,
+cost estimate, deployment status. RAG alone cannot answer "how much will
+this cost per month?" because it indexed the repository, not the pipeline
+results. This module assembles both into one prompt.
 
-Note the two distinct sources in that acceptance criterion - "job context"
-AND "RAG retrieval". They answer different questions:
-
-  - RAG (Nada, src/lib/rag) has embedded the repo's README, docs and a
-    sample of its code. It can answer "what framework does this use?".
-  - The orchestrator state knows what the ANALYSIS found: the security
-    score, the CVEs, the monthly cost estimate, whether deployment
-    succeeded. RAG has never seen any of that - it indexed the repository,
-    not the pipeline results. Ask a RAG-only chat "how much will this cost
-    per month?" and it cannot answer.
-
-So this module assembles both into one prompt.
-
-WHY NOT JUST CALL ask_about_repo()?
------------------------------------
-lib.rag.api exposes ask_about_repo(job_id, question) which does retrieval
-AND generation in one shot. It's the obvious entry point, but it is
-stateless by construction: lib/rag/llm.py builds its prompt from
-(context, query) only, with no room for conversation history or job facts.
-Using it would make every message a cold start - "and what about the
-second one?" would be unanswerable.
-
-We therefore use its sibling, get_repo_context(), which Nada documented for
-exactly this ("debug / custom prompting"): it returns the retrieved chunks
-WITHOUT calling the LLM, letting us build the full prompt ourselves.
-
-Owner: Hbib (Subgroup 2 - Execution & Control)
+We do NOT use ask_about_repo() because it is stateless: it builds its
+prompt from (context, query) only, with no room for conversation history
+or job facts. Every message would be a cold start. Instead we use its
+sibling get_repo_context(), which returns retrieved chunks without calling
+the LLM, letting us build the full prompt ourselves.
 """
 
 from __future__ import annotations
@@ -45,35 +22,20 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
-
+from typing import Any, Literal, Optional, cast
 from .state import OrchestratorState
 
 logger = logging.getLogger(__name__)
 
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
-
-# How many messages (user + assistant, counted individually) to carry into
-# the prompt. 10 = roughly 5 exchanges. This is a latency/quality tradeoff,
-# not a storage limit: every extra turn is extra tokens on every subsequent
-# call, and US-2.2.5 budgets the whole round-trip at under 2 seconds.
 MAX_HISTORY_MESSAGES = 10
-
 DEFAULT_TOP_K = 5
 
 
 def use_real_rag() -> bool:
-    """Whether to call Nada's real RAG stack (Qdrant + Gemini)."""
     if os.getenv("DEVGUARD_REAL_AGENTS", "").strip() in ("1", "true", "True"):
         return True
     return os.getenv("DEVGUARD_REAL_RAG", "").strip() in ("1", "true", "True")
 
-
-# =============================================================================
-# T-3.11: CONVERSATION MEMORY
-# =============================================================================
 
 Role = Literal["user", "assistant"]
 
@@ -96,10 +58,9 @@ class ConversationMemory:
     Rolling conversation history for one job.
 
     Bounded on purpose: an unbounded history would grow the prompt on every
-    message until it blows the model's context window (and the 2s budget).
-    Older messages are dropped rather than summarized - summarizing would
-    cost an extra LLM round-trip per message, which is the one thing this
-    latency budget cannot afford.
+    message until it blows the model's context window (and the latency budget).
+    Older messages are dropped rather than summarized — summarizing would cost
+    an extra LLM round-trip per message, which the budget cannot afford.
     """
 
     job_id: str
@@ -128,12 +89,6 @@ class ConversationMemory:
         self.messages.clear()
 
 
-# Process-local store, keyed by job_id.
-#
-# Same lifetime and caveat as the graph's checkpointer: it lives in the
-# FastAPI process and is lost on restart. Acceptable for Sprint 3.
-# TODO Sprint 5: persist alongside job state in PostgreSQL, in the same move
-# that swaps MemorySaver for PostgresSaver.
 _conversations: dict[str, ConversationMemory] = {}
 
 
@@ -148,23 +103,10 @@ def clear_conversation(job_id: str) -> None:
 
 
 def reset_all_conversations() -> None:
-    """Wipe every stored conversation (used by tests)."""
     _conversations.clear()
 
 
-# =============================================================================
-# JOB CONTEXT
-# =============================================================================
-
 def build_job_context(state: Optional[OrchestratorState]) -> str:
-    """
-    Summarize what the pipeline has learned so far, in plain text.
-
-    This is the half of the prompt RAG cannot provide. Only sections that
-    actually exist are included: mid-analysis there is no cost estimate yet,
-    and inventing empty headings just wastes tokens and invites the model to
-    hallucinate values for them.
-    """
     if not state:
         return ""
 
@@ -175,9 +117,9 @@ def build_job_context(state: Optional[OrchestratorState]) -> str:
 
     codesec = state.get("codesec_result") or {}
     if codesec:
-        score = codesec.get("security_score", {})
-        summary = codesec.get("summary", {})
-        stack = codesec.get("stack_detection", {})
+        score = codesec.get("security_score") or {}
+        summary = codesec.get("summary") or {}
+        stack = codesec.get("stack_detection") or {}
         parts.append(
             "Security analysis: score {}/100 (grade {}), {} critical / {} high findings, "
             "{} hardcoded secrets, {} vulnerable dependencies.".format(
@@ -205,7 +147,7 @@ def build_job_context(state: Optional[OrchestratorState]) -> str:
 
     infracost = state.get("infracost_result") or {}
     if infracost:
-        cost = infracost.get("cost_estimate", {})
+        cost = infracost.get("cost_estimate") or {}
         parts.append(
             "Infrastructure: {} recommended, estimated ${}/month.".format(
                 infracost.get("architecture_recommendation", "?"),
@@ -235,7 +177,7 @@ def build_job_context(state: Optional[OrchestratorState]) -> str:
                 f"A rollback was triggered: {deployops.get('rollback_reason', 'unknown reason')}."
             )
 
-    gates = state.get("human_gates") or {}
+    gates = cast(dict[str, Any], state["human_gates"])
     pending = [
         name for name, gate in gates.items()
         if gate.get("required") and gate.get("approved") is None
@@ -245,10 +187,6 @@ def build_job_context(state: Optional[OrchestratorState]) -> str:
 
     return "\n".join(parts)
 
-
-# =============================================================================
-# PROMPT ASSEMBLY
-# =============================================================================
 
 _SYSTEM_PREAMBLE = (
     "You are DevGuard AI's assistant. You help a developer understand the "
@@ -286,10 +224,6 @@ def build_prompt(
     return "\n\n".join(sections)
 
 
-# =============================================================================
-# T-3.10: CHAT ENTRY POINT
-# =============================================================================
-
 def chat(
     job_id: str,
     message: str,
@@ -297,29 +231,11 @@ def chat(
     *,
     top_k: int = DEFAULT_TOP_K,
 ) -> dict[str, Any]:
-    """
-    Answer one chat message about a job.
-
-    Args:
-        job_id: job whose analysis (and Qdrant collection) to talk about.
-        message: the user's question, in any language.
-        state: current orchestrator state, for the pipeline-results half of
-            the prompt. Optional - without it the assistant can still answer
-            repository questions from RAG alone.
-        top_k: how many repo chunks to retrieve.
-
-    Returns:
-        {"answer", "job_id", "history", "used_rag", "used_job_context"}
-
-    The user message is recorded in history before the LLM call, and the
-    answer after it, so a failed call doesn't silently drop the question
-    from the conversation.
-    """
     if not message or not message.strip():
         raise ValueError("Chat message cannot be empty")
 
     memory = get_conversation(job_id)
-    history_block = memory.as_prompt_block()   # BEFORE appending the new message
+    history_block = memory.as_prompt_block()
     memory.append("user", message)
 
     job_context = build_job_context(state)
@@ -345,19 +261,14 @@ def chat(
 
 
 def _retrieve_repo_context(job_id: str, question: str, top_k: int) -> str:
-    """Pull repo chunks from Nada's RAG. Never fatal: chat degrades to job context."""
     if not use_real_rag():
         logger.info("[%s] Chat: RAG in MOCK mode (set DEVGUARD_REAL_RAG=1 for real)", job_id)
         return _MOCK_REPO_CONTEXT
 
     try:
-        from lib.rag.api import get_repo_context  # lazy: branch may not have it
-
+        from lib.rag.api import get_repo_context
         return get_repo_context(job_id=job_id, question=question, top_k=top_k) or ""
     except Exception as exc:
-        # A cold Qdrant, a missing collection (job never ingested) or a
-        # network blip must not take the chat down - the pipeline results
-        # alone still answer a lot of questions.
         logger.warning("[%s] RAG retrieval failed, continuing without it: %s", job_id, exc)
         return ""
 
@@ -367,8 +278,7 @@ def _generate(prompt: str, *, job_id: str) -> str:
         return _mock_answer(prompt)
 
     try:
-        from lib.rag.llm import GeminiClient  # lazy
-
+        from lib.rag.llm import GeminiClient
         return GeminiClient().query(prompt)
     except Exception as exc:
         logger.error("[%s] Chat LLM call failed: %s", job_id, exc)
@@ -378,10 +288,6 @@ def _generate(prompt: str, *, job_id: str) -> str:
             "try again in a moment."
         )
 
-
-# =============================================================================
-# MOCK MODE
-# =============================================================================
 
 _MOCK_REPO_CONTEXT = (
     "README.md: DevGuard AI - an agentic DevSecOps platform that analyzes a "
@@ -393,13 +299,6 @@ _MOCK_REPO_CONTEXT = (
 
 
 def _mock_answer(prompt: str) -> str:
-    """
-    Deterministic stand-in for the LLM.
-
-    Echoes back which prompt sections were assembled, so the wiring (memory,
-    job context, retrieval) can be tested end-to-end without a Gemini API key
-    or a running Qdrant.
-    """
     blocks = [
         name
         for marker, name in (

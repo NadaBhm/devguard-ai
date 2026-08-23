@@ -8,6 +8,7 @@ the orchestrator runs in-process inside the API.
 import json
 import logging
 from datetime import datetime
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -72,10 +73,10 @@ def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
     (``<context>/Dockerfile`` or ``Dockerfile`` for the repo root). Legacy
     payloads keep the singular ``dockerfile`` + ``docker_image`` shape.
     """
-    artifacts = {}
-    infracost = state.get("infracost_result") or {}
-    deploy_inputs = (infracost.get("_deploy_inputs") or {}).get("artifacts") or {}
-    deployops = (state.get("deployops_result") or {}).get("artifacts") or {}
+    artifacts: dict[str, Any] = {}
+    infracost = cast(dict[str, Any], state.get("infracost_result") or {})
+    deploy_inputs = cast(dict[str, Any], (infracost.get("_deploy_inputs") or {}).get("artifacts") or {})
+    deployops = cast(dict[str, Any], (state.get("deployops_result") or {}).get("artifacts") or {})
     for source in (deploy_inputs, deployops):
         for key in ("dockerfile", "docker_image", "docker_images"):
             if key in source:
@@ -91,8 +92,8 @@ def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
         return rows
 
     dockerfile = artifacts.get("dockerfile")
-    docker_image = artifacts.get("docker_image") or {}
-    image = {}
+    docker_image = cast(dict[str, Any], artifacts.get("docker_image") or {})
+    image: dict[str, Any] = {}
     for field, value in (("name", "name"), ("tag", "tag")):
         if docker_image.get(field):
             image[field] = docker_image[field]
@@ -112,9 +113,10 @@ def _artifact_specs(state: dict) -> list[tuple[str, str, str]]:
     generated Terraform files (nested ``files`` from the real agent, flat
     keys from the mock) plus the Docker artifacts from ``_docker_artifacts``.
     """
-    infracost = state.get("infracost_result") or {}
-    terraform = infracost.get("generated_terraform") or {}
-    terraform = terraform.get("files") if isinstance(terraform.get("files"), dict) else terraform
+    infracost = cast(dict[str, Any], state.get("infracost_result") or {})
+    terraform_raw = cast(dict[str, Any], infracost.get("generated_terraform") or {})
+    terraform_files = terraform_raw.get("files")
+    terraform = terraform_files if isinstance(terraform_files, dict) else terraform_raw
     specs: list[tuple[str, str, str]] = []
     for file_path, content in (
         ("main.tf", terraform.get("main.tf") or terraform.get("main_tf")),
@@ -151,7 +153,7 @@ def coarse_status(orch_status: str) -> str:
     return "running"
 
 
-def _jsonable_interrupt(entry):
+def _jsonable_interrupt(entry: Any) -> Any:
     """LangGraph ``Interrupt`` objects -> the dict shape the frontend expects
     (``state.__interrupt__[i].value``); plain dicts pass through."""
     if isinstance(entry, dict):
@@ -175,15 +177,17 @@ def serialize_state(state: dict) -> dict:
 
 def update_run_state(db: Session, run_id: str, state: dict) -> AnalysisRun:
     run = db.query(AnalysisRun).filter(AnalysisRun.id == run_id).first()
-    if not run:
+    if run is None:
         raise ValueError(f"AnalysisRun {run_id} not found")
 
-    run.status = coarse_status(state.get("status", "running"))
-    run.run_metadata = serialize_state(state)
+    run.status = coarse_status(state.get("status", "running"))  # type: ignore[reportAttributeAccessIssue]
+    run.run_metadata = serialize_state(state)  # type: ignore[reportAttributeAccessIssue]
     if state.get("status") in TERMINAL_STATUSES:
-        run.completed_at = datetime.utcnow()
-        if run.started_at:
-            run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())
+        run.completed_at = datetime.utcnow()  # type: ignore[reportAttributeAccessIssue]
+        if run.started_at is not None:
+            run.duration_seconds = int(  # type: ignore[reportAttributeAccessIssue]
+                (run.completed_at - run.started_at).total_seconds()
+            )
     db.commit()
     db.refresh(run)
     return run
@@ -220,8 +224,8 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         ))
         written += 1
 
-    codesec = state.get("codesec_result") or {}
-    for finding in codesec.get("sast_findings", []):
+    codesec = cast(dict[str, Any], state.get("codesec_result") or {})
+    for finding in codesec.get("sast_findings", []) or []:
         db.add(CodeSecFinding(
             run_id=run_id,
             scanner=_normalize_scanner(finding.get("tool", "semgrep")),
@@ -236,9 +240,8 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         ))
         written += 1
 
-    # Secrets (gitleaks/builtin) were never materialized, so they vanished
-    # once a run completed even though the UI surfaces them while paused.
-    for finding in codesec.get("secrets", []):
+    # Materialize secrets so they survive past the paused state.
+    for finding in codesec.get("secrets", []) or []:
         secret_type = finding.get("type", "secret")
         db.add(CodeSecFinding(
             run_id=run_id,
@@ -254,14 +257,17 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
         ))
         written += 1
 
-    infracost = state.get("infracost_result") or {}
-    breakdown = infracost.get("cost_estimate", {}).get("breakdown", []) or []
-    if not breakdown and infracost.get("cost_estimate", {}).get("monthly_cost_usd"):
+    infracost = cast(dict[str, Any], state.get("infracost_result") or {})
+    cost_estimate = cast(dict[str, Any], infracost.get("cost_estimate") or {})
+    breakdown = cast(list, cost_estimate.get("breakdown") or [])
+    if not breakdown and cost_estimate.get("monthly_cost_usd"):
         breakdown = [{
             "service": "Estimated total",
-            "monthly_cost_usd": infracost["cost_estimate"]["monthly_cost_usd"],
+            "monthly_cost_usd": cost_estimate["monthly_cost_usd"],
         }]
     for item in breakdown:
+        if not isinstance(item, dict):
+            continue
         monthly = item.get("monthly_cost_usd", 0)
         db.add(InfracostEstimate(
             run_id=run_id,
@@ -277,13 +283,14 @@ def persist_results(db: Session, run_id: str, state: dict) -> int:
 
     written += _write_artifact_rows(db, run_id, state)
 
-    deployops = state.get("deployops_result") or {}
+    deployops = cast(dict[str, Any], state.get("deployops_result") or {})
     status_map = {"success": "succeeded", "failed": "failed", "rolled_back": "rolled_back"}
     deploy_status = status_map.get(deployops.get("deployment_status", "pending"), "failed")
+    aws_config = cast(dict[str, Any], deployops.get("aws_config") or {})
     db.add(Deployment(
         run_id=run_id,
         environment="dev",
-        aws_region=(deployops.get("aws_config") or {}).get("region", "us-east-1"),
+        aws_region=aws_config.get("region", "us-east-1"),
         status=deploy_status,
         applied_at=datetime.utcnow() if deploy_status == "succeeded" else None,
         rollback_reason=deployops.get("rollback_reason"),
@@ -306,7 +313,7 @@ def derive_results_from_state(metadata: dict) -> dict:
     """
     from uuid import uuid4
 
-    codesec = metadata.get("codesec_result") or {}
+    codesec = cast(dict[str, Any], metadata.get("codesec_result") or {})
     findings = []
     for finding in list(codesec.get("sast_findings") or []) + list(codesec.get("secrets") or []):
         scanner = _normalize_scanner(finding.get("tool") or finding.get("scanner") or "semgrep")
@@ -324,8 +331,8 @@ def derive_results_from_state(metadata: dict) -> dict:
             "created_at": datetime.utcnow().isoformat(),
         })
 
-    infracost = metadata.get("infracost_result") or {}
-    cost_estimate = infracost.get("cost_estimate") or {}
+    infracost = cast(dict[str, Any], metadata.get("infracost_result") or {})
+    cost_estimate = cast(dict[str, Any], infracost.get("cost_estimate") or {})
 
     def _estimate_row(name: str, res_type: str, monthly: float) -> dict:
         return {
@@ -343,19 +350,22 @@ def derive_results_from_state(metadata: dict) -> dict:
 
     estimates = []
     for item in cost_estimate.get("breakdown") or []:
+        if not isinstance(item, dict):
+            continue
         monthly = item.get("monthly_cost_usd", 0)
         estimates.append(_estimate_row(
             item.get("service", "unknown"), item.get("service", "unknown"), monthly
         ))
-    # The real InfraCost agent reports one total with an empty per-service
-    # breakdown, which the UI sums to $0; derive a single total row instead.
+    # Derive a total row when the breakdown is empty so the UI shows a
+    # non-zero cost.
     if not estimates and cost_estimate.get("monthly_cost_usd"):
         estimates.append(_estimate_row(
             "Estimated total", "total", float(cost_estimate["monthly_cost_usd"])
         ))
 
-    terraform = infracost.get("generated_terraform") or {}
-    terraform = terraform.get("files") if isinstance(terraform.get("files"), dict) else terraform
+    terraform_raw = cast(dict[str, Any], infracost.get("generated_terraform") or {})
+    terraform_files = terraform_raw.get("files")
+    terraform = terraform_files if isinstance(terraform_files, dict) else terraform_raw
     artifacts = []
     for file_path, key in (
         ("main.tf", "main.tf"),

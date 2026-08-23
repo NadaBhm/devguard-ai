@@ -27,6 +27,12 @@ from . import ScannerError, find_dockerfiles, find_files, is_dockerfile_rel_path
 logger = logging.getLogger(__name__)
 
 
+def _content_has_indicator(content: str, indicator: str) -> bool:
+    """Word-boundary match. Plain substring matching false-positives on
+    machine-generated files (e.g. "pg" inside base64 integrity hashes)."""
+    return re.search(rf"\b{re.escape(indicator)}\b", content) is not None
+
+
 def _is_dockerfile_path(rel_path: str) -> bool:
     """True when a repo-relative path is an actual Dockerfile.
 
@@ -260,7 +266,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
                 if not _is_signal_file(f.relative_to(repo_path).as_posix()):
                     continue
                 content = read_file_safe(f, max_size_mb=1)
-                if content and indicator in content:
+                if content and _content_has_indicator(content, indicator):
                     score += 2
         if score > 0:
             framework_scores[fw_name] = score
@@ -282,7 +288,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
                 if not _is_signal_file(f.relative_to(repo_path).as_posix()):
                     continue
                 content = read_file_safe(f, max_size_mb=1)
-                if content and indicator in content:
+                if content and _content_has_indicator(content, indicator):
                     score += 2
         if score > 0:
             db_scores[db_name] = score

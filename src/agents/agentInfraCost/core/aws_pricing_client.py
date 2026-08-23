@@ -1,24 +1,9 @@
-"""Phase A (post-mission extension): live AWS Pricing API client.
+"""Live AWS Pricing API client (Phase A extension).
 
-Fetches current on-demand prices via the official AWS Pricing API (boto3)
-and normalizes them into EXACTLY the same shape as ``data/aws_pricing.json``
-— so ``cost_estimator.py``'s formulas never change, only where the numbers
-come from. Cached in memory for ``_CACHE_TTL_SECONDS`` to avoid hitting AWS
-on every single cost estimate.
-
-Reliability note, stated plainly rather than hidden: EC2 on-demand pricing
-uses a well-documented, stable set of filters and is fetched fully live.
-ECS Fargate and Lambda pricing use filters that are harder to guarantee
-correct without testing against a real AWS account (which this codebase
-cannot do in its own development/test environment) — each individual price
-point is fetched on a best-effort basis and silently keeps its static
-fallback value (with a logged warning) if the live call fails, rather than
-ever breaking cost estimation as a whole. If you have real AWS access,
-watch the warnings and adjust the Fargate/Lambda filters below if needed.
-
-The AWS Pricing API itself only answers from two regions regardless of
-which region's prices you're asking about — ``us-east-1`` or
-``ap-south-1`` — an AWS platform detail, not a choice made here.
+On-demand prices normalized into EXACTLY the ``data/aws_pricing.json`` shape (so
+cost_estimator formulas never change; ~24h cache). EC2 filters stable/fetched live;
+Fargate/Lambda best-effort — failures warn and keep static values. The API answers
+from us-east-1/ap-south-1 only, whatever region you ask about (platform detail).
 """
 
 from __future__ import annotations
@@ -46,11 +31,8 @@ _EC2_INSTANCE_TYPES: Final[tuple[str, ...]] = (
     "m5.large", "m6i.large", "m7g.large",
 )
 
-# usagetype filter values this module attempts to refresh live, on a
-# best-effort basis. Lambda pricing is deliberately NOT attempted live here
-# — its GetProducts filters are even less reliable to guess than Fargate's
-# without testing against a real account — it always keeps its static value
-# from data/aws_pricing.json for now.
+# usagetype filter values refreshed live, best-effort. Lambda is deliberately NOT
+# attempted live (filters less reliable than Fargate's); it keeps its static value.
 _FARGATE_ARCH_USAGETYPE: Final[dict[str, str]] = {
     "x86": "Fargate-vCPU-Hours:perCPU",
     "arm_graviton": "Fargate-ARM-vCPU-Hours:perCPU",
@@ -64,10 +46,8 @@ class AwsPricingFetchError(Exception):
 
 
 def _get_pricing_client() -> Any:
-    """A fresh boto3 Pricing client. Imported lazily so this whole module
-    stays optional — nothing else in the pipeline requires boto3 to import
-    successfully, since cost_estimator falls back to the static table if
-    this client can't even be constructed."""
+    """Fresh boto3 Pricing client; boto3 imported lazily so this module stays
+    optional (cost_estimator falls back to the static table without it)."""
     import boto3
 
     return boto3.client("pricing", region_name=_PRICING_API_REGION)
@@ -121,21 +101,10 @@ def _fetch_fargate_vcpu_hourly_price(client: Any, usagetype_suffix: str, locatio
 
 
 def fetch_live_pricing_data(fallback: dict[str, Any]) -> dict[str, Any]:
-    """Fetch current AWS prices, shaped exactly like ``data/aws_pricing.json``.
-
-    Args:
-        fallback: The static table's already-loaded content. Used as the
-            starting point (so ``_meta``, ``optimization_discounts`` etc.
-            are always present) and as the per-price fallback whenever a
-            specific live fetch fails.
-
-    Returns:
-        A dict in the same shape as ``fallback``, with as many prices
-        refreshed from AWS as could be fetched successfully. Never raises:
-        any failure (missing boto3, no credentials, no network, a bad
-        filter) is logged and the corresponding value(s) simply keep their
-        static fallback.
-    """
+    """Fetch current AWS prices shaped exactly like ``data/aws_pricing.json``:
+    starts from ``fallback`` (keeps _meta/discounts present) and refreshes what
+    it can; never raises — missing boto3/credentials/network/bad filter logs a
+    warning and keeps the static value(s)."""
     now = time.monotonic()
     if _cache["data"] is not None and (now - _cache["fetched_at"]) < _CACHE_TTL_SECONDS:
         return _cache["data"]

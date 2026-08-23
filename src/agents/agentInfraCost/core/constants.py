@@ -1,15 +1,9 @@
-"""Single source of truth for the InfraCost agent's naming/operational
-conventions.
+"""Single source of truth for the agent's naming/operational conventions.
 
-Previously these constants were mirrored between ``core.terraform_generator``
-(module 3) and ``core.output_builder`` (module 7) — two independent copies of
-the same ports, names, runtimes and AMIs. Any drift between them silently
-produced artifacts whose metadata (JSON output) disagreed with the Terraform
-they shipped. Both modules now import from here instead.
-
-These are identity/default conventions, NOT architecture decisions — the
-architecture choice (compute_type, sizing) always comes from the
-``DecisionResult``.
+Previously mirrored between terraform_generator (module 3) and output_builder
+(module 7) — drift silently produced JSON metadata disagreeing with the shipped
+Terraform. Both import from here. Identity/default conventions only, NOT
+architecture decisions.
 """
 
 from __future__ import annotations
@@ -19,9 +13,8 @@ from typing import Final
 
 DOCKER_IMAGE_NAME: Final[str] = "devguard-app"
 
-# Whole-repo digestion (Gate-2 regeneration): the OpenRouter LLM reads the
-# repository in chunks and extracts infra-relevant facts. These cap how much
-# of the repo is ever read and how long a single digest call may take.
+# Whole-repo digestion (Gate-2 regens): caps on how much of the repo the LLM reads
+# and how long a single digest call may take.
 REPO_CHUNK_BYTES: Final[int] = int(os.getenv("REPO_CHUNK_BYTES", "30000"))
 REPO_MAX_BYTES: Final[int] = int(os.getenv("REPO_MAX_BYTES", "4000000"))
 REPO_MAX_CHUNKS: Final[int] = int(os.getenv("REPO_MAX_CHUNKS", "40"))
@@ -30,27 +23,17 @@ REPO_DIGEST_TIMEOUT_SECONDS: Final[float] = float(
     os.getenv("REPO_DIGEST_TIMEOUT_SECONDS", "60")
 )
 
-# Feedback-driven artifact refinement (core.llm_terraform_refiner): the free
-# OpenRouter tiers intermittently return a 200 whose body lacks the expected
-# `choices` envelope (or wraps the JSON in a markdown fence), so the refiner
-# re-asks a few times before giving up and keeping the generated files
-# unchanged. Each attempt is a fresh request, so transient provider flakiness
-# does not silently drop the user's regeneration request.
+# Refiner retries: free OpenRouter tiers intermittently return 200s lacking `choices`
+# (or fence-wrapped JSON), so re-ask a few times before keeping the generated files.
 REFINER_MAX_ATTEMPTS: Final[int] = int(os.getenv("REFINER_MAX_ATTEMPTS", "3"))
 REFINER_RETRY_DELAY_SECONDS: Final[float] = float(
     os.getenv("REFINER_RETRY_DELAY_SECONDS", "1.0")
 )
 
 def unique_resource_name(base: str, job_id: str) -> str:
-    """Suffix a base AWS resource name with a short, deterministic slice of
-    ``job_id`` so concurrent deployments never collide on fixed names (the
-    ALB/target-group/log-group names derive from service_name, so suffixing
-    it covers those too). Confirmed colliding in practice: Target Group /
-    IAM Role / Log Group "already exists" on a second ``terraform apply``.
-    8 hex chars keeps every involved AWS name-length limit (ALB/target group:
-    32, IAM role: 64) with room to spare. output_builder.py
-    and terraform_generator.py must pass the SAME job_id so names never drift.
-    """
+    """Suffix a base name with a short deterministic slice of ``job_id``: concurrent
+    deployments collided on fixed names in practice (incl. derived ALB/target-group/
+    log-group names); 8 hex chars fits AWS name limits. Callers must pass same job_id."""
     return f"{base}-{job_id[:8]}"
 # ECS
 ECS_CLUSTER_NAME: Final[str] = "devguard-cluster"
@@ -66,11 +49,8 @@ LAMBDA_RUNTIME: Final[str] = "python3.12"
 LAMBDA_TIMEOUT_SECONDS: Final[int] = 30
 
 EC2_AMI_ID: Final[str] = "ami-0000000000000000"
-# Optional SSH key pair for the EC2 instance. Defaults to empty (no key): the
-# instance is provisioned entirely through user_data and needs no SSH access.
-# Set DEVGUARD_KEY_PAIR_NAME to an existing key pair (e.g. for debugging).
-# Hardcoding a fixed name here broke real applies with InvalidKeyPair.NotFound
-# when that pair didn't exist in the target account.
+# Optional SSH key pair (DEVGUARD_KEY_PAIR_NAME); default empty — user_data suffices,
+# and a hardcoded missing pair broke applies with InvalidKeyPair.NotFound.
 EC2_KEY_PAIR_NAME: Final[str] = os.getenv("DEVGUARD_KEY_PAIR_NAME", "")
 EC2_INSTANCE_COUNT: Final[int] = 1
 EC2_INSTANCE_NAME: Final[str] = "devguard-app"

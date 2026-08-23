@@ -1,25 +1,9 @@
-"""Step 6 of the InfraCost pipeline: propose a FinOps optimization.
+"""Step 6: propose exactly one deterministic FinOps optimization per architecture.
 
-Proposes exactly one recommended cost-saving strategy per architecture —
-Spot, Reserved (1yr/3yr) or Graviton for ECS/EC2, a ``reserved_concurrency``
-cap for Lambda — always deterministically, from signals already computed by
-earlier modules (never free-form text; that is module 10's job, using this
-module's output as its factual basis).
-
-The mission's hard rule: Spot must never be recommended for a service that
-has a docker-compose setup (``compose_detected`` — often a sign of a
-stateful, single-instance-minded local dev setup) AND shows no horizontal
-scaling across load (module 5's scenarios never add a second replica) —
-losing that one Spot replica to an AWS reclaim would mean a full outage,
-not a capacity dip.
-
-On top of that hard rule, Spot also requires a minimum redundancy margin:
-even where scaling is technically detected (more replicas at 100K users
-than at 1K), a service that still runs on a single replica at the *lowest*
-modeled traffic level is fully exposed whenever traffic happens to be low.
-Spot is only considered safe when at least ``_MIN_REPLICAS_FOR_SAFE_SPOT``
-replicas are running even at the 1K-user scenario — losing one Spot replica
-should never be able to drop capacity to zero, at any modeled load level.
+Spot / Reserved (1yr|3yr) / Graviton for ECS/EC2, a reserved_concurrency cap for
+Lambda — from signals earlier modules computed, never free-form text. Hard rule:
+never Spot for compose_detected + no horizontal scaling (lost Spot replica = full
+outage), nor below _MIN_REPLICAS_FOR_SAFE_SPOT replicas at 1K users.
 """
 
 from __future__ import annotations
@@ -34,16 +18,14 @@ from core.decision_engine import DecisionResult
 from core.scenario_simulator import simulate_load_scenarios
 from models.input_schema import RepoAnalysisInput
 
-# Average seconds in a month, used only to convert a monthly invocation
-# volume into an approximate concurrent-execution figure for Lambda
-# (Little's Law: concurrency ~= throughput x average duration).
+# Average seconds/month: converts monthly invocation volume to approximate concurrent
+# executions for Lambda (Little's Law: concurrency ~= throughput x duration).
 _SECONDS_PER_MONTH: Final[int] = 30 * 24 * 3600
 _LAMBDA_CONCURRENCY_SAFETY_MARGIN: Final[float] = 2.0
 _LAMBDA_MIN_RESERVED_CONCURRENCY: Final[int] = 5
 
-# A single Spot interruption must never be able to drop capacity to zero,
-# even at the lightest modeled traffic level (1K users) — require at least
-# this many replicas already running there before Spot is considered safe.
+# One Spot interruption must never drop capacity to zero, even at the lightest modeled
+# level (1K users) — require this many replicas running there before Spot is safe.
 _MIN_REPLICAS_FOR_SAFE_SPOT: Final[int] = 2
 
 
@@ -60,9 +42,8 @@ class FinOpsRecommendation(BaseModel):
 
 
 def _detects_horizontal_scaling(decision: DecisionResult) -> bool:
-    """True if replica/instance count actually grows between the 1K and
-    100K user scenarios (module 5) — Lambda always scales this way by
-    design, so it is trivially true there."""
+    """True if replica/instance count actually grows between the 1K and 100K
+    scenarios (module 5) — trivially true for Lambda, which scales by design."""
     if decision.compute_type == "lambda":
         return True
     scenarios = simulate_load_scenarios(decision)
@@ -78,11 +59,9 @@ def _is_spot_safe(compose_detected: bool, horizontal_scaling_detected: bool) -> 
 
 
 def _has_redundancy_at_low_traffic(decision: DecisionResult) -> bool:
-    """At least ``_MIN_REPLICAS_FOR_SAFE_SPOT`` replicas already running at
-    the lightest modeled scenario (1K users) — so even the quietest traffic
-    period has enough redundancy to absorb one Spot interruption without
-    dropping to zero capacity. Lambda has no replica concept, so it is
-    trivially true there."""
+    """At least _MIN_REPLICAS_FOR_SAFE_SPOT replicas running at the lightest modeled
+    scenario (1K users), so even the quietest period absorbs one Spot interruption
+    without zeroing capacity. Trivially true for Lambda (no replica concept)."""
     if decision.compute_type == "lambda":
         return True
     scenarios = simulate_load_scenarios(decision)
@@ -206,9 +185,8 @@ def _optimize_lambda(decision: DecisionResult) -> FinOpsRecommendation:
 
 
 def _optimize_s3(analysis: RepoAnalysisInput, decision: DecisionResult) -> FinOpsRecommendation:
-    """Static S3 hosting has no compute to optimize — there is no concurrency,
-    instance count, or Lambda capacity to tune. Report that as the recommendation
-    so the FinOps stage is a no-op rather than a crash."""
+    """Static S3 has no compute to optimize (concurrency/instances/Lambda capacity) —
+    report that as the recommendation so FinOps is a no-op, not a crash."""
     return FinOpsRecommendation(
         recommended=OptimizationOption(
             name="no_compute_to_optimize",
@@ -231,14 +209,7 @@ _OPTIMIZERS = {
 
 
 def optimize_finops(analysis: RepoAnalysisInput, decision: DecisionResult) -> FinOpsRecommendation:
-    """Propose one deterministic, justified cost-saving strategy.
-
-    Args:
-        analysis: Module 1's output — used for ``compose_detected``.
-        decision: Module 2's output — the architecture decision.
-
-    Returns:
-        A ``FinOpsRecommendation`` naming the recommended strategy, the
-        strategies ruled out and why, and the signals used to decide.
-    """
+    """Propose one deterministic, justified cost-saving strategy. Returns a
+    FinOpsRecommendation naming the recommended strategy, the ruled-out ones with
+    reasons, and the deciding signals."""
     return _OPTIMIZERS[decision.compute_type](analysis, decision)

@@ -1,18 +1,9 @@
-"""T-3.8 (Sprint 4): compare estimated monthly cost across AWS regions.
+"""Compare estimated monthly cost across AWS regions (T-3.8, Sprint 4 addition).
 
-Not part of the original 10-module pipeline (modules 1-10 cover input
-validation through LLM enrichment) — added on top of it to satisfy a later
-sprint requirement. Deliberately reuses module 4 (``cost_estimator``)
-rather than duplicating its formulas: this module answers "same
-architecture, different region", never recomputes sizing or pricing logic.
-
-``data/aws_pricing.json`` only prices ``us-east-1`` in full. Real
-region-by-region AWS pricing would require a full pricing table per region
-— not available here — so cross-region cost is approximated with a small,
-explicitly documented multiplier table (``region_multipliers``) applied to
-the us-east-1 estimate, the same "documented assumption, never invented"
-approach used throughout this agent (see the confidence threshold in
-module 1, the capacity assumptions in module 5).
+Deliberately reuses cost_estimator rather than duplicating formulas — answers
+"same architecture, different region", never resizing. data/aws_pricing.json
+prices only us-east-1 in full, so cross-region cost approximates via the
+documented ``region_multipliers`` table (documented assumption, not precision).
 """
 
 from __future__ import annotations
@@ -42,20 +33,9 @@ def compare_regions(
     decision: DecisionResult, context: CostEstimationContext | None = None
 ) -> list[RegionCost]:
     """Estimate monthly cost for the same architecture across candidate regions.
-
-    Args:
-        decision: Module 2's output — the architecture decision.
-        context: Traffic/workload assumptions passed straight through to
-            module 4; defaults to one baseline moderate-traffic month.
-
-    Returns:
-        One ``RegionCost`` per region listed in ``region_multipliers``
-        (``data/aws_pricing.json``), each with its own ±20% cost range.
-
-    Raises:
-        MissingPricingDataError: ``region_multipliers`` is absent from the
-            pricing table.
-    """
+    ``context`` passes straight through to cost_estimator (baseline month by
+    default). Returns one RegionCost per entry in region_multipliers, each ±20%;
+    raises MissingPricingDataError when region_multipliers is absent."""
     baseline = estimate_cost(decision, context)
     pricing = _load_pricing_data()
     multipliers = _get_pricing(pricing, "region_multipliers")

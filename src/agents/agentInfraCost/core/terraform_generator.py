@@ -1,12 +1,9 @@
-"""Step 3 of the InfraCost pipeline: render Terraform files from templates.
+"""Step 3: render Terraform files from templates.
 
-Generation is entirely deterministic — no LLM writes any Terraform here.
-Each compute type has its own set of three Jinja2 templates under
-``templates/<compute_type>/`` (``main.tf.j2``, ``variables.tf.j2``,
-``outputs.tf.j2``). This module only picks the right template set for
-``decision.compute_type`` and fills in values already computed by module 2
-(``decision_engine``) plus a small amount of non-decision context (job id,
-region, docker image) — it never invents architecture choices itself.
+Deterministic — no LLM writes Terraform here: this module picks the Jinja2
+template set for ``decision.compute_type`` (under ``templates/<compute_type>/``)
+and fills in module-2 decisions plus identity context, inventing no architecture
+choices itself.
 """
 
 from __future__ import annotations
@@ -53,18 +50,13 @@ _ENV: Final[Environment] = Environment(
 
 _TEMPLATE_FILENAMES: Final[tuple[str, ...]] = ("main.tf", "variables.tf", "outputs.tf")
 
-# Conventions used to fill in template variables that module 2 does not
-# decide (naming, ports, IAM role shape, ...). Single source of truth:
-# core/constants.py — module 7 (output_builder) imports the same values
-# so the JSON contract and the rendered Terraform can never drift.
+# Conventions filling template vars module 2 doesn't decide (naming, ports, IAM).
+# Single source of truth: core/constants.py, imported by modules 3 AND 7 (no drift).
 
 
 class TerraformContext(BaseModel):
-    """Inputs needed to render Terraform that module 2 doesn't provide.
-
-    These are identity/environment details, not architecture choices —
-    the architecture choice itself (compute_type, sizing) always comes
-    from the ``DecisionResult`` passed alongside this context.
+    """Inputs needed to render Terraform that module 2 doesn't provide — identity/
+    environment details, never architecture choices (those ride on DecisionResult).
     """
 
     job_id: str
@@ -72,33 +64,24 @@ class TerraformContext(BaseModel):
     environment: str = "dev"
     docker_image: str | None = None
     docker_images: list[dict[str, Any]] | None = None
-    """Multi-container mode: one entry per container to co-schedule in the
-    task, each ``{"name", "image", "port", "context"}``. When set, the ECS
-    template renders one ``container_definitions`` entry per image and routes
-    the ALB to the first (primary); secondary containers are reachable over the
-    task's shared localhost. ``None`` keeps legacy single-container behaviour
-    via ``docker_image``.
-    """
+    """Multi-container mode: one ``{"name", "image", "port", "context"}`` entry per
+    container; the ECS template renders one container_definitions entry per image
+    and routes the ALB to the first (primary). None keeps legacy single-container."""
     source_code_path: str | None = None
     health_check_port: int | None = None
-    """The real container port, extracted from the repo's own Dockerfile EXPOSE
-    line by pipeline.py. None falls back to ECS_HEALTH_CHECK_PORT (8080) — a
-    confirmed mismatch in practice once wired a FastAPI app on port 8000 into
-    containerPort + ALB target group 8080, 502 on every health check -> full
-    rollback."""
+    """Real container port, extracted from the repo Dockerfile's EXPOSE by
+    pipeline.py. None falls back to ECS_HEALTH_CHECK_PORT (8080) — a confirmed
+    mismatch once 502'd every health check on a port-8000 FastAPI app -> rollback."""
     account_id: str | None = None
     database: str | None = None
-    """The database engine module 1 detected (e.g. "postgresql"), if any. Only
-    used by the ECS template today, to declare (not create) the connection
-    variables a deployer must fill in — see ``_ecs_render_context``.
+    """Database engine module 1 detected (e.g. "postgresql"), if any. Only the ECS
+    template uses it, to declare (not create) connection variables a deployer fills.
     """
 
 
 def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
-    # Suffixed with job_id (see constants.unique_resource_name) so concurrent
-    # deployments never collide on the same fixed cluster/service/role name
-    # -- confirmed colliding in practice (ELBv2 Target Group / IAM Role /
-    # CloudWatch Log Group "already exists" on a second `terraform apply`).
+    # job_id-suffixed (unique_resource_name): concurrent deployments collided on the
+    # fixed cluster/service/role names ("already exists" on a second apply).
     service_name = unique_resource_name(ECS_SERVICE_NAME, context.job_id)
     if context.docker_images:
         containers = [
@@ -117,9 +100,8 @@ def _ecs_render_context(decision: DecisionResult, context: TerraformContext) -> 
                 "port": context.health_check_port or ECS_HEALTH_CHECK_PORT,
             }
         ]
-    # The ALB (target group, listener, SG ingress) always fronts the FIRST
-    # container — the app's public entrypoint. Secondary containers share the
-    # task's network namespace (localhost) and need no external listener.
+    # The ALB always fronts the FIRST container (the public entrypoint); secondary
+    # containers share the task's localhost and need no external listener.
     primary = containers[0]
     return {
         "region": context.region,
@@ -153,18 +135,11 @@ def _lambda_render_context(decision: DecisionResult, context: TerraformContext) 
 
 
 def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> dict[str, Any]:
-    # Same job_id suffixing as ECS (constants.unique_resource_name): the IAM
-    # role, instance profile and security group are all derived from
-    # instance_name, so a fixed name collides across jobs -- and worse, a
-    # retried job finds the partial-apply leftovers and dies on
-    # EntityAlreadyExists. Confirmed colliding in practice on the EC2 path.
+    # Same job_id suffixing as ECS: IAM role/profile/SG derive from instance_name,
+    # and a retried job died on EntityAlreadyExists leftovers. Confirmed in practice.
     instance_name = unique_resource_name(EC2_INSTANCE_NAME, context.job_id)
-    # The instance's real listen port: pipeline.py extracts it from the repo's
-    # own Dockerfile EXPOSE line and threads it through health_check_port
-    # (same as ECS). The instance runs the same container image the pipeline
-    # built, so instance_port must match what the app actually listens on, or
-    # the SG / docker run / url output all point at a dead port. Fail-soft:
-    # None falls back to the template default 8080.
+    # Real listen port from the repo Dockerfile EXPOSE (as ECS): instance_port must
+    # match the app or SG/docker run/url all point at a dead port; None -> 8080.
     instance_port = context.health_check_port or EC2_INSTANCE_PORT
     return {
         "region": context.region,
@@ -175,10 +150,8 @@ def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> 
         "key_pair_name": EC2_KEY_PAIR_NAME,
         "instance_name": instance_name,
         "instance_port": instance_port,
-        # Rendered into a locals block so the Gate-2 refiner can correct it to
-        # match the app (e.g. "/api/health") and output_builder's EC2 health
-        # check reads it back from the actual refined Terraform — same
-        # contract as the ECS target group path.
+        # Rendered into a locals block so the Gate-2 refiner can correct it to match
+        # the app; output_builder's EC2 health check reads it back (same as ECS).
         "health_check_path": EC2_HEALTH_CHECK_PATH,
         "docker_image": context.docker_image or "devguard-app:latest",
         "ecr_registry_host": _ecr_registry_host(context),
@@ -186,12 +159,9 @@ def _ec2_render_context(decision: DecisionResult, context: TerraformContext) -> 
 
 
 def _ecr_registry_host(context: TerraformContext) -> str:
-    """Extract the ECR registry host (e.g. ``123456.dkr.ecr.us-east-1.amazonaws.com``)
-    from the fully-qualified image string. Fail-soft: if the image has no
-    registry prefix (bare ``name:tag``), fall back to the account-qualified
-    host when ``account_id`` is available on the context, else the region's
-    ECR endpoint with a placeholder account.
-    """
+    """Extract the ECR registry host from the fully-qualified image string.
+    Fail-soft: a bare ``name:tag`` falls back to the account-qualified host when
+    ``account_id`` is available, else the region endpoint with a placeholder."""
     image = context.docker_image or ""
     if "/" in image:
         return image.split("/", 1)[0]
@@ -218,16 +188,8 @@ _CONTEXT_BUILDERS = {
 
 def generate_terraform(decision: DecisionResult, context: TerraformContext) -> TerraformFiles:
     """Render main.tf / variables.tf / outputs.tf for the decided architecture.
-
-    Args:
-        decision: Module 2's output — names which template set to use
-            (``decision.compute_type``) and supplies the computed sizing.
-        context: Non-decision values (job id, region, docker image, ...)
-            needed to fill in the rest of the templates.
-
-    Returns:
-        A ``TerraformFiles`` with all three files rendered.
-    """
+    ``decision`` names compute_type (template set) and supplies sizing; ``context``
+    fills the rest (job id, region, docker image, ...). Returns TerraformFiles."""
     render_context = _CONTEXT_BUILDERS[decision.compute_type](decision, context)
     rendered = {
         filename: _ENV.get_template(f"{decision.compute_type}/{filename}.j2").render(**render_context)

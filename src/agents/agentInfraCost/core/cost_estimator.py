@@ -1,13 +1,8 @@
-"""Step 4 of the InfraCost pipeline: estimate the monthly AWS cost.
+"""Step 4: estimate the monthly AWS cost.
 
-Prices come from the live AWS Pricing API when it's reachable (module
-``aws_pricing_client``, cached ~24h), falling back to the static, offline
-table in ``data/aws_pricing.json`` whenever it isn't — missing credentials,
-no network, boto3 not installed, a transient AWS error. Either way, the
-formulas below apply a different one per ``compute_type``. A stack
-detection and a sizing decision can only ever produce an estimate, never
-an exact bill, so this always returns a range (``amount`` ± 20%), never a
-single figure.
+Prices come from the live AWS Pricing API when reachable (cached ~24h), falling
+back to ``data/aws_pricing.json`` otherwise. Formulas differ per compute_type;
+estimates are ranges (amount ± 20%), never a single figure.
 """
 
 from __future__ import annotations
@@ -43,9 +38,8 @@ class CostEstimationError(Exception):
 
 
 class MissingPricingDataError(CostEstimationError):
-    """A pricing key the formula needs is absent from aws_pricing.json.
-
-    Never guessed or defaulted — the caller must update the pricing table.
+    """A pricing key the formula needs is absent from aws_pricing.json — never
+    guessed or defaulted; update the pricing table.
     """
 
     def __init__(self, key_path: str) -> None:
@@ -54,12 +48,8 @@ class MissingPricingDataError(CostEstimationError):
 
 
 class CostEstimationContext(BaseModel):
-    """Traffic/workload assumptions the pricing formulas need but the
-    architecture decision doesn't carry.
-
-    These describe one baseline, moderate-traffic month. Module 5
-    (``scenario_simulator``) will override them with real per-scenario
-    numbers (1K / 10K / 100K users) rather than relying on these defaults.
+    """Traffic/workload assumptions the formulas need but the decision doesn't
+    carry (one baseline moderate month; module 5 overrides per-scenario).
     """
 
     avg_duration_seconds: float = 1.0
@@ -75,20 +65,9 @@ def _load_static_pricing_data() -> dict[str, Any]:
 
 
 def _load_pricing_data() -> dict[str, Any]:
-    """Live AWS prices when reachable, the static table otherwise.
-
-    Deliberately NOT ``@lru_cache``-d itself: the live path manages its own
-    ~24h cache internally (``aws_pricing_client``), so calling this again
-    later in a long-running process can pick up a refreshed price. The
-    static path underneath is still cached (see
-    ``_load_static_pricing_data``), so falling back never re-reads the file
-    from disk.
-
-    Never raises: any failure in the live path — boto3 not installed, no
-    AWS credentials, no network, an AWS-side error — logs a warning and
-    returns the static table instead, exactly as this function behaved
-    before the live integration existed.
-    """
+    """Live prices when reachable, static table otherwise. Not lru_cache-d itself:
+    the live path manages its own ~24h cache so long-running processes see refreshes
+    (static underneath is cached). Never raises — failures warn and return static."""
     static = _load_static_pricing_data()
     try:
         from core.aws_pricing_client import fetch_live_pricing_data
@@ -109,15 +88,9 @@ def _get_pricing(data: dict[str, Any], *path: str) -> Any:
 
 
 def _select_arch_family(decision: DecisionResult) -> ArchFamily:
-    """Pick which pricing tier applies.
-
-    For EC2, the instance type name already encodes the family — AWS's own
-    naming convention marks Graviton/ARM instances with a trailing "g" on
-    the generation number (t4g, m6g, m7g, ...). For ECS Fargate and Lambda,
-    the decision carries no such signal, so we default to arm_graviton:
-    AWS's recommended baseline for any standard containerized or
-    interpreted workload, absent a known reason not to use it.
-    """
+    """Pick which pricing tier applies. EC2 instance types encode family in a
+    trailing "g" (t4g, m6g...); Fargate/Lambda carry no signal, so default to
+    arm_graviton — AWS's recommended baseline for standard workloads."""
     if decision.compute_type == "ec2":
         instance_family = str(decision.sizing["instance_type"]).split(".")[0]
         return "arm_graviton" if instance_family.endswith("g") else "x86"
@@ -137,9 +110,8 @@ def _estimate_ecs(
 
     per_task = (vcpu_per_hour * nb_vcpu + memory_gb_per_hour * ram_gb) * hours_per_month
 
-    # The refiner may scale desired_count when the user asks for capacity
-    # ("big userbase"); the base sizing keys never carry it, so default to 1
-    # (a single task) when absent.
+    # The refiner may scale desired_count on capacity requests; base sizing keys
+    # never carry it, so default to 1 (single task).
     desired_count = int(decision.sizing.get("desired_count", 1))
     return per_task * desired_count
 
@@ -188,21 +160,10 @@ _ESTIMATORS = {
 
 
 def estimate_cost(decision: DecisionResult, context: CostEstimationContext | None = None) -> Money:
-    """Estimate the monthly AWS cost for a decided architecture.
-
-    Args:
-        decision: Module 2's output — names ``compute_type`` and its sizing.
-        context: Traffic/workload assumptions; defaults to one baseline
-            moderate-traffic month if omitted.
-
-    Returns:
-        A ``Money`` with ``amount`` plus a ±20% ``range_min``/``range_max``
-        — never a single exact figure.
-
-    Raises:
-        MissingPricingDataError: a pricing key the formula needs is absent
-            from ``data/aws_pricing.json``.
-    """
+    """Estimate the monthly AWS cost for a decided architecture. ``context`` holds
+    traffic/workload assumptions (baseline month if omitted). Returns a ``Money``
+    with amount ± 20% range — never an exact figure. Raises MissingPricingDataError
+    when a needed pricing key is absent from the table."""
     context = context or CostEstimationContext()
     pricing = _load_pricing_data()
     amount = _ESTIMATORS[decision.compute_type](decision, pricing, context)

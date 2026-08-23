@@ -1,16 +1,9 @@
-"""Step 5 of the InfraCost pipeline: simulate cost at three load levels.
+"""Step 5: simulate cost at three load levels (1K/10K/100K active users).
 
-For 1,000 / 10,000 / 100,000 active users, recomputes the actual sizing each
-level needs (parallel ECS tasks, EC2 instances, Lambda invocations/month) and
-derives cost from that recomputed sizing — never the module 4 baseline scaled
-by a ratio of user counts: AWS capacity is a step function (whole replicas,
-never a fraction of one).
-
-AWS publishes no formula mapping "X vCPU" to throughput — it is workload-
-dependent and unknowable from static analysis. So, like module 1's confidence
-threshold or module 2's size brackets, this module leans on small, explicitly
-named capacity assumptions below rather than false precision; capacity scales
-with the *actual* size module 2 chose, never a flat count blind to the sizing.
+Recomputes the sizing each level actually needs and derives cost from it — never
+baseline scaled by a ratio of users: AWS capacity is a step function (whole
+replicas, never fractions). With no published vCPU->throughput formula, capacity
+rests on the documented assumptions below, scaled with module 2's chosen size.
 """
 
 from __future__ import annotations
@@ -38,15 +31,12 @@ _LOAD_SCENARIOS: Final[tuple[int, ...]] = (1_000, 10_000, 100_000)
 # Lambda scales invocations automatically; only the request volume matters.
 _LAMBDA_REQUESTS_PER_USER_PER_MONTH: Final[int] = 100
 
-# ECS Fargate: capacity is assumed proportional to the vCPU allocated to
-# ONE task replica (the size module 2 already chose) — a task with more
-# vCPU serves proportionally more users, it is never a flat count.
+# ECS Fargate: capacity assumed proportional to ONE replica's vCPU (the chosen
+# size) — more vCPU serves proportionally more users, never a flat count.
 _ECS_USERS_PER_VCPU: Final[int] = 500
 
-# EC2: with no per-instance-type vCPU table to reference, on-demand hourly
-# price is used as a proxy for relative compute capacity (AWS's own pricing
-# scales with instance capability). Capacity is defined for one reference
-# instance type and scaled by the ratio of hourly prices for any other type.
+# EC2: no per-type vCPU table exists, so on-demand hourly price proxies relative
+# capacity — defined for one reference type, scaled by hourly-price ratio.
 _EC2_REFERENCE_INSTANCE_TYPE: Final[str] = "t3.micro"
 _EC2_USERS_PER_REFERENCE_INSTANCE: Final[int] = 400
 
@@ -131,15 +121,8 @@ _SIMULATORS = {
 
 
 def simulate_load_scenarios(decision: DecisionResult) -> list[ScenarioResult]:
-    """Simulate cost at 1K / 10K / 100K active users.
-
-    Args:
-        decision: Module 2's output — the base architecture decision.
-
-    Returns:
-        Three ``ScenarioResult``, one per load level in ``_LOAD_SCENARIOS``,
-        each with its own recomputed sizing and cost — never the module 4
-        baseline cost scaled by a ratio of user counts.
-    """
+    """Simulate cost at 1K/10K/100K active users. Returns one ScenarioResult per
+    load level in ``_LOAD_SCENARIOS``, each with its own recomputed sizing and cost —
+    never the baseline scaled by a ratio of user counts."""
     simulator = _SIMULATORS[decision.compute_type]
     return [simulator(decision, users) for users in _LOAD_SCENARIOS]

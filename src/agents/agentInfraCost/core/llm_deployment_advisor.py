@@ -1,28 +1,9 @@
-"""Phase C (post-mission extension): LLM-driven deployment context.
+"""LLM-driven deployment context (Phase C): fill TerraformContext.region/environment.
 
-Fills in the two ``TerraformContext`` fields no other module ever decides —
-``region`` and ``environment`` — previously always hardcoded to
-``"us-east-1"`` and ``"dev"``. Nothing else about Terraform generation
-changes: ``compute_type`` (which of the 9 templates gets used) is already
-decided by ``llm_architecture_advisor.py`` (Phase B), and every other
-template variable (``cluster_name``, ``ami_id``, ``handler``, ...) is a
-naming convention, not a decision — letting an LLM invent those would be
-exactly the "uncontrolled generation" this design avoids. The 9 Jinja2
-templates in ``terraform_generator.py`` are never touched.
-
-Same validation-first pattern as ``llm_architecture_advisor.py``: the LLM
-may only pick from a closed list of known-safe values — the regions
-``data/aws_pricing.json``'s ``region_multipliers`` already prices (see
-``region_comparator.py``), plus the three standard environment tiers. Any
-failure — no ``OPENROUTER_API_KEY``, a failed/timed-out call, malformed
-JSON, a value outside the allowed lists — falls back to today's fixed
-defaults, automatically and silently.
-
-Also passes ``analysis.stack_detection.database`` straight through to
-``TerraformContext.database`` (no LLM involved in this one — it's a plain
-fact from module 1, not a decision). The ECS template uses it to declare
-(never create) database connection variables — see
-``terraform_generator.py``'s docstring.
+Previously hardcoded "us-east-1"/"dev"; nothing else changes — compute_type is
+decided elsewhere and other template variables are naming conventions, not decisions.
+Validation-first (closed region/env lists); any failure silently keeps today's
+defaults. database passes straight through — a module-1 fact, not a decision.
 """
 
 from __future__ import annotations
@@ -40,9 +21,8 @@ from models.input_schema import RepoAnalysisInput
 
 logger = logging.getLogger(__name__)
 
-# Kept in sync with data/aws_pricing.json's "region_multipliers" keys —
-# picking a region outside this list would mean the rest of the system
-# (region_comparator.py) has no price data for it.
+# In sync with data/aws_pricing.json's "region_multipliers" keys — a region outside
+# this list leaves region_comparator.py with no price data.
 AwsRegion = Literal["us-east-1", "eu-west-1", "ap-southeast-1"]
 DeploymentEnvironment = Literal["dev", "staging", "prod"]
 
@@ -59,9 +39,8 @@ _SYSTEM_INSTRUCTION: Final[str] = (
 
 
 class _LlmDeploymentChoice(BaseModel):
-    """Strict shape the LLM's raw JSON response must match. Anything else —
-    malformed JSON, a missing field, a region/environment outside the known
-    lists — fails validation and triggers the deterministic default.
+    """Strict shape for the LLM's raw JSON response; anything outside the known
+    region/environment lists fails validation -> deterministic default.
     """
 
     region: AwsRegion
@@ -107,30 +86,15 @@ def decide_deployment_context(
     source_code_path: str | None = None,
     health_check_port: int | None = None,
 ) -> TerraformContext:
-    """Build a TerraformContext, letting an LLM pick region/environment when
-    available and valid, otherwise using today's fixed defaults.
-
-    Args:
-        analysis: The validated payload produced by ``input_validator``.
-        job_id, docker_image, source_code_path: Passed straight through to
-            ``TerraformContext`` — this module only ever decides ``region``
-            and ``environment``.
-
-    Returns:
-        A ``TerraformContext`` with ``region``/``environment`` from the LLM
-        if it returned a valid, allowed choice, otherwise
-        ``"us-east-1"``/``"dev"`` — same defaults as before this module
-        existed.
-    """
+    """Build a TerraformContext, letting an LLM pick region/environment when available
+    and valid, otherwise today's fixed defaults. job_id/docker_image/source_code_path/
+    health_check_port pass straight through — only region and environment are decided
+    here."""
     region: AwsRegion = _DEFAULT_REGION
     environment: DeploymentEnvironment = _DEFAULT_ENVIRONMENT
 
-    # Deterministic override: the target AWS account lives in exactly one
-    # region. InfraCost cannot see the account's real VPC/subnets, so an LLM
-    # picking "eu-west-1" while the standing resources are all in us-east-1
-    # produces a payload DeployOps cannot apply (VPC id doesn't exist there).
-    # When the operator pins DEVGUARD_AWS_REGION, that value always wins over
-    # the LLM's guess.
+    # DEVGUARD_AWS_REGION always wins: an LLM picking eu-west-1 while standing
+    # resources sit in us-east-1 yields a payload DeployOps can't apply (no VPC).
     pinned_region = os.getenv("DEVGUARD_AWS_REGION")
     if pinned_region:
         region = pinned_region

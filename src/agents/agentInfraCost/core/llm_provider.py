@@ -50,18 +50,16 @@ def _is_transient_status(status_code: int, body: str) -> bool:
 
 
 def _is_transient_connection_error(exc: Exception) -> bool:
-    """Dropped connections / truncated reads are retryable. An expired
-    timeout is not: the caller already waited `timeout` for it, and a repeat
-    attempt would compound that latency without improving the odds."""
+    """Dropped/truncated reads are retryable; an expired timeout is not (a repeat
+    attempt compounds latency without improving odds)."""
     return isinstance(exc, httpx.TransportError) and not isinstance(
         exc, httpx.TimeoutException
     )
 
 
 def _is_transient_parse_error(exc: Exception) -> bool:
-    """A 200 whose body doesn't match the expected shape (no `choices` array,
-    unparsable JSON). Retrying is cheap and catches intermittent response
-    glitches from OpenRouter's upstreams."""
+    """A 200 whose body doesn't match the expected shape; retrying is cheap and
+    catches intermittent upstream response glitches."""
     return isinstance(exc, (KeyError, IndexError, ValueError, TypeError))
 
 
@@ -75,32 +73,10 @@ def call_llm(
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
     max_tokens: int | None = None,
 ) -> str | None:
-    """Ask an LLM for one completion; return its text, or None on any failure.
-
-    Args:
-        prompt: The user-role message.
-        system_instruction: The system-role message.
-        model: OpenRouter model slug; defaults to the ``OPENROUTER_MODEL``
-            environment variable, else ``_DEFAULT_MODEL`` — never hardcoded
-            in a caller.
-        provider_order: Which OpenRouter-side provider(s) may serve the
-            request (e.g. ``["nvidia"]``), in priority order; defaults to the
-            ``OPENROUTER_PROVIDER`` environment variable (comma-separated) or
-            omitted. How a caller overrides account-level provider preferences
-            per-request.
-        temperature: Passed straight through to the API.
-        timeout: Hard ceiling in seconds; a slow LLM must never hang the
-            pipeline.
-        max_tokens: Completion token budget. Defaults high so large-file
-            echoes (the refiner's whole main.tf in one JSON string) are never
-            truncated mid-output; pass a smaller value for short,
-            latency-sensitive calls.
-
-    Returns:
-        The completion text, or ``None`` if ``OPENROUTER_API_KEY`` is unset,
-        the request fails after its retries, times out, or the response can't
-        be parsed.
-    """
+    """Ask an LLM for one completion; return its text, or None on any failure. Model
+    defaults to $OPENROUTER_MODEL else _DEFAULT_MODEL; provider_order restricts the
+    OpenRouter-side providers ($OPENROUTER_PROVIDER); timeout is a hard ceiling;
+    max_tokens defaults high so large echoes are never truncated mid-JSON."""
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         return None
@@ -139,13 +115,9 @@ def call_llm(
                 except ValueError:
                     body = None
                 if body is None or "choices" not in body or not body.get("choices"):
-                    # OpenRouter sometimes answers a 200 with an upstream error
-                    # object instead of a completion (observed: Nvidia 502
-                    # wrapped in a 200), or an empty body. Neither is a valid
-                    # completion — treat the wrapped error like the non-2xx
-                    # path below so the same retry policy applies. The body's
-                    # own code (502) is what decides retryability, since the
-                    # HTTP status (200) carries no signal.
+                    # OpenRouter sometimes answers 200 with an upstream error object
+                    # (observed: Nvidia 502 in a 200) or an empty body — raise so the
+                    # wrapped error's own code decides retryability (HTTP 200 won't).
                     code = 200
                     message = "missing choices"
                     if isinstance(body, dict):
@@ -160,24 +132,17 @@ def call_llm(
             response.raise_for_status()
             return response.json()["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as exc:
-            # exc_info alone only logs the status code -- the response body
-            # usually names the real reason (bad model slug, policy setting,
-            # rate limit, provider hiccup, ...), so log it explicitly instead
-            # of discarding it.
+            # exc_info alone only logs the status code; the body names the real reason.
             status = exc.response.status_code
             body = exc.response.text
-            # A 200 that wrapped an upstream error body carries the real code
-            # in the message (e.g. "502 Internal server error"); the HTTP
-            # status alone (200) would wrongly look permanent, so pull the
-            # code from the message when it starts with a status number.
+            # A 200 wrapping an upstream error carries the real code in its message
+            # ("502 ..."); pull it out so the 200 doesn't wrongly look permanent.
             if status == 200:
                 match = re.match(r"^(\d{3})\s", str(exc))
                 if match and int(match.group(1)) != 200:
                     status = int(match.group(1))
-            # A 200 that carried neither a completion nor an upstream error
-            # code is a transient response glitch (missing-choices body) — the
-            # original contract retried those via the parse-error path, so
-            # keep treating them as retryable rather than permanent.
+            # A 200 with neither a completion nor an error code is a transient glitch
+            # (missing choices); the original contract retried those — keep doing so.
             transient = _is_transient_status(status, body) or status == 200
             if attempt == _MAX_LLM_RETRIES or not transient:
                 logger.warning(

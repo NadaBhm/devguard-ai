@@ -1,26 +1,8 @@
-"""Phase D (post-mission extension): parse a client's free-text approval reply.
+"""Phase D: parse a client's free-text approval reply into a strict decision.
 
-At the human-approval gate (between InfraCost and deployment), a client may
-answer in plain language — "ok go ahead", "do it but in Europe", "no, too
-expensive" — rather than clicking a fixed approve/reject button. This module
-turns that free text into a strict, validated decision: approved, rejected,
-or unclear, plus an optional region if one was mentioned.
-
-Same validation-first pattern as llm_architecture_advisor.py /
-llm_deployment_advisor.py: the LLM may only pick from closed values —
-{"approved", "rejected", "unclear"} and the three known regions — never
-free-form. Unlike those two modules, there is no deterministic fallback
-*algorithm* to fall back to here (there's no scoring system for "what did
-this sentence mean"); instead, any failure (no OPENROUTER_API_KEY, a failed
-call, a malformed response) resolves to status="unclear" — NEVER
-"approved". A deployment must never be approved based on a guess or a
-parsing failure; "unclear" tells the caller to go back and ask the human
-again, exactly like a genuine ambiguous answer would.
-
-Not yet wired into the orchestrator (src/subgroup2/orchestrator/graph.py) —
-same reason as core/orchestrator_adapter.py: that file's location is about
-to change on this branch (a teammate's already-merged move on master), so
-wiring it now would need to be redone after rebasing.
+Plain-language replies become approved/rejected/unclear + an optional known region,
+same validation-first pattern as siblings; ANY failure resolves to "unclear", never
+"approved" (a guess must never deploy) — callers re-ask. Not orchestrator-wired yet.
 """
 
 from __future__ import annotations
@@ -57,10 +39,8 @@ _UNCLEAR_FALLBACK_REASONING: Final[str] = (
 
 
 class ApprovalDecision(BaseModel):
-    """The result of interpreting a client's free-text approval reply.
-
-    ``status`` is deliberately never defaulted to "approved" by this
-    module under any failure condition — see the module docstring.
+    """The result of interpreting a client's free-text reply; status is never
+    defaulted to "approved" under any failure condition.
     """
 
     status: ApprovalStatus
@@ -69,9 +49,8 @@ class ApprovalDecision(BaseModel):
 
 
 class _LlmApprovalChoice(BaseModel):
-    """Strict shape the LLM's raw JSON response must match. Anything else —
-    malformed JSON, a missing field, a status/region outside the known
-    values — fails validation and resolves to "unclear", not a guess.
+    """Strict shape for the LLM's raw JSON response; anything outside the known
+    values fails validation and resolves to "unclear", not a guess.
     """
 
     status: ApprovalStatus
@@ -91,17 +70,9 @@ def _parse_llm_choice(raw_text: str) -> _LlmApprovalChoice | None:
 def parse_approval_response(client_text: str) -> ApprovalDecision:
     """Interpret a client's free-text reply to an approval request.
 
-    Args:
-        client_text: The client's raw message, e.g. "ok go ahead", "do it
-            but in Europe", "no, too expensive".
-
-    Returns:
-        An ``ApprovalDecision``. ``status`` is "unclear" whenever
-        ``OPENROUTER_API_KEY`` is unset, the call fails or times out, or
-        the response is invalid — never "approved" on a failure. Callers
-        must treat "unclear" as "ask the human again", not as a rejection
-        or an approval.
-    """
+    Status is "unclear" whenever OPENROUTER_API_KEY is unset, the call fails/times
+    out, or the response is invalid — never "approved" on a failure. Callers must
+    treat "unclear" as "ask the human again", not a rejection."""
     raw_text = call_llm(prompt=client_text, system_instruction=_SYSTEM_INSTRUCTION)
     if raw_text is None:
         return ApprovalDecision(status="unclear", reasoning=_UNCLEAR_FALLBACK_REASONING)

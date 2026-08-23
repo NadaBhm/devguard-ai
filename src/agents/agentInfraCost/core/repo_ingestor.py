@@ -1,29 +1,9 @@
-"""Whole-repo ingestion for the InfraCost LLMs.
+"""Whole-repo ingestion giving the LLMs the entire repository, map-reduce style.
 
-At Human Gate 2 the user may ask to regenerate the infrastructure from a
-free-form prompt ("make it cheaper", "use two AZs", ...). Without repo
-context the OpenRouter LLMs -- the architecture advisor, the deployment
-advisor and especially the Terraform refiner -- only ever see the previously
-generated Terraform files, a Dockerfile and the prompt. This module gives
-them the *entire* repository, via a map-reduce pass:
-
-  1. Every text/config file under the clone is read (broad extension set,
-     ignore-dirs, binary and size guards -- never the whole tree blindly).
-  2. The files are chunked (a file is never split unless it alone exceeds the
-     chunk budget) and each chunk is given to the LLM with a strict JSON
-     contract: return ONLY the infrastructure-relevant facts it contains
-     (entrypoints, ports, health checks, databases, build tooling, container
-     config, env vars, concurrency signals).
-  3. The per-chunk fact lists are merged into one digest string that the
-     pipeline threads through ``RepoAnalysisInput.repo_context`` into every
-     LLM prompt.
-
-Same fail-soft contract as every other LLM call in this agent: any failure
-(no ``OPENROUTER_API_KEY``, network error, malformed reply, an unreadable or
-empty repo) collapses to ``None`` -- the pipeline proceeds exactly as before,
-without repo context. The digest is repo-only, so it is cached per
-``commit_sha``: repeated regeneration rounds on the same analyzed commit do
-not pay for the map pass again.
+Without it the advisors/refiner see only previously generated artifacts: read all
+text/config files (guarded), chunk, extract infra-relevant facts per chunk under a
+strict JSON contract, merge into one digest threaded through repo_context.
+Fail-soft (None on any failure) and cached per commit_sha.
 """
 
 from __future__ import annotations
@@ -70,9 +50,8 @@ _IGNORE_SUFFIXES: Final[frozenset[str]] = frozenset({
     ".gz", ".whl", ".so", ".dll", ".dylib", ".exe", ".class", ".pyc",
 })
 
-#: Extensionless/config entrypoint files matched by name (``fnmatch``-style).
-#: Lockfiles are absent on purpose: every ``*.lock`` / ``-lock.json`` variant
-#: is a vendor dependency manifest, and ``_boring_name`` skips them anyway.
+#: Extensionless/config entrypoint files matched by name (fnmatch-style). Lockfiles
+#: are excluded on purpose: every *.lock / -lock.json variant is a vendor manifest.
 _NAME_PATTERNS: Final[tuple[str, ...]] = (
     "Dockerfile*", "docker-compose*.yml", "docker-compose*.yaml", "Makefile",
     "makefile", "Procfile", "go.mod", "go.sum", "requirements*.txt",
@@ -131,14 +110,9 @@ def _is_binary(content: bytes) -> bool:
 
 
 def read_all_text_files(repo_path: Path) -> list[dict[str, str]]:
-    """Read every readable text/config file in ``repo_path``.
-
-    Respects ``_IGNORE_DIRS``, per-file and total byte budgets, and skips
-    binary/lock/minified content. The total read is capped at
-    ``REPO_MAX_BYTES`` so an enormous repository cannot balloon the digest
-    pass. Returns ``[{"path", "content"}, ...]`` sorted by path for
-    determinism (never an error, never a partial read poisoning the digest).
-    """
+    """Read every readable text/config file in ``repo_path``: respects ignore dirs
+    and byte budgets, skips binary/lock/minified content, caps total at REPO_MAX_BYTES.
+    Returns [{"path", "content"}, ...] sorted for determinism; never errors partially."""
     files: list[dict[str, str]] = []
     total_bytes = 0
 
@@ -187,17 +161,9 @@ def _file_block(path: str, content: str, *, part: str | None = None) -> str:
 
 
 def _file_tree(files: list[dict[str, str]]) -> str:
-    """A deterministic, indented listing of every file that will be digested.
-
-    The LLM-extracted facts (``_DIGEST_HEADER``) summarize *meaning*, but they
-    can silently drop the repo's *layout* — e.g. a monorepo whose PHP backend
-    lives in ``server/`` (composer.json + index.php) and a React front in
-    ``front/``. Without the tree, the Terraform/Dockerfile refiner assumes a
-    flat repo and generates a Dockerfile that references ``composer.json`` at
-    the root, which then fails the build ("COPY failed: composer.json: file
-    does not exist"). The tree is cheap (paths only, no content) and makes the
-    layout impossible to miss.
-    """
+    """Deterministic indented listing of digested files. Extracted facts summarize
+    meaning but can drop layout (monorepo with server/ + front/), making the refiner
+    assume a flat repo and emit COPY paths that fail the build; paths are cheap."""
     if not files:
         return ""
     parts: list[str] = []
@@ -207,13 +173,9 @@ def _file_tree(files: list[dict[str, str]]) -> str:
 
 
 def chunk_files(files: list[dict[str, str]], chunk_bytes: int = REPO_CHUNK_BYTES) -> list[str]:
-    """Group whole files into chunks, splitting only oversized files.
-
-    A chunk is a ``=== path ===``-prefixed concatenation of files. A file
-    that alone exceeds ``chunk_bytes`` is split into repeated same-labeled
-    blocks rather than merged with neighbours, so reads stay deterministic
-    and a single giant file cannot blow past the token budget.
-    """
+    """Group whole files into ``=== path ===``-prefixed chunks; a file exceeding
+    chunk_bytes splits into repeated same-labeled parts rather than merging with
+    neighbours, staying deterministic and inside the token budget."""
     chunks: list[str] = []
     current: list[str] = []
     current_size = 0
@@ -247,11 +209,8 @@ def chunk_files(files: list[dict[str, str]], chunk_bytes: int = REPO_CHUNK_BYTES
 
 
 def _extract_facts(chunk: str) -> list[str]:
-    """One map step: ask the LLM for the infra facts inside ``chunk``.
-
-    Any failure (no key, network, malformed reply) returns ``[]`` — the
-    digest degrades gracefully chunk by chunk.
-    """
+    """One map step: the infra facts inside ``chunk``. Any failure returns [] —
+    the digest degrades gracefully chunk by chunk."""
     raw_text = call_llm(
         prompt=(
             "=== FRAGMENT DU DÉPÔT ===\n"
@@ -283,17 +242,9 @@ def ingest_repo(
 ) -> str | None:
     """Map-reduce the whole repository into an infra-facts digest.
 
-    Args:
-        repo_path: the (re-)cloned repository directory.
-        job_id: orchestrator job id, for logging.
-        commit_sha: analyzed commit — the digest is repo-only, so it is
-            cached per commit and regeneration rounds on the same commit
-            never re-pay for the map pass.
-
-    Returns:
-        The merged digest string, or ``None`` on any failure (fail-soft —
-        the pipeline then runs exactly as before, without repo context).
-    """
+    commit_sha keys the cache (the digest is repo-only, so regeneration rounds
+    on the same commit never re-pay the map pass). Returns the merged digest, or
+    None on any failure (fail-soft: pipeline proceeds without repo context)."""
     if commit_sha and commit_sha not in ("", "unknown") and commit_sha in _digest_cache:
         logger.info("[%s] Reusing cached repo digest for commit %s", job_id, commit_sha)
         return _digest_cache[commit_sha]

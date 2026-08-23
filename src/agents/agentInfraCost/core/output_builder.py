@@ -1,13 +1,9 @@
-"""Step 7 of the InfraCost pipeline: assemble the final output contract.
+"""Step 7: assemble the final output contract.
 
-No business logic here — every decision (which compute type, its sizing,
-its cost, its Terraform, its FinOps strategy) has already been made by
-modules 1-6 and 10. This module only routes those already-computed values
-into the exact shape of ``models.output_schema.InfraCostOutput``: which of
-``aws_config``/``deployment_config``'s four blocks gets filled in (the
-other three are always ``null``, never omitted), and the one piece of real
-assembly logic it owns — the Docker image tag fallback (``commit_sha`` if
-available, else ``"latest"`` plus a warning, never silently).
+No business logic — earlier modules made every decision; this routes them into
+``models.output_schema.InfraCostOutput`` (one aws_config/deployment_config block
+fills, the others stay explicitly null) plus the Docker tag fallback (commit_sha
+else "latest" + a warning, never silently).
 """
 
 from __future__ import annotations
@@ -83,9 +79,8 @@ _FALLBACK_BASE_IMAGES: Final[dict[str, str]] = {
     "csharp": "mcr.microsoft.com/dotnet/sdk:8.0",
 }
 
-# Runnable stub bodies per language. A bare FROM+COPY container exits
-# immediately (base image CMD is a REPL/no-op), so the ECS task crash-loops
-# and every health probe times out.
+# Runnable stub bodies per language: bare FROM+COPY exits immediately (base-image
+# CMD is a no-op), crash-looping the task until every health probe times out.
 _STUB_RUN: Final[dict[str, str]] = {
     "javascript": 'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", "."]',
     "typescript": 'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", "."]',
@@ -101,17 +96,9 @@ def _stub_dockerfile(base_image: str, primary_language: str) -> str:
 
 
 def _health_check_from_terraform(main_tf: str) -> tuple[int, str]:
-    """Read the container port and health-check path out of the rendered
-    (and possibly refiner-edited) ``aws_lb_target_group`` block.
-
-    The ECS template renders ``port`` and ``health_check.path`` from the
-    constants (8080 + "/health"), but the Gate-2 refiner legitimately
-    rewrites them to match the app (e.g. 3000 + "/api/health"). The
-    ``deployment_config`` DeployOps consumes for its post-deploy health
-    check must agree with the Terraform that actually ships, so this returns
-    what main.tf really says. Fail-soft: falls back to the constants if the
-    block is unreadable.
-    """
+    """Read container port + health-check path from the rendered/refined
+    ``aws_lb_target_group`` block — DeployOps' post-deploy probe must match the
+    Terraform that ships, not the template defaults. Fail-soft to constants."""
     tg = re.search(
         r'resource\s+"aws_lb_target_group"\s+"[^"]*"\s*\{.*?\n\}',
         main_tf,
@@ -128,17 +115,9 @@ def _health_check_from_terraform(main_tf: str) -> tuple[int, str]:
 
 
 def _ec2_health_check_from_terraform(main_tf: str) -> tuple[int, str]:
-    """Read the container port and health-check path out of the rendered
-    (and possibly refiner-edited) EC2 ``locals`` block.
-
-    Same contract as ``_health_check_from_terraform`` but for the EC2 path,
-    which has no ALB target group — the template renders
-    ``health_check_port`` / ``health_check_path`` into a ``locals`` block
-    that the Gate-2 refiner can correct to match the app, and this reads
-    back what actually ships so DeployOps' post-deploy health check probes
-    the right port/path. Fail-soft: falls back to the constants if the block
-    is unreadable.
-    """
+    """Same contract as ``_health_check_from_terraform`` for the EC2 path: read
+    health_check_port/path from the ``locals`` block the Gate-2 refiner may have
+    corrected, so the post-deploy probe hits what ships. Fail-soft to constants."""
     block = re.search(r"locals\s*\{.*?\n\}", main_tf, re.DOTALL)
     if block is None:
         return EC2_HEALTH_CHECK_PORT, EC2_HEALTH_CHECK_PATH
@@ -151,14 +130,9 @@ def _ec2_health_check_from_terraform(main_tf: str) -> tuple[int, str]:
 
 
 def _image_name_for(dockerfile_path: str | None, index: int) -> str:
-    """Derive a unique ECR image name for a container.
-
-    The first container keeps the canonical ``DOCKER_IMAGE_NAME``. Additional
-    containers get a suffix derived from their Dockerfile path so concurrent
-    images never collide in ECR: ``backend/Dockerfile`` -> ``devguard-app-backend``,
-    ``Dockerfile.web`` -> ``devguard-app-web``. Falls back to an index suffix
-    when the path carries nothing usable.
-    """
+    """Derive a unique ECR image name: the first container keeps canonical
+    DOCKER_IMAGE_NAME, later ones suffix from the Dockerfile path (backend/Dockerfile
+    -> devguard-app-backend) or index, so concurrent images never collide."""
     if index == 0 or not dockerfile_path:
         return DOCKER_IMAGE_NAME
     p = Path(dockerfile_path)
@@ -173,10 +147,8 @@ def _image_name_for(dockerfile_path: str | None, index: int) -> str:
 
 
 def _dockerfile_context(dockerfile_path: str | None) -> str:
-    """Build-context directory (repo-relative) for a Dockerfile.
-
-    ``backend/Dockerfile`` builds from ``backend``; a root-level Dockerfile
-    (or any ``Dockerfile`` in the repo root) builds from ``"."``.
+    """Build-context directory (repo-relative): backend/Dockerfile -> "backend",
+    root-level Dockerfile -> ".".
     """
     if not dockerfile_path:
         return "."
@@ -187,21 +159,10 @@ def _dockerfile_context(dockerfile_path: str | None) -> str:
 def resolve_docker_artifacts(
     analysis: RepoAnalysisInput, decision: DecisionResult
 ) -> list[DockerImage]:
-    """Decide ``docker_images`` — one entry per detected container, or an
-    empty list for a Lambda zip / S3 deploy (no container detected upstream).
-
-    Each returned ``DockerImage`` carries its own ``dockerfile`` content
-    (real content the CodeSec scanner captured, else a synthesized
-    ``FROM {base_image}\\nCOPY . /app\\n`` stand-in) and ``context``. Tags
-    fall back to ``"latest"`` with a warning if ``commit_sha`` is unavailable
-    — never silently.
-
-    Public (not ``_``-prefixed): module 3 (``terraform_generator``) needs
-    the resolved image string *before* rendering ECS/EC2 templates, so the
-    caller (today, ``main.py``; later, module 9's ``pipeline.py``) must be
-    able to call this ahead of ``build_output`` rather than only getting it
-    buried inside the final assembly.
-    """
+    """Decide ``docker_images`` — one entry per detected container, empty for a
+    Lambda zip / S3 deploy. Each carries its own dockerfile (real CodeSec capture
+    else a synthesized stand-in) and build context; tags fall back to "latest" with
+    a warning, never silently. Public: rendering needs images before build_output."""
     is_lambda_zip = (
         decision.compute_type == "lambda"
         and not (
@@ -258,9 +219,8 @@ def _build_artifacts(
 ) -> Artifacts:
     variables: dict[str, str] = {"region": region, "environment": environment}
     if compute_type == "s3":
-        # The S3 variables.tf declares bucket_name (no default) — the value
-        # must ride along in tfvars or terraform plan fails with "No value
-        # for required variable".
+        # S3 variables.tf declares bucket_name with no default — it must ride along
+        # in tfvars or plan fails with "No value for required variable".
         variables["bucket_name"] = f"{S3_BUCKET_PREFIX}-{analysis.job_id[:32].lower()}"
     terraform = TerraformArtifacts(
         files=terraform_files,
@@ -289,10 +249,8 @@ def _build_ecs_output(
         aws_config=AwsConfigEcs(
             region=region,
             estimated_monthly_cost=cost,
-            # Suffixed with job_id -- must match terraform_generator.py's
-            # _ecs_render_context exactly, or DeployOps would be told the
-            # wrong (unsuffixed) cluster/service name for a real resource
-            # Terraform created under the suffixed one.
+            # Suffixed with job_id — must match terraform_generator's _ecs_render_context
+            # exactly or DeployOps learns the wrong (unsuffixed) names.
             ecs=EcsAwsConfig(
                 cluster=unique_resource_name(ECS_CLUSTER_NAME, analysis.job_id),
                 service_name=unique_resource_name(ECS_SERVICE_NAME, analysis.job_id),
@@ -303,10 +261,8 @@ def _build_ecs_output(
         deployment_config=DeploymentConfigEcs(
             ecs=EcsDeploymentConfig(
                 strategy="rolling",
-                # Read from the actual rendered/refined Terraform so the
-                # post-deploy health check DeployOps performs hits the same
-                # port/path the ALB target group ships with — the constants
-                # (8080 + "/health") are only the template's starting point.
+                # Read from the actual rendered/refined Terraform so DeployOps' post-deploy
+                # probe matches what ships; the constants are only starting points.
                 health_check_path=_health_check_from_terraform(
                     artifacts.terraform.files.main_tf
                 )[1],
@@ -381,11 +337,8 @@ def _build_ec2_output(
         deployment_config=DeploymentConfigEc2(
             ec2=Ec2DeploymentConfig(
                 strategy="rolling",
-                # Read from the actual rendered/refined Terraform so the
-                # post-deploy health check DeployOps performs hits the same
-                # port/path the instance ships with — the constants
-                # (8080 + "/health") are only the template's starting point,
-                # and the refiner corrects them to match the app.
+                # Same as ECS: read from the actual rendered/refined Terraform (refiner
+                # corrects the template starting point) so the post-deploy probe matches.
                 health_check_path=_ec2_health_check_from_terraform(
                     artifacts.terraform.files.main_tf
                 )[1],
@@ -452,28 +405,11 @@ def build_output(
     region: str = "us-east-1",
     environment: str = "dev",
 ) -> InfraCostOutput:
-    """Assemble the final contract from already-computed module outputs.
-
-    Args:
-        docker_images: Pre-resolved via ``resolve_docker_artifacts`` — module 3
-            already needed the same values to render templates; if omitted,
-            resolved on the spot (convenient for tests).
-        dockerfile: Legacy singular alias for the first image's Dockerfile
-            content. Ignored when ``docker_images`` is provided; the first
-            image's content wins otherwise if ``docker_images`` is empty.
-        docker_image: Legacy singular alias for the first image. Ignored when
-            ``docker_images`` is provided.
-        approval_status: Defaults to "pending" — module 8 owns the real
-            state machine; this is just what gets stamped on assembly.
-        source_code: Defaults to "." — a relative build context, never a
-            fabricated ``/tmp`` checkout path that nobody created.
-        region/environment: Threaded through so the metadata contract never
-            diverges from the rendered Terraform's defaults.
-
-    Returns:
-        One of the four ``InfraCostOutput`` variants, with the other
-        ``aws_config``/``deployment_config`` blocks explicitly ``null``.
-    """
+    """Assemble the final contract from already-computed outputs. ``docker_images``
+    arrive pre-resolved via resolve_docker_artifacts (resolved here if omitted);
+    ``dockerfile``/``docker_image`` are legacy aliases ignored when docker_images is
+    given; the rest stamp assembly time. Unused aws_config/deployment_config blocks
+    stay explicitly null."""
     if docker_images is None:
         docker_images = resolve_docker_artifacts(analysis, decision)
     if not docker_images and (dockerfile is not None or docker_image is not None):

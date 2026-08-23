@@ -1,14 +1,9 @@
-"""Step 2 of the InfraCost pipeline: decide compute_type and its sizing.
+"""Step 2: decide compute_type and its sizing.
 
-Reads the validated ``RepoAnalysisInput`` produced by ``input_validator`` and
-picks one of ``ecs`` / ``lambda`` / ``ec2`` using a weighted scoring system
-over *generic* properties of the detected stack (container presence,
-docker-compose presence, database presence, framework presence, project
-size) — never a specific framework name. This is what lets
-``sample_input.json`` (FastAPI) and ``sample_input_variant_node_ecs.json``
-(Express) both resolve to ``ecs`` despite sharing no framework in common:
-the rule only looks at what they structurally have in common (a detected
-container plus a docker-compose file).
+Weighted scoring over *generic* stack properties (container/compose/database/
+framework presence, size) picks ecs/lambda/ec2 — never a specific framework name —
+so structurally identical stacks (FastAPI vs Express) score identically; bare
+static sites always go to S3.
 """
 
 from __future__ import annotations
@@ -23,21 +18,18 @@ from models.input_schema import RepoAnalysisInput
 ComputeType = Literal["ecs", "lambda", "ec2", "s3"]
 DecisionSource = Literal["deterministic", "llm"]
 
-# Below this many lines of code, an un-containerized project is considered
-# small enough to run as a single stateless function rather than needing a
-# persistent server.
+# Below this many LOC, an un-containerized project is small enough to run as a
+# single stateless function rather than needing a persistent server.
 SMALL_PROJECT_LOC_THRESHOLD: Final[int] = 2_000
 
-# A bare static site (plain HTML/CSS/JS, no server-side runtime, no database,
-# no container) is the one shape S3 should always win for. Anything else gets
-# a strong negative so it can never win on accident.
+# A bare static site (no server runtime, database, container) is the one shape S3
+# should always win; anything else gets a strong negative so it can't win by accident.
 _STATIC_PRIMARY_LANGUAGES: Final[frozenset[str]] = frozenset(
     {"html", "css", "javascript", "typescript"}
 )
 
-# ECS Fargate sizing tiers. task_cpu/task_memory must be one of AWS's valid
-# paired combinations — arbitrary values are rejected at RegisterTaskDefinition.
-# The high tier lives in _ECS_SIZE_DEFAULT.
+# ECS Fargate sizing tiers: task_cpu/task_memory must be valid AWS paired combos
+# (arbitrary values rejected at RegisterTaskDefinition). High tier: _ECS_SIZE_DEFAULT.
 _ECS_SIZE_TIERS: Final[tuple[tuple[int, str, str], ...]] = (
     (5_000, "256", "512"),
     (15_000, "512", "1024"),
@@ -58,24 +50,17 @@ _EC2_SIZE_DEFAULT: Final[str] = "t3.medium"
 
 
 class DecisionResult(BaseModel):
-    """The architecture decision handed to the rest of the pipeline.
-
-    ``sizing`` intentionally stays a loosely-typed dict here — it holds
-    whichever keys make sense for ``compute_type`` (e.g. ``task_cpu`` /
-    ``task_memory`` for ecs, ``memory_mb`` for lambda, ``instance_type`` for
-    ec2). Strict per-type typing is enforced later, in the final output
-    contract built by ``output_builder`` (module 7) — this is an internal,
-    intermediate result, not the contract itself.
+    """The architecture decision handed to the rest of the pipeline. ``sizing``
+    stays loosely-typed (keys depend on compute_type); strict per-type typing is
+    enforced later in output_builder's contract — this is intermediate, not contract.
     """
 
     compute_type: ComputeType
     sizing: dict[str, int | str]
     score_breakdown: dict[str, float]
 
-    # Both default so every existing caller of decide_architecture() (and
-    # every existing test constructing a DecisionResult directly) is
-    # unaffected. Only core.llm_architecture_advisor sets these to record
-    # that an LLM, not this module's scoring, picked compute_type.
+    # Both defaulted so existing callers (and tests constructing DecisionResult
+    # directly) are unaffected; only core.llm_architecture_advisor sets these.
     decision_source: DecisionSource = "deterministic"
     llm_reasoning: str | None = None
 
@@ -98,13 +83,9 @@ def _is_static_site(analysis: RepoAnalysisInput) -> bool:
 
 
 def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
-    """Score each compute type from generic stack properties.
-
-    Every signal here is structural (container? compose? database? any
-    framework at all? how big is the project?) — never a specific
-    framework, database engine, or language name. That is what lets two
-    stacks with nothing in common but their shape (e.g. FastAPI+Postgres vs
-    Express+MySQL) score identically.
+    """Score each compute type from generic structural properties — container?
+    compose? database? any framework? how big? — never a specific framework/engine/
+    language, so differently-named but similarly-shaped stacks score identically.
     """
     container = analysis.stack_detection.container
     scores = {"ecs": 0.0, "lambda": 0.0, "ec2": 0.0, "s3": 0.0}
@@ -138,10 +119,8 @@ def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
         scores["lambda"] -= 1.0
 
     if _is_static_site(analysis):
-        # A bare static site is a strict S3 candidate: hosting it on a
-        # managed container/VM is wasted money. The bonus must dominate
-        # everything the scoring above could have accumulated for a small
-        # un-containerized project (lambda +5), so +8 guarantees the win.
+        # +8 dominates everything the scoring above accumulates (lambda max +5) —
+        # hosting a static site on managed compute is wasted money.
         scores["s3"] += 8.0
         scores["lambda"] -= 5.0
         scores["ec2"] -= 5.0
@@ -154,21 +133,11 @@ def _score_stack(analysis: RepoAnalysisInput) -> dict[str, float]:
 
 
 def _choose_compute_type(scores: dict[str, float]) -> ComputeType:
-    """Pick the highest-scoring compute type.
-
-    Ties resolve in ``scores`` insertion order (ecs, then lambda, then
-    ec2, then s3) since ``_score_stack`` always builds the dict in that
-    order and ``max`` keeps the first maximal item — a managed container
-    service is the safer default when signals are genuinely inconclusive.
-
-    DeployOps has a real deployment path for ecs, ec2 and s3, but not yet
-    for lambda (deployops/agent.py _normalize_payload still raises for it).
-    To keep the real pipeline from deterministically landing on a compute
-    type DeployOps refuses, lambda is excluded from selection while
-    DEVGUARD_FORCE_COMPUTE_ECS (default "1") is set. Unit tests set it to
-    "0" so the full scoring — lambda included — stays exercised. Remove the
-    lambda exclusion entirely once DeployOps grows a lambda path.
-    """
+    """Pick the highest-scoring type; ties resolve in insertion order (ecs, lambda,
+    ec2, s3 — managed containers are the safer default). While DEVGUARD_FORCE_COMPUTE_ECS
+    (default "1") lambda is excluded: DeployOps has no lambda deploy path yet
+    (deployops/agent.py raises), so the real pipeline must not land on it; tests set
+    "0" to exercise full scoring. Remove once DeployOps grows a lambda path."""
     if os.getenv("DEVGUARD_FORCE_COMPUTE_ECS", "1").lower() == "1":
         scores = {k: v for k, v in scores.items() if k != "lambda"}
     return max(scores, key=lambda compute_type: scores[compute_type])  # type: ignore[return-value]
@@ -183,20 +152,15 @@ def _size_ecs(analysis: RepoAnalysisInput) -> dict[str, int | str]:
     return {"task_cpu": cpu, "task_memory": memory}
 
 
-# JS frontend frameworks that compile/bundle at runtime (Next.js, React/Vite,
-# Vue, Angular, Nuxt). Their production server keeps a watch/compiler resident,
-# so a 512MB Fargate task OOMs (devverse: verified live, `npm run dev` crashed
-# after compiling). Bump the task to the next valid CPU/memory tier so these
-# actually go healthy.
+# JS frameworks that compile/bundle at runtime keep a watch/compiler resident, OOMing
+# a 512MB Fargate task (devverse: verified live) — bump to the next valid tier below.
 _HEAVY_FRONTEND_FRAMEWORKS: Final[frozenset[str]] = frozenset({
     "next", "nextjs", "react", "vue", "nuxt", "angular", "svelte", "astro",
 })
 _HEAVY_FRONTEND_TOOLS: Final[frozenset[str]] = frozenset({"npm", "yarn", "pnpm", "bun"})
 
-# Valid Fargate CPU/memory pairings, ordered smallest -> largest. Bumping
-# memory without also raising CPU yields an invalid combination that
-# terraform apply rejects ("memory is too large for the CPU"), so move up the
-# whole pair.
+# Valid Fargate CPU/memory pairings, smallest -> largest: bumping memory alone yields
+# an invalid combo ("memory is too large for the CPU"), so move up the whole pair.
 _FARGATE_TIERS: Final[tuple[tuple[str, str], ...]] = (
     ("256", "512"),
     ("512", "1024"),
@@ -219,12 +183,9 @@ def _is_heavy_frontend(analysis: RepoAnalysisInput) -> bool:
 
 
 def _size_ecs_memory_bumped(analysis: RepoAnalysisInput) -> dict[str, int | str]:
-    """Size an ECS task, raising memory for heavy JS frontends.
-
-    A bare static site is already S3 (never ECS), so the only JS frontends that
-    land here have a server runtime (Next.js SSR, Nuxt SSR, an Express+Vite
-    hybrid...) — exactly the ones whose build/dev server OOMs at 512MB.
-    """
+    """Size an ECS task, raising memory for heavy JS frontends. Bare static sites
+    are already S3, so the frontends landing here all run servers (Next SSR, Nuxt...)
+    — exactly the ones whose build/dev server OOMs at 512MB."""
     sizing = _size_ecs(analysis)
     if not _is_heavy_frontend(analysis):
         return sizing
@@ -264,14 +225,9 @@ _SIZERS = {
 
 
 def compute_sizing(compute_type: ComputeType, analysis: RepoAnalysisInput) -> dict[str, int | str]:
-    """Run the deterministic sizing rules for an already-chosen compute_type.
-
-    Public entry point for callers that pick compute_type some other way
-    than decide_architecture()'s scoring (currently:
-    core.llm_architecture_advisor) but still want the exact same tested
-    sizing tiers — never a second, possibly-drifting implementation of
-    "how big should this ECS task / Lambda / EC2 instance be".
-    """
+    """Run the deterministic sizing rules for an already-chosen compute_type —
+    public so callers picking compute_type another way (llm_architecture_advisor)
+    reuse the same tested tiers instead of a drifting second implementation."""
     return _SIZERS[compute_type](analysis)
 
 

@@ -1,14 +1,9 @@
-"""Step 10 (optional) of the InfraCost pipeline: explanatory text via OpenRouter.
+"""Step 10 (optional): explanatory text via OpenRouter.
 
-Turns results already computed by modules 2 (decision), 4 (cost) and 6
-(FinOps) into human-readable text for the ``enrichment`` block. Strict
-rules: this module NEVER influences a decision or a number — only text,
-built from figures already frozen by the time it runs (last in the
-pipeline). If ``OPENROUTER_API_KEY`` is unset, or the call fails or exceeds
-``_LLM_TIMEOUT_SECONDS`` for any reason, it falls back to static,
-deterministic Python text templates — never an error, never a block.
-``enrichment_source`` reports "llm" only if every one of the three texts
-actually came from a real call; otherwise "fallback".
+Turns already-frozen results (decision, cost, FinOps) into human-readable text for
+the ``enrichment`` block — NEVER influences a decision or a number. Unset key,
+failed call or timeout falls back to static deterministic templates;
+enrichment_source is "llm" only if all three texts came from real calls.
 """
 
 from __future__ import annotations
@@ -27,11 +22,8 @@ _LLM_TIMEOUT_SECONDS: Final[float] = 20.0
 
 
 def _call_llm(prompt: str, system_instruction: str) -> str | None:
-    """Return generated text, or ``None`` if the LLM is unavailable or fails
-    for any reason (missing key, network error, timeout, malformed
-    response, ...) — every failure mode maps to the same "use the
-    fallback" signal, never an exception the caller has to handle.
-    """
+    """Generated text, or None on ANY failure — every failure mode maps to the same
+    "use the fallback" signal, never an exception the caller must handle."""
     try:
         return call_llm(
             prompt=prompt,
@@ -51,9 +43,8 @@ def explain_architecture_decision(decision: DecisionResult) -> tuple[str, Enrich
     scores = decision.score_breakdown
 
     if decision.decision_source == "llm" and decision.llm_reasoning:
-        # The score breakdown here is informational only (kept for context,
-        # see decide_architecture_via_llm's docstring) — it did NOT decide
-        # compute_type here, so the fallback text must not claim it did.
+        # Score breakdown is informational here (didn't decide compute_type), so
+        # the fallback text must not claim it did.
         fallback = f"Architecture recommandée : {decision.compute_type}. {decision.llm_reasoning}"
         prompt = (
             f"Reformule en 2-3 phrases, en français, cette explication déjà donnée par un agent "
@@ -123,12 +114,8 @@ def explain_finops_choice(finops: FinOpsRecommendation) -> tuple[str, Enrichment
 def build_enrichment(
     decision: DecisionResult, cost: Money, finops: FinOpsRecommendation
 ) -> Enrichment:
-    """Assemble the full ``enrichment`` block from modules 2, 4 and 6.
-
-    ``enrichment_source`` is ``"llm"`` only if all three texts actually
-    came from a real call — any single fallback marks the whole block
-    ``"fallback"``, never overclaiming.
-    """
+    """Assemble the enrichment block; source is "llm" only if all three texts came
+    from real calls — any single fallback marks the whole block "fallback"."""
     architecture_explanation, arch_source = explain_architecture_decision(decision)
     cost_summary, cost_source = summarize_cost_estimation(decision, cost)
     finops_justification, finops_source = explain_finops_choice(finops)

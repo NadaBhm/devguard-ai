@@ -858,10 +858,10 @@ def refine_terraform(
     repo_context: str | None = None,
     force_dockerfile: bool = False,
 ) -> tuple[TerraformFiles, str | None] | tuple[TerraformFiles, dict[str, str] | None]:
-    """Refine rendered artifacts from a prompt (Gate-2 feedback, or the first-try "match the repo"
-    instruction). Legacy ``dockerfile`` vs multi-container ``dockerfiles`` map sets the return shape;
-    ``repo_context`` feeds the real code; ``force_dockerfile=True`` replaces even a captured Dockerfile
-    (first try: the stub can't run). Fail-soft: any LLM failure/invalid output returns inputs unchanged."""
+    """Refine rendered artifacts from a prompt (Gate-2 feedback or first-try "match the repo").
+    ``dockerfile`` vs multi-container ``dockerfiles`` set the return shape; ``repo_context``
+    feeds the real code; ``force_dockerfile=True`` replaces even a captured Dockerfile (first try:
+    the stub can't run). Fail-soft: any LLM failure/invalid output returns inputs unchanged."""
     # Plural mode: every caller passing dockerfiles gets a dict back.
     plural = dockerfiles is not None
     prompt_files = dict(dockerfiles) if dockerfiles else (

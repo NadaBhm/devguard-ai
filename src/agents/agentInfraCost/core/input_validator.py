@@ -1,15 +1,9 @@
-"""Step 1 of the InfraCost pipeline: validate and parse Agent 1's payload.
+"""Step 1: validate and parse Agent 1's payload.
 
-Applies structural validation (via ``models.input_schema.RepoAnalysisInput``)
-followed by the fail-fast business rules described in the agent's contract:
-
-- ``status`` must be ``"completed"``.
-- ``stack_detection`` must be present.
-- ``stack_detection.confidence`` must be >= ``MIN_CONFIDENCE`` — below that,
-  the stack detection is too uncertain to safely recommend an architecture.
-
-Absence of optional fields (e.g. ``compose_detected``) is logged as a
-warning and does not block the pipeline.
+Structural validation (models.input_schema.RepoAnalysisInput) plus fail-fast
+rules: status == "completed", stack_detection present, confidence >= MIN_CONFIDENCE
+(below that, detection is too uncertain to recommend an architecture safely);
+absent optional fields only warn and never block.
 """
 
 from __future__ import annotations
@@ -82,19 +76,9 @@ def _warn_missing_optional_fields(raw: dict[str, Any], job_id: str) -> None:
 def validate_input(raw: dict[str, Any]) -> RepoAnalysisInput:
     """Validate and parse a raw payload from the repo-analysis agent.
 
-    Args:
-        raw: The decoded JSON payload produced by Agent 1.
-
-    Returns:
-        The parsed and validated ``RepoAnalysisInput``.
-
-    Raises:
-        InvalidStatusError: ``status`` is not ``"completed"``.
-        MissingStackDetectionError: ``stack_detection`` is absent.
-        MalformedInputError: the payload fails structural schema validation.
-        LowConfidenceError: ``stack_detection.confidence`` is below
-            ``MIN_CONFIDENCE``.
-    """
+    Raises InvalidStatusError (status != "completed"), MissingStackDetectionError
+    (stack_detection absent), MalformedInputError (schema validation failed), or
+    LowConfidenceError (confidence < MIN_CONFIDENCE); returns RepoAnalysisInput."""
     job_id = str(raw.get("job_id", "<unknown>"))
 
     status = raw.get("status")

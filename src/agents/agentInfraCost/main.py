@@ -1,8 +1,7 @@
 """FastAPI entry point for the InfraCost Agent.
 
-Exposes ``POST /agents/infracost/generate``, thinly wrapping module 9's
-``run_pipeline`` (input validation through output assembly, with fallback
-LLM enrichment if ``GEMINI_API_KEY`` is unset). All business logic lives in
+Exposes ``POST /agents/infracost/generate``, thinly wrapping ``run_pipeline``
+(input validation through output assembly). All business logic lives in
 ``core/``; this file only translates HTTP in and out.
 """
 
@@ -26,27 +25,19 @@ from core.input_validator import (
 from core.pipeline import PipelineStageError, run_pipeline
 from models.output_schema import InfraCostOutput
 
-# Loads GEMINI_API_KEY / OPENROUTER_* / AWS credentials from .env next to this
-# script if one exists (gitignored, optional — each var has its own fallback in
-# core/). Safe after the imports above: those vars are read at call time only.
+# Loads GEMINI_API_KEY / OPENROUTER_* / AWS credentials from .env next to this script
+# (gitignored, optional); safe here — those vars are read at call time only.
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-# INFO is off by default in Python (root logger starts at WARNING); without
-# this, core.llm_architecture_advisor's and core.llm_deployment_advisor's
-# "an LLM chose ..." log lines would silently never appear anywhere,
-# leaving no way to see -- while the server runs -- whether a request
-# actually used the LLM or fell back to the deterministic path.
+# INFO is off by default; without basicConfig the advisors' "an LLM chose ..." log
+# lines never appear, hiding whether a request used the LLM or fell back.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 class UTF8JSONResponse(JSONResponse):
-    """Same as FastAPI's default JSONResponse, but declares ``charset=utf-8``
-    explicitly in Content-Type. JSON is UTF-8 by spec (RFC 8259) regardless,
-    and most clients assume that correctly — but Windows PowerShell 5.1's
-    ``Invoke-RestMethod``/``Invoke-WebRequest`` defaults to Latin-1 when no
-    charset is stated, mangling every accented character in ``enrichment``'s
-    French text. Being explicit costs nothing for compliant clients and
-    fixes this one for free.
+    """Same as FastAPI's default JSONResponse but declares charset=utf-8 explicitly:
+    JSON is UTF-8 by spec, but Windows PowerShell 5.1 defaults to Latin-1 without
+    it, mangling enrichment's accented French text; compliant clients pay nothing.
     """
 
     media_type = "application/json; charset=utf-8"
@@ -64,14 +55,9 @@ _ERROR_CODES: dict[type[InputValidationError], str] = {
 
 @app.post("/agents/infracost/generate", response_model=InfraCostOutput)
 def generate(raw: dict[str, Any] = Body(...)) -> InfraCostOutput:
-    """Run the full InfraCost pipeline on a repo analysis payload.
-
-    Raises:
-        HTTPException: 422, if module 1's validation rejects the payload —
-            the body names which rule failed (``error``), why
-            (``message``), and which job (``job_id``). 500, if any other
-            stage fails — the body names exactly which one (``stage``).
-    """
+    """Run the full pipeline on a repo-analysis payload. 422 if module 1 rejects
+    it (body names the failed rule ``error``, ``message``, ``job_id``); 500 if any
+    other stage fails (body names the ``stage``)."""
     try:
         return run_pipeline(raw)
     except InputValidationError as exc:

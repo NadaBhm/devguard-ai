@@ -1,21 +1,10 @@
-"""Phase B (post-mission extension): LLM-driven architecture decision.
+"""LLM-driven architecture decision (Phase B).
 
-Asks an LLM (via ``core.llm_provider``, OpenRouter) to pick ``compute_type``
-from the four supported values, given the same structural repo-analysis
-signals ``decision_engine.py``'s scoring already uses. The LLM decides WHICH
-of ecs/lambda/ec2/s3 fits best and explains why in plain language; it never
-invents sizing values — those still come from ``decision_engine``'s existing,
-tested sizing tiers (``compute_sizing``), so nothing free-form ever reaches
-Terraform generation. This is the validation layer against unrestricted
-generation: the LLM's usable surface is exactly one ``Literal`` field out of
-four known values, enforced by ``_LlmArchitectureChoice``.
-
-Falls back to ``decide_architecture()``'s deterministic scoring —
-automatically, silently, with identical downstream behaviour — whenever
-``OPENROUTER_API_KEY`` is unset, the call fails or times out, the response
-isn't valid JSON, or the LLM names a ``compute_type`` outside
-{ecs, lambda, ec2, s3}. ``decision_source`` always records which path actually
-produced the result, so nothing is hidden from the rest of the pipeline.
+The LLM picks compute_type (a single Literal field, Pydantic-enforced) from the
+same structural signals decision_engine scores, while sizing still comes from
+decision_engine's tested tiers — nothing free-form reaches Terraform. Any failure
+falls back automatically to decide_architecture(); decision_source records which
+path produced the result.
 """
 
 from __future__ import annotations
@@ -57,9 +46,8 @@ _SYSTEM_INSTRUCTION: Final[str] = (
 
 
 class _LlmArchitectureChoice(BaseModel):
-    """Strict shape the LLM's raw JSON response must match. Anything else —
-    malformed JSON, a missing field, a compute_type outside the four known
-    values — fails validation and triggers the deterministic fallback.
+    """Strict shape for the LLM's raw JSON response; anything else (malformed
+    JSON, missing field, unknown compute_type) fails validation -> fallback.
     """
 
     compute_type: ComputeType
@@ -104,20 +92,10 @@ def _parse_llm_choice(raw_text: str) -> _LlmArchitectureChoice | None:
 
 
 def decide_architecture_via_llm(analysis: RepoAnalysisInput) -> DecisionResult:
-    """Decide compute_type via LLM judgment, with automatic deterministic
-    fallback.
-
-    Args:
-        analysis: The validated payload produced by ``input_validator``.
-
-    Returns:
-        A ``DecisionResult`` exactly like ``decide_architecture()``'s, plus
-        ``decision_source`` ("llm" or "deterministic") and, when the LLM
-        path succeeded, ``llm_reasoning`` holding its explanation.
-        ``score_breakdown`` is always the deterministic score (kept as
-        context), even when the LLM's pick differs from what the scores
-        alone would choose — so the deterministic view is never hidden.
-    """
+    """Decide compute_type via LLM judgment with automatic deterministic fallback.
+    Returns a DecisionResult like decide_architecture()'s plus decision_source and
+    llm_reasoning (when the LLM succeeded); score_breakdown always stays the
+    deterministic score — context only, never hidden."""
     deterministic = decide_architecture(analysis)
 
     raw_text = call_llm(prompt=_build_prompt(analysis), system_instruction=_SYSTEM_INSTRUCTION)

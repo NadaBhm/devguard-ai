@@ -131,7 +131,9 @@ def is_dockerfile_rel_path(rel_path: str) -> bool:
     app images.
     """
     lower = rel_path.lower()
-    if lower.startswith(".devcontainer/") or "/.devcontainer/" in lower:
+    # Dev-container / cloud-IDE definitions are not deployable app images.
+    if (lower.startswith((".devcontainer/", ".codesandbox/"))
+            or "/.devcontainer/" in lower or "/.codesandbox/" in lower):
         return False
     basename = Path(rel_path).name.lower()
     if basename == "dockerfile":

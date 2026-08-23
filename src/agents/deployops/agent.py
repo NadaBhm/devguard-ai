@@ -48,10 +48,13 @@ _ENV_TF_VARS = (
 
 def _terraform_env_vars() -> Dict[str, Any]:
     tf_vars: Dict[str, Any] = {}
+    db_envs_present = []
     for env_name, tf_name in _ENV_TF_VARS:
         value = os.getenv(env_name)
         if not value:
             continue
+        if env_name.startswith("DEVGUARD_DB_"):
+            db_envs_present.append(env_name)
         if tf_name == "subnet_ids":
             value = [s.strip() for s in value.split(",") if s.strip()]
         elif tf_name == "db_port":
@@ -60,6 +63,13 @@ def _terraform_env_vars() -> Dict[str, Any]:
             except ValueError:
                 continue
         tf_vars[tf_name] = value
+
+    # Standing sandbox DB supplied via DEVGUARD_DB_*: skip provisioning a
+    # fresh RDS (10-min readiness race crashed ECS tasks before the app
+    # could ever connect).
+    required_db_envs = {"DEVGUARD_DB_HOST", "DEVGUARD_DB_PORT"}
+    if required_db_envs.issubset(set(db_envs_present)):
+        tf_vars["create_db"] = False
 
     # The EC2 template declares a single required `subnet_id` (singular) while
     # the ECS/S3 templates take `subnet_ids` (plural). DeployOps only knows the

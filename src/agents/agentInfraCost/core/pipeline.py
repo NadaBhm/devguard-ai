@@ -161,6 +161,41 @@ def _apply_inferred_health_path(
         logger.warning("Health-path inference failed: %s", exc)
 
 
+def _apply_inferred_health_port(
+    terraform_files: TerraformFiles, primary_dockerfile: str | None
+) -> None:
+    """Align every rendered health-check port with the app's real listen
+    port (CMD --port/-p wins over EXPOSE). Idempotent and fail-soft."""
+    if not primary_dockerfile:
+        return
+    try:
+        m_cmd = re.search(
+            r'(?mi)^CMD\b.*?(?:--port|-p)\s*[",\s]*"?(\d+)', primary_dockerfile
+        )
+        m_expose = re.search(r"(?mi)^\s*EXPOSE\s+(\d+)", primary_dockerfile)
+        # No port signal at all -> leave the rendered default untouched.
+        if not m_cmd and not m_expose:
+            return
+        new_port = int(m_cmd.group(1)) if m_cmd else int(m_expose.group(1))
+        cur = re.search(r"(?im)^\s*port\s*=\s*(\d+)", terraform_files.main_tf)
+        if not cur:
+            return
+        old_port = cur.group(1)
+        if old_port == str(new_port) or old_port == "5432":
+            return
+        pat = re.compile(rf"\b{old_port}\b")
+        out_lines = []
+        for line in terraform_files.main_tf.splitlines():
+            if "port" in line.lower():
+                out_lines.append(pat.sub(str(new_port), line))
+            else:
+                out_lines.append(line)
+        terraform_files.main_tf = "\n".join(out_lines)
+        logger.info("Aligned health-check port %s -> %s from Dockerfile", old_port, new_port)
+    except Exception as exc:
+        logger.warning("Health-port inference failed: %s", exc)
+
+
 def _ensure_production_build(
     dockerfile: str, repo_path: str | None
 ) -> str:
@@ -611,6 +646,10 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         terraform_files,
         primary_image.dockerfile if primary_image else None,
         raw.get("repo_path"),
+    )
+    _apply_inferred_health_port(
+        terraform_files,
+        primary_image.dockerfile if primary_image else None,
     )
 
     # Fix dev-mode CMDs to production equivalents (fail-soft).

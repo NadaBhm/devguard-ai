@@ -57,3 +57,10 @@ src/**/pytest_output.txt
 # Demo / scratch scripts that belong in scripts/, not src/
 # =============================================================================
 /src/agents/**/*_demo.py
+# Generated deploy fixtures + campaign scratch (harvested from /tmp/deployops)
+FAILURES.md
+/scripts/corpus_*.json
+/scripts/validated.json
+/scripts/export_fixtures.py
+/scripts/overnight_watchdog.sh
+/src/agents/agentInfraCost/tests/fixtures/deployops/

@@ -335,6 +335,8 @@ def test_terraform_env_vars_mapping(monkeypatch):
         "db_name": "devguard",
         "db_user": "devguard",
         "db_password": "s3cret",
+        # standing sandbox DB present -> skip RDS provisioning
+        "create_db": False,
     }
 
 

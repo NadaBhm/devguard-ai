@@ -223,6 +223,10 @@ def run_one(repo: dict, plan_only: bool = False) -> dict:
             if deployment:
                 break
     error = final.get("error") or (final.get("state") or {}).get("error")
+    if not error:
+        err_log = ((final.get("state") or {}).get("error_log") or [])
+        if err_log:
+            error = err_log[-1].get("message", "")[:200]
     print(f"  outcome: {outcome} | deployment: {deployment} | error: {error}", flush=True)
     return {
         "job_id": job_id,

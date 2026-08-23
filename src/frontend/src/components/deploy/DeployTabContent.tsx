@@ -70,12 +70,16 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
   const queryClient = useQueryClient()
   const navigate = useNavigate()
 
-  const canRollback = !!jobId && deployments.some((d) => d.status === "succeeded")
+  // "rolled_back" still has a real, running ECS service (rollback swaps to
+  // a previous revision, it doesn't tear anything down) -- only "failed"
+  // and "destroyed" mean there's genuinely nothing live to act on.
+  const hasLiveDeployment =
+    !!jobId && deployments.some((d) => d.status === "succeeded" || d.status === "rolled_back")
 
   const checkUpdateQuery = useQuery({
     queryKey: ["check-update", jobId],
     queryFn: () => jobsApi.checkUpdate(jobId!),
-    enabled: canRollback,
+    enabled: hasLiveDeployment,
   })
 
   const triggerUpdate = useMutation({
@@ -92,7 +96,7 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
   const revisionsQuery = useQuery({
     queryKey: ["deployment-revisions", jobId],
     queryFn: () => jobsApi.deploymentRevisions(jobId!),
-    enabled: canRollback,
+    enabled: hasLiveDeployment,
   })
 
   useEffect(() => {
@@ -162,7 +166,7 @@ export function DeployTab({ deployments, jobId }: { deployments: Deployment[]; j
 
   return (
     <div className="space-y-3 p-4">
-      {canRollback && (
+      {hasLiveDeployment && (
         <div className="space-y-3 rounded-lg border border-border bg-surface px-4 py-3">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">

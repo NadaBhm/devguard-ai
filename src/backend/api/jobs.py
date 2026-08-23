@@ -310,12 +310,17 @@ def trigger_update(
     run = _get_owned_run(db, job_id, current_user.id)
     project = run.project
 
+    # "rolled_back" still counts as live: a rollback swaps the ECS service to
+    # a previous task-definition revision, it doesn't tear anything down, so
+    # there's still a real running service to update onto. "failed" (nothing
+    # ever went live) and "destroyed" (explicitly torn down) are the only
+    # statuses that genuinely mean "nothing to update".
     deployment = (
         db.query(models.Deployment)
         .join(models.AnalysisRun, models.Deployment.run_id == models.AnalysisRun.id)
         .filter(
             models.AnalysisRun.project_id == project.id,
-            models.Deployment.status == "succeeded",
+            models.Deployment.status.in_(["succeeded", "rolled_back"]),
         )
         .order_by(models.Deployment.created_at.desc())
         .first()

@@ -522,3 +522,28 @@ def test_trigger_update_gate2_context_includes_cost_delta(_clean_db, auth_header
     assert interrupt_ctx["cost_delta_usd"] == pytest.approx(
         interrupt_ctx["monthly_cost_usd"] - interrupt_ctx["previous_monthly_cost_usd"]
     )
+
+
+def test_trigger_update_still_works_after_rollback(_clean_db, auth_headers):
+    """A rollback swaps the live ECS service to a previous revision; it
+    doesn't tear anything down. Update must still find that service rather
+    than 400 just because the Deployment row's status says "rolled_back"."""
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    r = client.post(
+        f"/api/jobs/{job_id}/rollback", headers=headers, json={"reason": "test rollback"}
+    )
+    assert r.status_code == 200, r.text
+
+    con = sqlite3.connect(TEST_DB)
+    status = con.execute(
+        "select status from deployments where run_id = ?", (job_id,)
+    ).fetchone()[0]
+    con.close()
+    assert status == "rolled_back"
+
+    r = client.post(f"/api/jobs/{job_id}/update", headers=headers)
+    assert r.status_code == 201, r.text
+    assert r.json()["job_id"] != job_id

@@ -142,6 +142,15 @@ class FinalReport(TypedDict):
     summary: FinalReportSummary
 
 
+class ExistingDeploymentInfo(TypedDict):
+    """The live ECS service an "update deployment" run redeploys onto,
+    resolved by the backend from the project's last live Deployment row
+    before run_workflow() is called."""
+    region: str
+    ecs_cluster: str
+    service_name: str
+
+
 class OrchestratorState(TypedDict):
     job_id: str
     repo_url: str
@@ -163,8 +172,24 @@ class OrchestratorState(TypedDict):
     infracost_feedback: Optional[str]
     infracost_iterations: list[InfracostIteration]
 
+    # "Update deployment" flow: set once, up front, by the backend (which has
+    # DB access the orchestrator itself never does) and threaded through
+    # unchanged so deployops_agent_impl can redeploy onto the existing ECS
+    # service instead of provisioning fresh infra, and human_gate_2 can show
+    # a cost delta instead of only the new total.
+    is_update: bool
+    existing_deployment: Optional[ExistingDeploymentInfo]
+    previous_monthly_cost_usd: Optional[float]
 
-def create_initial_state(repo_url: str, job_id: str | None = None) -> OrchestratorState:
+
+def create_initial_state(
+    repo_url: str,
+    job_id: str | None = None,
+    *,
+    is_update: bool = False,
+    existing_deployment: ExistingDeploymentInfo | None = None,
+    previous_monthly_cost_usd: float | None = None,
+) -> OrchestratorState:
     now = datetime.now(timezone.utc).isoformat()
     job_id = job_id or str(uuid.uuid4())
 
@@ -207,4 +232,7 @@ def create_initial_state(repo_url: str, job_id: str | None = None) -> Orchestrat
         "final_report": None,
         "infracost_feedback": None,
         "infracost_iterations": [],
+        "is_update": is_update,
+        "existing_deployment": existing_deployment,
+        "previous_monthly_cost_usd": previous_monthly_cost_usd,
     }

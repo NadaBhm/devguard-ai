@@ -293,10 +293,21 @@ def translate_infracost_to_deploy_payload(
     *,
     approved_by: str,
     repo_url: str | None = None,
+    is_update: bool = False,
+    existing_deployment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Build a DeployOps-compatible payload from InfraCost's raw output.
     Fails loudly on missing Dockerfile or unsupported compute type.
+
+    is_update: True for an "update deployment" run -- redeploy onto the
+        project's existing ECS service instead of provisioning fresh
+        infrastructure. When True, InfraCost's freshly-sized aws_config is
+        ignored for cluster/service targeting in favor of
+        `existing_deployment` (the live service to update).
+    existing_deployment: {region, ecs_cluster, service_name} of the
+        currently live deployment, resolved by the backend. Required when
+        is_update=True.
     """
     compute_type = deploy_inputs.get("compute_type")
     artifacts = deploy_inputs.get("artifacts") or {}
@@ -419,7 +430,22 @@ def translate_infracost_to_deploy_payload(
     ecs_block = aws_config.get("ecs") or {}
     ec2_block = aws_config.get("ec2") or {}
     s3_block = aws_config.get("s3") or {}
-    if compute_type == "ecs":
+    if compute_type == "ecs" and is_update:
+        # Update runs redeploy onto the project's already-live ECS service --
+        # InfraCost's freshly-sized ecs_block names a NEW service and must be
+        # ignored here, or this would target (or fail to find) the wrong one.
+        if not existing_deployment or not existing_deployment.get("ecs_cluster") or not existing_deployment.get("service_name"):
+            raise ValueError(
+                "is_update=True but existing_deployment is missing "
+                "ecs_cluster/service_name; refusing to guess which live "
+                "service to redeploy onto."
+            )
+        flat_aws = {
+            "region": existing_deployment.get("region") or "us-east-1",
+            "ecs_cluster": existing_deployment["ecs_cluster"],
+            "service_name": existing_deployment["service_name"],
+        }
+    elif compute_type == "ecs":
         if not ecs_block.get("cluster") or not ecs_block.get("service_name"):
             raise ValueError(
                 "InfraCost's aws_config.ecs is missing cluster/service_name; "
@@ -468,7 +494,10 @@ def translate_infracost_to_deploy_payload(
             "approved_by": approved_by,
             "approved_at": datetime.now(timezone.utc).isoformat(),
         },
-        "metadata": {"repo_url": repo_url} if repo_url else {},
+        "metadata": (
+            ({"repo_url": repo_url} if repo_url else {})
+            | ({"ecs_update_only": True} if is_update else {})
+        ),
         "compute_type": compute_type,
     }
 

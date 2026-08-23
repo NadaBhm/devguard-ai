@@ -19,9 +19,7 @@ def _load_analysis(filename: str) -> RepoAnalysisInput:
     return RepoAnalysisInput.model_validate(raw)
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
+# --- Nominal cases ---
 
 
 def test_simulate_ecs_scenarios_recompute_task_count() -> None:
@@ -60,9 +58,7 @@ def test_simulate_ec2_scenarios_recompute_instance_count() -> None:
     assert [r.sizing["instance_count"] for r in results] == [1, 7, 63]
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_ecs_capacity_scales_with_task_size_not_a_flat_constant() -> None:
@@ -127,9 +123,7 @@ def test_scenarios_are_not_a_rule_of_three_on_ecs() -> None:
     assert results[1].sizing["task_count"] == 10 * results[0].sizing["task_count"]
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
+# --- Error cases ---
 
 
 def test_unknown_ec2_instance_type_propagates_named_pricing_error() -> None:

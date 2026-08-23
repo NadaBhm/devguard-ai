@@ -218,7 +218,6 @@ def run_sast(repo_path: Path | str) -> list[SASTFinding]:
     all_findings: list[SASTFinding] = []
     scan_error: str | None = None
 
-    # Try Semgrep
     try:
         semgrep_findings = _run_semgrep(repo_path)
         all_findings.extend(semgrep_findings)
@@ -226,7 +225,6 @@ def run_sast(repo_path: Path | str) -> list[SASTFinding]:
         scan_error = str(exc)
         logger.warning("Semgrep failed: %s. Will attempt Bandit fallback.", exc)
 
-    # Fallback to Bandit if Semgrep produced no findings or failed
     if not all_findings:
         try:
             bandit_findings = _run_bandit(repo_path)
@@ -235,7 +233,6 @@ def run_sast(repo_path: Path | str) -> list[SASTFinding]:
             scan_error = scan_error or str(exc)
             logger.warning("Bandit fallback also failed: %s", exc)
 
-    # Deduplicate by (file, line, rule_id)
     seen: set[tuple[str, int, str | None]] = set()
     deduped: list[SASTFinding] = []
     for f in all_findings:

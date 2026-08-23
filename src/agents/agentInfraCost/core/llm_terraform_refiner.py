@@ -1,30 +1,21 @@
 """Feedback-driven artifact refinement via an LLM.
 
-Runs after ``generate_terraform`` (module 3) when the orchestrator's Gate 2
-asked for changes (``RepoAnalysisInput.user_feedback`` is set). The LLM edits
-the already-rendered ``main.tf`` / ``variables.tf`` / ``outputs.tf`` — and,
-when a Dockerfile is supplied, it too — to honor the user's request: e.g.
-"make it cheaper", "use two AZs", "swap to Graviton", or "move to
-python:3.11-slim and add a healthcheck". Returns the files (and optionally
-the refined Dockerfile) as validated strings.
+Runs after ``generate_terraform`` when the orchestrator's Gate 2 asked for
+changes (``RepoAnalysisInput.user_feedback`` is set): the LLM edits the
+rendered ``main.tf`` / ``variables.tf`` / ``outputs.tf`` — and, when a
+Dockerfile is supplied, that too — to honor requests like "make it cheaper"
+or "use two AZs". Returns validated strings.
 
 Design contract (mirrors ``llm_architecture_advisor`` / ``llm_deployment_advisor``):
-
-- The LLM's usable surface is the three Terraform files plus one optional
-  ``dockerfile`` field — it may not add files, change the architecture
-  decision, or invent resources outside the existing file set. Output is
-  validated with a strict Pydantic shape, and only files that parse are
-  accepted.
-- Fail-soft: every failure mode (no ``OPENROUTER_API_KEY``, network error,
-  timeout, non-JSON reply, malformed/empty HCL, Pydantic rejection) returns
-  the ORIGINAL files unchanged — never an error, never a partial write. The
-  pipeline must be able to proceed even if the refiner is unavailable.
-- The architecture (``compute_type``, sizing) is decided elsewhere
-  (``llm_architecture_advisor``); this module never touches it.
+the LLM's usable surface is the three Terraform files plus one optional
+``dockerfile`` field, strictly Pydantic-validated; and fail-soft — every
+failure mode returns the ORIGINAL files unchanged, never a partial write,
+so the pipeline proceeds even if the refiner is unavailable. The
+architecture (``compute_type``, sizing) is decided elsewhere
+(``llm_architecture_advisor``); this module never touches it.
 
 Uses ``core.llm_provider.call_llm`` (OpenRouter), which honours
-``OPENROUTER_MODEL`` — set to ``nvidia/nemotron-3-ultra-550b-a55b:free`` in
-the default environment.
+``OPENROUTER_MODEL``.
 """
 
 from __future__ import annotations
@@ -180,24 +171,12 @@ def _valid_file(content: str) -> bool:
 def _heredocify_multiline_echo(dockerfile: str) -> str:
     """Rewrite multi-line ``RUN echo '...' > file`` blocks as heredocs.
 
-    The refiner sometimes emits a shell block that legitimately spans several
-    lines, e.g. writing a PHP router script:
-
-        RUN echo '<?php
-        $uri = parse_url(...);
-        ' > /app/router.php
-
-    That is NOT valid Dockerfile syntax — Dockerfile line continuation only
-    happens at ``\\``, so every following line parses as its own unknown
-    instruction ("unknown instruction: $uri") and the build dies at parse time
-    (verified: ``docker buildx build`` on a refiner-produced Dockerfile fails
-    with "dockerfile parse error ... unknown instruction"). Rewrite such
-    blocks as an equivalent heredoc, which is the idiomatic multi-line form:
-
-        RUN cat <<'EOF' > /app/router.php
-        <?php
-        $uri = parse_url(...);
-        EOF
+    The refiner sometimes emits a shell block legitimately spanning several
+    lines (e.g. writing a PHP router script). That is NOT valid Dockerfile
+    syntax — continuation only happens at ``\\``, so every following line
+    parses as its own unknown instruction and the build dies at parse time
+    (verified: ``docker buildx build`` fails with "dockerfile parse error ...
+    unknown instruction"). Rewrite as the idiomatic heredoc form instead.
     """
     if not dockerfile:
         return dockerfile
@@ -227,22 +206,14 @@ def _heredocify_repl(match: re.Match) -> str:
 def _fix_php_alpine_apk_extensions(dockerfile: str) -> str:
     """Replace ``apk add php82-*`` with ``docker-php-ext-install``.
 
-    The refiner, when building on an official PHP image (``php:8.2-cli-alpine``
-    and friends), emits ``RUN apk add --no-cache php82-pdo_mysql php82-mbstring
-    ...``. Those ``php82-*`` packages do not exist in the official image's
-    Alpine repo (PHP is already compiled into the image), so ``apk add`` exits
-    nonzero and the build fails. The canonical way to add extensions to an
-    official PHP image is ``docker-php-ext-install``.
-
-    Two more pitfalls are handled so the rewrite actually builds:
-    - Extensions already compiled into the base image (mbstring, curl, json,
-      opcache, dom, ...) must NOT be passed to ``docker-php-ext-install`` —
-      it refuses to rebuild a module that is already loaded, and the build
-      dies (verified against ``php:8.2-cli-alpine``).
-    - ``gd`` / ``zip`` / ``intl`` need their Alpine build deps first, so the
-      matching ``apk add`` (``libpng-dev libjpeg-turbo-dev`` / ``libzip-dev`` /
-      ``icu-dev``) is emitted ahead of the install.
-    Unknown/non-``phpNN-`` packages are kept on the ``apk add`` line.
+    On official PHP Alpine images (``php:8.2-cli-alpine`` and friends) the
+    ``php82-*`` packages don't exist in the Alpine repo (PHP is compiled into
+    the image), so ``apk add`` exits nonzero and the build fails. Two more
+    pitfalls are handled so the rewrite actually builds: extensions already
+    compiled into the base image must NOT go through ``docker-php-ext-install``
+    (it refuses to rebuild a loaded module — verified against
+    ``php:8.2-cli-alpine``), and gd/zip/intl need their apk build deps first.
+    Unknown/non-``phpNN-`` packages stay on the ``apk add`` line.
     """
     if not dockerfile:
         return dockerfile
@@ -294,7 +265,7 @@ def _fix_php_alpine_apk_extensions(dockerfile: str) -> str:
                 if m and m.group(1) not in _PRESENT:
                     php_exts.append(m.group(1))
                 elif m:
-                    continue  # already present in the base image
+                    continue
                 else:
                     apk_keep.append(tok)
             if php_exts:
@@ -330,14 +301,12 @@ def _fix_php_alpine_apk_extensions(dockerfile: str) -> str:
 def _ensure_debian_git_for_composer(dockerfile: str) -> str:
     """Add ``git`` to a Debian ``apt-get install`` when the repo needs composer.
 
-    The dist-first composer install falls back to ``--prefer-source`` on a
-    GitHub 429 (see the fallback injected elsewhere in this file), and that
-    fallback clones the package with git. On ``php:8.2-apache`` (Debian) the
-    refiner's ``apt-get install`` list has no git, so ``composer install
-    --prefer-source`` dies with "git was not found in your PATH". ``git`` is
-    installed by the alpine branch of the sanitizer (apk list), so only the
-    Debian apt-get path needs this. The caller only invokes this when the repo
-    actually has a composer.json.
+    Composer's dist-first install falls back to ``--prefer-source`` on a
+    GitHub 429 (fallback injected elsewhere in this file), and that fallback
+    clones with git; on ``php:8.2-apache`` the refiner's apt list has no git,
+    so the fallback dies with "git was not found in your PATH". Only the
+    Debian apt-get path needs this (the alpine branch installs git); the
+    caller only invokes this when the repo actually has a composer.json.
     """
     if not dockerfile:
         return dockerfile
@@ -395,21 +364,12 @@ def _fix_mixed_apt_apk(dockerfile: str) -> str:
 def _fix_detached_install_run(dockerfile: str) -> str:
     """Reattach a RUN prefix to a continuation block that lost its instruction.
 
-    The refiner sometimes emits a package-install block whose leading
-    ``RUN apk add --no-cache \\`` (or ``RUN apt-get install ... \\``) line is
-    dropped, leaving only the indented continuation lines::
-
-        # Install system dependencies and PHP extensions
-            libzip-dev \
-            zip \
-            ...
-            && docker-php-ext-install mysqli pdo pdo_mysql zip
-
-    Every such line parses as its own unknown Dockerfile instruction and the
-    build dies at parse time ("unknown instruction: libzip-dev"). When a
-    non-instruction line starts a block that ends up invoking
-    ``docker-php-ext-install`` / ``pecl install`` / an apt/composer install,
-    the missing instruction is reconstructed as ``RUN apk add --no-cache``.
+    When the refiner drops the leading ``RUN apk add --no-cache \\`` (or
+    ``apt-get install``) line, every remaining indented continuation line
+    parses as its own unknown Dockerfile instruction and the build dies at
+    parse time. When such a block ends up invoking ``docker-php-ext-install``
+    / ``pecl install`` / an apt/composer install, the missing instruction is
+    reconstructed as ``RUN apk add --no-cache``.
     """
     if not dockerfile:
         return dockerfile
@@ -454,16 +414,12 @@ def _fix_detached_install_run(dockerfile: str) -> str:
 def _fix_php_builtin_server_docroot(dockerfile: str) -> str:
     """Add a docroot to a PHP built-in server ``CMD`` that uses a router script.
 
-    The refiner emits ``php -S 0.0.0.0:8000 /app/router.php`` for a final image
-    that serves the app's static/health files from a ``public`` dir. Without a
-    ``-t`` docroot, the built-in server resolves the request path against the
-    CWD — so ``/health.php`` (an actual file under ``/app/public``) returns 404
-    even though the router script explicitly returns ``false`` for existing
-    files: ``return false`` delegates back to the server's static-file serving,
-    which then looks in the wrong directory. Verified live: the refiner's
-    exact CMD served ``/health.php`` 404 while ``php -S ... -t /app/public
-    /app/router.php`` served it 200. The router's own absolute-path checks
-    (``__DIR__ . "/public" . $uri``) keep working regardless of docroot.
+    Without ``-t``, the built-in server resolves request paths against the
+    CWD, so an actual file under ``public`` (e.g. ``/health.php``) returns
+    404 even though the router returns ``false`` for existing files.
+    Verified live: the refiner's exact CMD served ``/health.php`` 404 while
+    ``php -S ... -t /app/public ...`` served it 200. The router's own
+    absolute-path checks keep working regardless of docroot.
     """
     if not dockerfile:
         return dockerfile
@@ -483,12 +439,11 @@ def _fix_php_builtin_server_docroot(dockerfile: str) -> str:
 def _fix_php_docroot_mismatch(dockerfile: str) -> str:
     """Point a PHP built-in server ``-t`` docroot at the real frontend dir.
 
-    The refiner sometimes emits ``CMD ["php", "-S", ..., "-t", "/app/public",
-    "/app/server/index.php"]`` while the Dockerfile copies the frontend build
-    to ``/app/server/public/``. ``php -S`` then dies at startup with "Directory
-    /app/public does not exist" (verified live), so the container never serves
-    and DeployOps rolls back. Rewrite the docroot to the directory the
-    frontend-build ``COPY --from`` actually creates.
+    The refiner sometimes emits ``-t /app/public`` while the Dockerfile copies
+    the frontend build to ``/app/server/public/``; ``php -S`` then dies at
+    startup with "Directory /app/public does not exist" (verified live), the
+    container never serves and DeployOps rolls back. Rewrite the docroot to
+    the directory the frontend-build ``COPY --from`` actually creates.
     """
     if not dockerfile:
         return dockerfile
@@ -512,15 +467,12 @@ def _fix_php_docroot_mismatch(dockerfile: str) -> str:
 def _fix_missing_mysqli_extension(dockerfile: str) -> str:
     """Add ``mysqli`` to ``docker-php-ext-install`` when the app needs MySQL.
 
-    The refiner typically emits ``docker-php-ext-install pdo_mysql ...`` on an
-    official PHP image. Repos that talk to MySQL through the classic ``mysqli``
-    API (``new mysqli(...)``) then fail at runtime with "Class 'mysqli' not
-    found" on the first request — and because ``php -S`` returns HTTP 200 with
-    the fatal error body, the health probe passes and the deployment
-    "succeeds" while the app is broken (verified live on the EC2 instance).
-    ``mysqli`` is the standard companion of ``pdo_mysql`` and costs nothing, so
-    it is appended whenever a ``docker-php-ext-install`` list has ``pdo_mysql``
-    but not ``mysqli``.
+    Repos talking to MySQL through the classic ``mysqli`` API fail at runtime
+    with "Class 'mysqli' not found" when only ``pdo_mysql`` was installed —
+    and because ``php -S`` returns HTTP 200 with the fatal error body, the
+    health probe passes and the deployment "succeeds" while the app is broken
+    (verified live on the EC2 instance). ``mysqli`` costs nothing, so append
+    it whenever a ``docker-php-ext-install`` list has pdo_mysql but not it.
     """
     if not dockerfile:
         return dockerfile
@@ -549,14 +501,10 @@ def _fix_missing_mysqli_extension(dockerfile: str) -> str:
 def _fix_missing_server_source_copy(dockerfile: str) -> str:
     """Copy the ``server/`` source when the refiner only copies composer files.
 
-    The refiner sometimes emits a Dockerfile whose runtime image receives only
-    ``COPY server/composer.json server/composer.lock* ./server/`` plus the
-    frontend build (``COPY --from=frontend-builder ... /app/server/public/``)
-    but never the ``server/`` sources themselves. The ``php -S`` router then
-    fails to load (``Failed opening required '/app/server/index.php'``) and
-    every request returns a PHP fatal error with HTTP 200 — so the health
-    probe passes and the deployment "succeeds" while the app is broken
-    (verified live on the EC2 instance). Inject a whole-directory
+    A runtime image receiving only ``composer.json``/.lock plus the frontend
+    build leaves the ``php -S`` router unable to load (PHP fatal error with
+    HTTP 200), so the health probe passes while the app is broken (verified
+    live on the EC2 instance). Inject a whole-directory
     ``COPY server/ /app/server/`` when the router path lives under
     ``/app/server/`` and no full ``server/`` copy exists.
     """
@@ -585,14 +533,11 @@ def _fix_missing_server_source_copy(dockerfile: str) -> str:
 def _fix_healthcheck_localhost(dockerfile: str) -> str:
     """Replace ``localhost`` with ``127.0.0.1`` in HEALTHCHECK commands.
 
-    The refiner writes the image HEALTHCHECK against ``localhost`` (e.g.
-    ``wget --spider http://localhost:8000/health.php``). On the Alpine-based
-    official PHP images ``localhost`` resolves to IPv6 ``::1``, but the app
-    server binds IPv4 only (``php -S 0.0.0.0:8000``), so the probe never
-    connects and the container is permanently unhealthy — DeployOps then
-    rolls back even though the app is actually up. Verified live on
-    ``php:8.2-cli-alpine``: the exact HEALTHCHECK failed against
-    ``localhost`` while ``127.0.0.1`` connected and returned 200.
+    On Alpine-based official PHP images ``localhost`` resolves to IPv6
+    ``::1``, but the app server binds IPv4 only, so the probe never connects,
+    the container is permanently unhealthy and DeployOps rolls back even
+    though the app is up. Verified live on ``php:8.2-cli-alpine``: the exact
+    HEALTHCHECK failed against ``localhost`` while ``127.0.0.1`` returned 200.
     """
     if not dockerfile:
         return dockerfile
@@ -606,24 +551,18 @@ def _fix_healthcheck_localhost(dockerfile: str) -> str:
 def _fix_inline_frontend_build(dockerfile: str, repo_context: str | None = None) -> str:
     """Move an inline ``npm build`` out of a PHP image into a Node builder stage.
 
-    The refiner sometimes builds the React frontend *inside* the PHP runtime
-    image by ``apt-get install nodejs npm`` + ``npm run build``. On the official
-    ``php:8.2-cli`` (Debian) image that ships Node 18, while the repo's
-    ``react-scripts`` (this one pins 5.x) needs Node >= 18 and, more
-    importantly, the old ``eslint`` pulled in by the distro npm fails to
-    compile the app ("Environment key jest/globals is unknown") — verified
-    live: the exact refiner Dockerfile fails ``npm run build`` this way. The
-    refiner's good runs instead use a ``node:20-alpine`` builder stage. Rewrite
-    this image the same way:
-    - strip ``nodejs``/``npm`` out of the PHP image's ``apt-get install``;
-    - drop the inline ``npm install`` / ``npm run build`` / ``COPY front`` lines
-      that ran in the PHP stage;
-    - add a ``node:20-alpine AS frontend-builder`` stage that does the build;
-    - replace the ``cp -r /app/front/build ...`` copy with ``COPY --from``.
+    Building the React frontend *inside* the PHP runtime image (apt-get
+    nodejs npm + npm run build) fails: php:8.2-cli (Debian) ships an old
+    Node whose distro npm's old eslint dies
+    compiling with "Environment key jest/globals is unknown" (verified live),
+    while good runs use a ``node:20-alpine`` builder stage. Rewrite this image
+    the same way: strip nodejs/npm from the apt-get install, drop the inline
+    build lines, add a ``node:20-alpine AS frontend-builder`` stage, and
+    replace the ``cp -r`` copy with ``COPY --from``.
 
     Only fires when the PHP stage actually builds the frontend inline (has a
-    ``npm run build`` and no ``node:`` stage exists), so a Dockerfile that
-    already uses a Node builder is left untouched.
+    ``npm run build`` and no ``node:`` stage), so an existing Node-builder
+    Dockerfile is left untouched.
     """
     if not dockerfile:
         return dockerfile
@@ -734,7 +673,7 @@ def _fix_inline_frontend_build(dockerfile: str, repo_context: str | None = None)
                 in_inline_build = False
                 new_lines.append(line)
                 continue
-            continue  # consume the inline build line
+            continue
         new_lines.append(line)
     return "\n".join(_strip_apt_nodejs_block(new_lines))
 

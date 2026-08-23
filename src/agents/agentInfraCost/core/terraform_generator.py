@@ -73,29 +73,23 @@ class TerraformContext(BaseModel):
     docker_image: str | None = None
     docker_images: list[dict[str, Any]] | None = None
     """Multi-container mode: one entry per container to co-schedule in the
-    task. Each entry is ``{"name", "image", "port", "context"}`` — ``name``
-    is the ECR/container name, ``image`` the fully-qualified ECR URI,
-    ``port`` the container's listen port (EXPOSE), ``context`` the build
-    context. When set, the ECS template renders one ``container_definitions``
-    entry per image and routes the ALB to the first (primary) one; secondary
-    containers are reachable over the task's shared localhost. ``None``
-    (legacy single-container) keeps today's behaviour via ``docker_image``.
+    task, each ``{"name", "image", "port", "context"}``. When set, the ECS
+    template renders one ``container_definitions`` entry per image and routes
+    the ALB to the first (primary); secondary containers are reachable over the
+    task's shared localhost. ``None`` keeps legacy single-container behaviour
+    via ``docker_image``.
     """
     source_code_path: str | None = None
     health_check_port: int | None = None
-    """The real container port, extracted from the repo's own Dockerfile
-    (EXPOSE line) by pipeline.py. None falls back to ECS_HEALTH_CHECK_PORT
-    (8080) -- the ECS template's fixed default, which does not necessarily
-    match what the app actually listens on (confirmed mismatch: a FastAPI
-    app on port 8000 got ECS_HEALTH_CHECK_PORT=8080 wired into both the
-    container's containerPort and the ALB target group, so nothing ever
-    answered on 8080 and the health check failed with 502 on every
-    attempt, triggering a full rollback)."""
+    """The real container port, extracted from the repo's own Dockerfile EXPOSE
+    line by pipeline.py. None falls back to ECS_HEALTH_CHECK_PORT (8080) — a
+    confirmed mismatch in practice once wired a FastAPI app on port 8000 into
+    containerPort + ALB target group 8080, 502 on every health check -> full
+    rollback."""
     account_id: str | None = None
     database: str | None = None
-    """The database engine module 1 detected (e.g. "postgresql"), if any —
-    ``analysis.stack_detection.database`` passed straight through. Only used
-    by the ECS template today, to declare (not create) the connection
+    """The database engine module 1 detected (e.g. "postgresql"), if any. Only
+    used by the ECS template today, to declare (not create) the connection
     variables a deployer must fill in — see ``_ecs_render_context``.
     """
 

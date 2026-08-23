@@ -64,7 +64,6 @@ PENALTY_BASE: Final[dict[str, float]] = {
     "info": 0.0,
 }
 
-# Each additional finding of the same severity contributes less
 PENALTY_DECAY: Final[float] = 0.85
 
 
@@ -229,7 +228,6 @@ SCANNER_CONFIGS: Final[dict[str, ScannerConfig]] = {
 }
 
 
-# Stack detection heuristics
 STACK_INDICATORS: Final[dict[str, dict[str, list[str]]]] = {
     "languages": {
         "python": ["*.py", "requirements.txt", "Pipfile", "pyproject.toml", "setup.py"],

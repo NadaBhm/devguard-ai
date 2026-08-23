@@ -29,9 +29,7 @@ def _load_raw(filename: str) -> dict:
     return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
+# --- Nominal cases ---
 
 
 @pytest.mark.parametrize(
@@ -111,9 +109,7 @@ def test_static_site_pipeline_routes_to_s3_end_to_end() -> None:
     assert tf_vars["bucket_name"] == context.output.aws_config.s3.bucket_name
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_low_confidence_propagates_unwrapped_not_as_pipeline_stage_error() -> None:
@@ -150,9 +146,7 @@ def test_pipeline_stage_error_names_cost_estimator(monkeypatch: pytest.MonkeyPat
     assert excinfo.value.stage == "cost_estimator"
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
+# --- Error cases ---
 
 
 def test_pipeline_stage_error_names_output_builder(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -180,9 +174,7 @@ def test_ec2_synthetic_large_project_end_to_end() -> None:
     assert isinstance(output, Ec2InfraCostOutput)
 
 
-# --------------------------------------------------------------------------
-# Gate-2 regeneration: whole-repo context
-# --------------------------------------------------------------------------
+# --- Gate-2 regeneration: whole-repo context ---
 
 
 def test_gate2_repo_digest_is_computed_and_reaches_architecture_advisor(
@@ -319,7 +311,9 @@ def test_first_try_without_repo_path_skips_refiner() -> None:
 
     assert isinstance(output, EcsInfraCostOutput)
     assert output.artifacts.dockerfile is not None
-    assert "COPY . /app" in output.artifacts.dockerfile
+    # Stub must be runnable: WORKDIR, COPY and a CMD that serves traffic.
+    assert "COPY . ." in output.artifacts.dockerfile
+    assert "CMD" in output.artifacts.dockerfile
 
 
 def test_health_path_inferred_to_root_when_app_has_no_health_route(
@@ -337,8 +331,7 @@ def test_health_path_inferred_to_root_when_app_has_no_health_route(
     )
     raw["repo_path"] = str(repo)
 
-    # Keep the refiner from touching the files; the deterministic inference
-    # is what we're testing.
+    # Keep the refiner from touching the files; the deterministic inference is what we're testing.
     monkeypatch.setattr("core.pipeline.ingest_repo", lambda *a, **k: "Next.js app on 3000")
     monkeypatch.setattr(
         "core.llm_architecture_advisor.call_llm",
@@ -527,9 +520,7 @@ class TestEnsureProductionBuild:
         assert _ensure_production_build(dockerfile, str(tmp_path)) == dockerfile
 
 
-# --------------------------------------------------------------------------
-# Cost follows the refiner's actual sizing (option 1)
-# --------------------------------------------------------------------------
+# --- Cost follows the refiner's actual sizing (option 1) ---
 
 
 class TestSizingFromRefinedTerraform:

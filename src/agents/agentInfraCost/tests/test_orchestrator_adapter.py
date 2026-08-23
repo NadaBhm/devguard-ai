@@ -23,9 +23,7 @@ def _load_raw(filename: str) -> dict[str, Any]:
     return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
+# --- Nominal cases ---
 
 
 def test_to_orchestrator_result_maps_all_seven_fields_for_ecs() -> None:
@@ -50,9 +48,7 @@ def test_to_orchestrator_result_maps_lambda_compute_type() -> None:
     assert result["architecture_recommendation"] == "lambda"
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_exactly_one_optimization_is_marked_selected() -> None:
@@ -83,9 +79,7 @@ def test_region_comparison_matches_region_comparator_directly() -> None:
     assert result["region_comparison"] == expected
 
 
-# --------------------------------------------------------------------------
-# Error / mapping-table cases
-# --------------------------------------------------------------------------
+# --- Error / mapping-table cases ---
 
 
 def test_architecture_recommendation_mapping_covers_exactly_the_known_compute_types() -> None:

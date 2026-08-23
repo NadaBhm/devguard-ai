@@ -17,9 +17,7 @@ def _load_raw(filename: str) -> dict[str, Any]:
     return json.loads((FIXTURES_DIR / filename).read_text(encoding="utf-8"))
 
 
-# --------------------------------------------------------------------------
-# Nominal cases — the 4 fixtures, expecting different results per context
-# --------------------------------------------------------------------------
+# --- Nominal cases: the 4 fixtures, expecting different results per context ---
 
 
 @pytest.mark.parametrize(
@@ -63,9 +61,7 @@ def test_generate_lambda_response_has_no_docker_fields_when_uncontainerized() ->
     assert body["aws_config"]["lambda"]["memory_mb"] > 0
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_generate_missing_commit_sha_falls_back_to_latest_tag(caplog) -> None:
@@ -83,9 +79,7 @@ def test_generate_enrichment_is_always_fallback_for_this_mock() -> None:
     assert response.json()["enrichment"]["enrichment_source"] == "fallback"
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
+# --- Error cases ---
 
 
 def test_generate_rejects_low_confidence_with_422() -> None:

@@ -260,10 +260,6 @@ class SecurityScore(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Repository Metadata
-# ---------------------------------------------------------------------------
-
 class RepoMetadata(BaseModel):
     """High-level repository statistics."""
 
@@ -274,10 +270,6 @@ class RepoMetadata(BaseModel):
     loc: int = Field(default=0, ge=0)
     language_breakdown: dict[str, int] = Field(default_factory=dict)
 
-
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
 
 class Summary(BaseModel):
     """Executive summary of the security scan."""
@@ -293,10 +285,6 @@ class Summary(BaseModel):
     total_low: int = Field(default=0, ge=0)
     total_info: int = Field(default=0, ge=0)
 
-
-# ---------------------------------------------------------------------------
-# Top-Level Result
-# ---------------------------------------------------------------------------
 
 class CodeSecResult(BaseModel):
     """

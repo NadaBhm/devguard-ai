@@ -1,29 +1,18 @@
 """Phase B (post-mission extension): provider-agnostic LLM call abstraction.
 
-Wraps OpenRouter's OpenAI-compatible chat-completions endpoint. "Provider-
-agnostic" means the caller never hardcodes which model answers a prompt —
-the model is always a parameter, defaulting to ``_DEFAULT_MODEL`` but
-overridable per call or via the ``OPENROUTER_MODEL`` environment variable.
-Swapping models never requires touching a caller like
-``llm_architecture_advisor.py``.
+Wraps OpenRouter's OpenAI-compatible chat-completions endpoint. The model is
+always a parameter (default ``_DEFAULT_MODEL``, overridable per call or via
+``OPENROUTER_MODEL``), so swapping models never touches a caller. Same
+failure contract as ``core.llm_enrichment``: every failure mode collapses to
+``None`` so callers write exactly one fallback branch.
 
-Same failure contract as ``core.llm_enrichment``'s ``_call_gemini``: every
-failure mode (missing key, network error, timeout, non-2xx status,
-unparsable body) collapses to the same signal — return ``None`` — so callers
-always write exactly one fallback branch, never one per error type.
-
-Retry policy: transient failures are retried with exponential backoff before
-giving up, so a single provider hiccup doesn't silently drop an LLM stage:
-
-  - 5xx / 429 / 408, and OpenRouter's *provider-side* 404s ("Provider returned
-    error" — the upstream Nvidia/etc. endpoint flaked; observed intermittently
-    on free-tier models) are retried.
-  - Dropped connections / truncated reads (``httpx.TransportError``) are
-    retried.
-  - A 200 whose body lacks the expected ``choices`` shape is retried.
-  - Permanent failures never waste an attempt: a plain 404 (unknown model
-    slug, reported by OpenRouter itself), other 4xx, and timeouts (the caller
-    already waited ``timeout`` seconds for the response) fail immediately.
+Retry policy (exponential backoff, so one provider hiccup doesn't drop an LLM
+stage): 5xx/429/408 and OpenRouter's *provider-side* 404s ("Provider returned
+error" — the upstream Nvidia/etc. endpoint flaked; observed intermittently on
+free-tier models) are retried, as are dropped/
+truncated connections (``httpx.TransportError``) and 200s whose body lacks the
+``choices`` shape. Permanent failures never waste an attempt: a plain 404
+(unknown model slug), other 4xx, and timeouts fail immediately.
 """
 
 from __future__ import annotations
@@ -105,24 +94,20 @@ def call_llm(
     Args:
         prompt: The user-role message.
         system_instruction: The system-role message.
-        model: OpenRouter model slug (e.g. ``"openai/gpt-4o-mini"``,
-            ``"anthropic/claude-3.5-sonnet"``). Defaults to
-            ``_DEFAULT_MODEL``, or to the ``OPENROUTER_MODEL`` environment
-            variable if set — either way, never hardcoded in a caller.
+        model: OpenRouter model slug; defaults to the ``OPENROUTER_MODEL``
+            environment variable, else ``_DEFAULT_MODEL`` — never hardcoded
+            in a caller.
         provider_order: Which OpenRouter-side provider(s) may serve the
-            request (e.g. ``["nvidia"]``), in priority order. Defaults to
-            the ``OPENROUTER_PROVIDER`` environment variable if set (comma-
-            separated for more than one), otherwise omitted entirely and
-            OpenRouter's own routing decides. Some accounts have a default
-            provider preference that doesn't match every model — this is
-            how a caller overrides that per-request without needing to
-            change the account's own settings.
+            request (e.g. ``["nvidia"]``), in priority order; defaults to the
+            ``OPENROUTER_PROVIDER`` environment variable (comma-separated) or
+            omitted. How a caller overrides account-level provider preferences
+            per-request.
         temperature: Passed straight through to the API.
         timeout: Hard ceiling in seconds; a slow LLM must never hang the
             pipeline.
-        max_tokens: Completion token budget. Defaults to a generous value so
-            large-file echoes (the refiner's whole main.tf in one JSON string)
-            are never truncated mid-output; pass a smaller value for short,
+        max_tokens: Completion token budget. Defaults high so large-file
+            echoes (the refiner's whole main.tf in one JSON string) are never
+            truncated mid-output; pass a smaller value for short,
             latency-sensitive calls.
 
     Returns:

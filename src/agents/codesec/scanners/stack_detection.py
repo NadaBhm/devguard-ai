@@ -1,16 +1,9 @@
 """
-CodeSec Stack Detection Scanner
+CodeSec Stack Detection Scanner.
 Detects primary language, frameworks, database, build tool, and container
-information from repository file list and content.
-
-US-1.1.2: As a user, I want to know my project's tech stack so that I
-understand its architecture. Detection accuracy target: >=80% on test repos.
-
-Design Decisions:
-- Heuristic-based detection using filename patterns and content grepping.
-- No arbitrary code execution — purely static file analysis.
-- Confidence score computed from match strength and file coverage.
-- Extensible indicator registry in config.py for new technologies.
+information from repository files. Heuristic-based (filename patterns +
+content grepping) and purely static — no arbitrary code execution.
+Accuracy target: >=80% on test repos.
 """
 
 from __future__ import annotations
@@ -34,14 +27,7 @@ def _content_has_indicator(content: str, indicator: str) -> bool:
 
 
 def _is_dockerfile_path(rel_path: str) -> bool:
-    """True when a repo-relative path is an actual Dockerfile.
-
-    Accepts ``Dockerfile``, ``Dockerfile.prod``, ``app.Dockerfile``, etc. —
-    the basename must be (case-insensitively) exactly ``dockerfile``, start
-    with ``dockerfile.`` (variant suffix), or end with ``.dockerfile``.
-    Rejects templates and docs that merely contain the word, e.g.
-    ``nginx.dockerfile.twig`` (a Twig template) or ``Dockerfile.example.txt``.
-    """
+    """True when a repo-relative path is an actual Dockerfile."""
     return is_dockerfile_rel_path(rel_path)
 
 
@@ -223,7 +209,6 @@ def detect_stack(repo_path: Path) -> StackDetection:
 
     logger.info("Starting stack detection for: %s", repo_path)
 
-    # Gather all files (respecting .gitignore would be a future enhancement)
     all_files: list[Path] = []
     for file_path in repo_path.rglob("*"):
         if file_path.is_file():
@@ -232,7 +217,7 @@ def detect_stack(repo_path: Path) -> StackDetection:
     rel_paths = [f.relative_to(repo_path).as_posix() for f in all_files]
     filenames = [f.name for f in all_files]
 
-    # --- Language Detection via file extensions ---
+    # --- Language Detection ---
     lang_counts: dict[str, int] = {}
     for f in all_files:
         ext = f.suffix.lower()
@@ -248,14 +233,13 @@ def detect_stack(repo_path: Path) -> StackDetection:
     if lang_counts:
         primary_language = max(lang_counts.items(), key=lambda item: item[1])[0]
 
-    # --- Framework Detection via content grepping ---
+    # --- Framework Detection ---
     frameworks: list[str] = []
     framework_scores: dict[str, int] = {}
 
     for fw_name, indicators in STACK_INDICATORS["frameworks"].items():
         score = 0
         for indicator in indicators:
-            # Check filenames
             for fname in filenames:
                 if indicator.lower() in fname.lower():
                     score += 1
@@ -271,7 +255,6 @@ def detect_stack(repo_path: Path) -> StackDetection:
         if score > 0:
             framework_scores[fw_name] = score
 
-    # Sort frameworks by score, take top 5
     sorted_frameworks = sorted(framework_scores.items(), key=lambda x: x[1], reverse=True)
     frameworks = [name for name, _score in sorted_frameworks[:5]]
 
@@ -349,7 +332,6 @@ def detect_stack(repo_path: Path) -> StackDetection:
         container = containers[0]
 
     # --- Confidence Calculation ---
-    # Confidence is a heuristic based on how many signals we found
     signal_count = sum(1 for v in [primary_language, frameworks, database, build_tool, container.detected] if v)
     confidence = min(0.95, 0.3 + (signal_count / 5) * 0.7)
 
@@ -361,10 +343,8 @@ def detect_stack(repo_path: Path) -> StackDetection:
     if primary_language != "unknown":
         confidence = max(confidence, 0.5)
 
-    # Detected files that contributed
     detected_files: list[str] = []
     if primary_language != "unknown":
-        # Add representative files for the primary language
         for rpath in rel_paths:
             ext = Path(rpath).suffix.lower()
             if ext in LANGUAGE_EXTENSIONS and LANGUAGE_EXTENSIONS[ext] == primary_language:

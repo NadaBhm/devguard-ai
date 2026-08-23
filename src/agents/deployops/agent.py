@@ -183,12 +183,6 @@ class DeployOpsAgent:
         tf_dir = workspace_dir / "terraform"
         tf_runner = TerraformRunner(tf_dir)
 
-        # A detected database is declared in terraform (variables.tf) as
-        # required db_* vars with no defaults, but is NOT provisioned by
-        # DevGuard -- DeployOps fills them from DEVGUARD_DB_* env vars. If the
-        # deployer didn't supply them, `terraform plan/apply` fails on an
-        # obscure "required variable" error after a full image build/push.
-        # Fail fast here with a clear message instead.
         db_check = self._check_db_vars_available(tf_dir)
         if db_check is not None:
             return {
@@ -321,11 +315,6 @@ class DeployOpsAgent:
         if not source.exists():
             return {"ok": False, "error": f"source dir {source} missing"}
 
-        # Static sites ship a build output directory (dist/, public/, _site/,
-        # build/, out/). Syncing the whole workspace uploads source maps, test
-        # files and config that shouldn't be public; prefer the build dir when
-        # it actually contains the site's index document, else fall back to the
-        # repo root so bare "just HTML in a folder" repos still work.
         source = self._static_source_dir(workspace_dir)
 
         uploaded = 0
@@ -402,21 +391,17 @@ class DeployOpsAgent:
 
     @xray_recorder.capture("_deploy_existing_ecs_revision")  # type: ignore[reportCallIssue]
     async def _deploy_existing_ecs_revision(self, payload: DeployPayload) -> Dict[str, Any]:
-        """Redeploy the current commit's code onto an EXISTING ECS service.
+        """Redeploy the current commit onto an EXISTING ECS service: build/push
+        fresh image(s) via the normal _build_and_push_image() path, register a
+        new task-definition revision pointing at them, and update the service,
+        skipping Terraform entirely since no infrastructure changes.
 
-        Builds and pushes fresh image(s) (reusing the same
-        _build_and_push_image() the normal deploy() path uses), registers a
-        new task-definition revision pointing at them, and updates the
-        service -- deliberately skipping Terraform entirely, since the whole
-        point of this path is refreshing an already-live service instead of
-        re-provisioning infrastructure that already exists.
+        FIX (previously): this method only bumped a DEPLOYMENT_REVISION env var
+        and left containerDefinitions[].image untouched, so it silently kept
+        redeploying the OLD image on every "update".
 
-        FIX (previously): this method used to only bump a DEPLOYMENT_REVISION
-        env var and leave containerDefinitions[].image untouched, so it
-        silently kept redeploying the OLD image on every "update" -- never
-        building or pushing anything new. See ExistingDeploymentInfo in
-        src/agents/orchestrator/state.py for how the target cluster/service
-        gets resolved before this method ever runs.
+        See ExistingDeploymentInfo in src/agents/orchestrator/state.py for how
+        the target cluster/service is resolved before this method runs.
         """
         job_id = payload.job_id
         region = payload.aws_config.region
@@ -851,9 +836,11 @@ class DeployOpsAgent:
         )
         last_status = 0
         total_start = time.monotonic()
+        consecutive_refused_attempts = 0
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             for attempt in range(1, max_retries + 1):
+                all_refused = True
                 for path in candidates:
                     health_url = f"{url}{path}"
                     attempt_start = time.monotonic()
@@ -875,14 +862,33 @@ class DeployOpsAgent:
                         self.logger.warning(
                             f"Health check attempt {attempt} {path}: status {response.status_code}"
                         )
+                        all_refused = False
                     except httpx.TimeoutException:
                         self.logger.warning(f"Health check attempt {attempt} {path}: timeout")
+                        all_refused = False
                     except httpx.ConnectError:
                         self.logger.warning(f"Health check attempt {attempt} {path}: connection refused")
                     except Exception as e:
                         self.logger.warning(f"Health check attempt {attempt} {path}: {e}")
+                        all_refused = False
+
+                if all_refused:
+                    consecutive_refused_attempts += 1
+                else:
+                    consecutive_refused_attempts = 0
 
                 if attempt < max_retries:
+                    # Early-abort: an app that refuses connections on every
+                    # candidate has crashed and will not recover by waiting.
+                    # Timeouts may be a booting instance, so those keep the
+                    # full window. 3 fully-refused attempts = dead app.
+                    if consecutive_refused_attempts >= 3:
+                        self.logger.error(
+                            "Health check aborted early: connection refused on all "
+                            f"candidates for {consecutive_refused_attempts} consecutive "
+                            "attempts (app not listening / container exited)"
+                        )
+                        break
                     await asyncio.sleep(retry_delay)
 
         total_elapsed_ms = int((time.monotonic() - total_start) * 1000)
@@ -1156,7 +1162,6 @@ class DeployOpsAgent:
                 self.logger.error(f"ECR login failed: {stderr}")
                 return None
 
-            # ECR repository URI
             ecr_repo = f"{account_id}.dkr.ecr.{region}.amazonaws.com/{image_name}"
             image_uri = f"{ecr_repo}:{image_tag}"
 
@@ -1379,7 +1384,6 @@ class DeployOpsAgent:
             if not isinstance(value, (str, int, float, bool, list, dict, type(None))):
                 raise ValueError(f"Invalid type for variable {key}")
         
-        # s3 static sites ship plain files and carry no container images.
         compute_type = payload.get("compute_type", "ecs")
         docker_images = artifacts.get("docker_images")
         if not isinstance(docker_images, list):

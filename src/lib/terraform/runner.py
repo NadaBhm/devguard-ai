@@ -70,16 +70,11 @@ class TerraformRunner:
     def init(self) -> bool:
         def _init():
             # -input=false: a backend change (e.g. first init against the new
-            # S3 remote state) prompts interactively to migrate existing
-            # state; under a non-interactive docker exec that has no stdin,
-            # the prompt just hangs forever instead of erroring -- confirmed
-            # live during feature/destroy-deployment testing.
-            # -migrate-state -force-copy: a workspace with pre-existing local
-            # state (DEPLOYOPS_WORKSPACE_ROOT is a persisted volume, so state
-            # from before TF_STATE_BUCKET was configured can still be on disk)
-            # triggers a migration prompt when the backend changes to S3;
-            # -force-copy auto-approves it non-interactively instead of
-            # hanging or erroring under -input=false.
+            # S3 remote state) prompts an interactive migration question that
+            # hangs forever under non-interactive docker exec (no stdin).
+            # -migrate-state -force-copy auto-approves that migration when
+            # pre-existing local state is on disk (DEPLOYOPS_WORKSPACE_ROOT is
+            # a persisted volume, so pre-bucket state can still be present).
             result = self._run(["init", "-input=false", "-migrate-state", "-force-copy"])
             if result.returncode != 0:
                 raise RuntimeError(f"init failed: {result.stderr}")

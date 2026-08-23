@@ -83,6 +83,22 @@ _FALLBACK_BASE_IMAGES: Final[dict[str, str]] = {
     "csharp": "mcr.microsoft.com/dotnet/sdk:8.0",
 }
 
+# Runnable stub bodies per language. A bare FROM+COPY container exits
+# immediately (base image CMD is a REPL/no-op), so the ECS task crash-loops
+# and every health probe times out.
+_STUB_RUN: Final[dict[str, str]] = {
+    "javascript": 'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", "."]',
+    "typescript": 'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", "."]',
+    "python": 'EXPOSE 8080\nCMD ["python", "-m", "http.server", "8080", "--bind", "0.0.0.0"]',
+    "ruby": 'EXPOSE 8080\nCMD ["ruby", "-run", "-e", "httpd", ".", "-p", "8080"]',
+    "php": 'EXPOSE 8080\nCMD ["php", "-S", "0.0.0.0:8080", "-t", "."]',
+}
+
+
+def _stub_dockerfile(base_image: str, primary_language: str) -> str:
+    body = _STUB_RUN.get(primary_language, f'CMD ["{primary_language}"]')
+    return f"FROM {base_image}\nWORKDIR /app\nCOPY . .\n{body}\n"
+
 
 def _health_check_from_terraform(main_tf: str) -> tuple[int, str]:
     """Read the container port and health-check path out of the rendered
@@ -217,7 +233,9 @@ def resolve_docker_artifacts(
     images: list[DockerImage] = []
     for index, container in enumerate(containers):
         base_image = container.base_image or fallback_base
-        dockerfile = container.dockerfile_content or f"FROM {base_image}\nCOPY . /app\n"
+        dockerfile = container.dockerfile_content or _stub_dockerfile(
+            base_image, analysis.stack_detection.primary_language
+        )
         images.append(
             DockerImage(
                 name=_image_name_for(container.dockerfile_path, index),

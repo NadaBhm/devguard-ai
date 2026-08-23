@@ -1,23 +1,16 @@
 """Step 5 of the InfraCost pipeline: simulate cost at three load levels.
 
-For 1,000 / 10,000 / 100,000 active users, this recomputes the actual
-sizing each level needs — how many parallel ECS tasks, how many EC2
-instances, how many Lambda invocations per month — and derives the cost
-from that recomputed sizing. It never takes the module 4 baseline cost and
-scales it by a ratio of user counts (a "rule of three"): AWS capacity is a
-step function (you add whole replicas, never a fraction of one), and only
-recomputing the sizing captures that correctly.
+For 1,000 / 10,000 / 100,000 active users, recomputes the actual sizing each
+level needs (parallel ECS tasks, EC2 instances, Lambda invocations/month) and
+derives cost from that recomputed sizing — never the module 4 baseline scaled
+by a ratio of user counts: AWS capacity is a step function (whole replicas,
+never a fraction of one).
 
-AWS publishes no formula mapping "X vCPU" or "X instance type" to a request
-throughput — that number is workload-dependent and unknowable from a static
-repo analysis. So, like the confidence threshold in module 1 or the size
-brackets in module 2, this module leans on small, explicitly named,
-documented capacity assumptions rather than inventing false precision. Two
-things keep those assumptions honest instead of arbitrary: they are named
-constants (not magic numbers buried in a formula), and ECS/EC2 capacity
-scales with the *actual* size module 2 already chose — a bigger task or a
-pricier instance is assumed to serve proportionally more users, never a
-flat count blind to the sizing decision.
+AWS publishes no formula mapping "X vCPU" to throughput — it is workload-
+dependent and unknowable from static analysis. So, like module 1's confidence
+threshold or module 2's size brackets, this module leans on small, explicitly
+named capacity assumptions below rather than false precision; capacity scales
+with the *actual* size module 2 chose, never a flat count blind to the sizing.
 """
 
 from __future__ import annotations
@@ -39,11 +32,8 @@ from models.output_schema import Money
 
 _LOAD_SCENARIOS: Final[tuple[int, ...]] = (1_000, 10_000, 100_000)
 
-# --------------------------------------------------------------------------
 # Capacity assumptions — documented, not measured. Each is expressed in the
-# same unit throughout (active users per month), never mixed with
-# requests/second or concurrent connections.
-# --------------------------------------------------------------------------
+# same unit throughout (active users per month), never mixed with other units.
 
 # Lambda scales invocations automatically; only the request volume matters.
 _LAMBDA_REQUESTS_PER_USER_PER_MONTH: Final[int] = 100

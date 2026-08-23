@@ -309,11 +309,9 @@ def trigger_update(
     run = _get_owned_run(db, job_id, str(current_user.id))
     project = run.project
 
-    # "rolled_back" still counts as live: a rollback swaps the ECS service to
-    # a previous task-definition revision, it doesn't tear anything down, so
-    # there's still a real running service to update onto. "failed" (nothing
-    # ever went live) and "destroyed" (explicitly torn down) are the only
-    # statuses that genuinely mean "nothing to update".
+    # "rolled_back" still counts as live: rollback swaps the ECS service to a
+    # previous task-definition revision without tearing down, so a real running
+    # service remains; only "failed" and "destroyed" mean "nothing to update".
     deployment = (
         db.query(models.Deployment)
         .join(models.AnalysisRun, models.Deployment.run_id == models.AnalysisRun.id)
@@ -502,7 +500,6 @@ def edit_artifacts(
     edited_by = current_user.email
     edited_at = datetime.utcnow()
 
-    # Apply to both the deploy-consumed copy and the tab-consumed copy.
     _apply_artifact_edits(dict(state), body.files)
     update_run_state(db, job_id, dict(state))
 
@@ -814,8 +811,6 @@ def list_deployment_revisions(
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    # Use _extract_aws_config() (terraform_outputs fallback) instead of the
-    # unpopulated "aws_config" key.
     resolved = _extract_aws_config(deployment)
     region = resolved.get("region") or "us-east-1"
     ecs_cluster = resolved.get("ecs_cluster")
@@ -913,9 +908,8 @@ def get_job_results(
         db.query(models.AgentTask).filter(models.AgentTask.run_id == job_id)
     )
 
-    # The normalized tables are only materialized at a terminal status. For an
-    # in-flight or gate-paused run, derive the same rows from run_metadata so
-    # the UI can render CodeSec/Terraform/InfraCost tabs live.
+    # In-flight/gate-paused runs have no materialized rows yet; derive live
+    # views from run_metadata (see derive_results_from_state in persistence.py).
     live = derive_results_from_state(dict(run.run_metadata or {}))  # type: ignore
     if not findings and live["codesec_findings"]:
         findings = live["codesec_findings"]
@@ -1049,12 +1043,9 @@ def _current_gate(state: dict) -> str | None:
     interrupts = state.get("__interrupt__")
     if isinstance(interrupts, list) and interrupts:
         entry = interrupts[0]
-        # run_workflow now normalizes LangGraph Interrupt objects to plain
-        # dicts up front (graph.py), storing {"gate": ..., "context": ...}
-        # directly rather than wrapped in an outer {"value": {...}} -- match
-        # RunDetailPage.tsx's interruptInfo(), which handles both shapes the
-        # same defensive way, in case an older checkpoint still has the
-        # wrapped form.
+        # graph.py normalizes Interrupt objects to plain dicts up front, storing
+        # {"gate": ..., "context": ...} unwrapped -- mirror RunDetailPage.tsx's
+        # interruptInfo(), which handles both shapes for older checkpoints.
         if isinstance(entry, dict) and "value" in entry:
             value = entry.get("value", {})
         elif isinstance(entry, dict):

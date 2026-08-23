@@ -1,17 +1,8 @@
 """
-CodeSec Security Score Calculator — Refined (T-4.7)
+CodeSec Security Score Calculator.
 Calculates a 0-100 security score with letter grade (A-F), severity counts,
-per-category breakdown, and prioritized recommendations.
-
-Refinements Sprint 4:
-- Grade thresholds aligned with industry standard (A-D + F, no E).
-- Penalty curve capped at 70% per category with floor at 15/100.
-- Diminishing returns for repeated findings of same severity.
-- SBOM scoring includes vulnerable component detection.
-- Stack detection rewards complete stack profiles.
-- Recommendations ranked by priority score (severity × exploitability × ease_of_fix).
-
-US-1.1.5: As a tech lead, I want a security score so that I can prioritize fixes.
+per-category breakdown, and prioritized recommendations ranked by
+severity × exploitability × ease_of_fix.
 """
 
 from __future__ import annotations
@@ -42,10 +33,12 @@ from ..models import (
 
 logger = logging.getLogger(__name__)
 
-# Refined defaults (override via config.py if desired)
-DEFAULT_MAX_PENALTY_RATIO = 0.70   # A category can lose at most 70% of its max
-DEFAULT_MIN_CATEGORY_SCORE = 15    # Floor per category (avoid score=0 on lows)
-DEFAULT_PENALTY_DECAY = 0.75       # Diminishing returns per repeated finding
+# A category can lose at most 70% of its max
+DEFAULT_MAX_PENALTY_RATIO = 0.70
+# Floor per category (avoid score=0 on lows)
+DEFAULT_MIN_CATEGORY_SCORE = 15
+# Diminishing returns per repeated finding
+DEFAULT_PENALTY_DECAY = 0.75
 
 # Priority weights for recommendations: severity × exploitability × ease_of_fix
 EASE_OF_FIX = {
@@ -72,12 +65,6 @@ def _calculate_category_score(
     """
     Calculate a category score with capped penalties and diminishing returns.
 
-    Logic:
-        - Each finding applies a base penalty × severity multiplier.
-        - Repeated findings of same severity decay by 25% each (0.75^n).
-        - Total penalty is capped at 70% of max_score.
-        - Score never drops below 15 (avoids score=0 from noise).
-
     `executed=False` means the scanner in question never actually ran (its
     tool is missing or disabled), so an empty finding list is NOT evidence of
     a clean category. Such a category contributes 0 rather than full marks,
@@ -88,7 +75,6 @@ def _calculate_category_score(
     if not findings:
         return max_score
 
-    # Count findings by severity
     severity_counts: dict[str, int] = {}
     for finding in findings:
         sev = getattr(finding, severity_attr, Severity.LOW)
@@ -100,17 +86,14 @@ def _calculate_category_score(
     for severity, count in severity_counts.items():
         base = PENALTY_BASE.get(severity, 1.0)
         multiplier = SEVERITY_MULTIPLIERS.get(severity, 1.0)
-        # Apply decay: first finding = full, subsequent = decayed
         for i in range(count):
             penalty = base * multiplier * (DEFAULT_PENALTY_DECAY ** i)
             total_penalty += penalty
 
-    # Cap penalty to avoid score collapse from many low-severity findings
     max_penalty = max_score * DEFAULT_MAX_PENALTY_RATIO
     total_penalty = min(total_penalty, max_penalty)
 
     score = max_score - total_penalty
-    # Hard floor: even a repo with many findings keeps some score
     score = max(score, DEFAULT_MIN_CATEGORY_SCORE)
     return int(score)
 
@@ -129,7 +112,6 @@ def _calculate_stack_detection_score(stack: StackDetection) -> int:
 
     base = int(stack.confidence * 100)
 
-    # Critical fields for a complete stack profile
     critical_fields = [
         stack.primary_language,
         stack.frameworks,
@@ -141,7 +123,6 @@ def _calculate_stack_detection_score(stack: StackDetection) -> int:
 
     score = max(0, base - penalty)
 
-    # Bonus for complete, high-confidence detection
     if missing == 0 and stack.confidence >= 0.9:
         score = min(100, score + 5)
 
@@ -162,7 +143,6 @@ def _calculate_sbom_score(sbom: SBOM) -> int:
 
     score = 100
 
-    # Penalty for missing licenses
     components_without_license = sum(
         1 for c in sbom.components if not getattr(c, "licenses", None)
     )
@@ -170,11 +150,9 @@ def _calculate_sbom_score(sbom: SBOM) -> int:
         missing_ratio = components_without_license / sbom.components_count
         score -= int(missing_ratio * 30)
 
-    # Penalty for incomplete SBOM (suspiciously few components)
     if sbom.components_count < 5:
         score -= 20
 
-    # Penalty for known vulnerable components in SBOM
     vulnerable_components = sum(
         1 for c in sbom.components
         if getattr(c, "vulnerabilities", None) or getattr(c, "cve_ids", None)
@@ -270,10 +248,8 @@ def _generate_recommendations(
         msg = f"Fix {len(high_df)} high Dockerfile issue(s) at {files}"
         recs_with_priority.append((_priority_score("dockerfile", "high"), msg))
 
-    # Sort by priority score descending (highest impact/easiest first)
     recs_with_priority.sort(key=lambda x: x[0], reverse=True)
 
-    # Return top 10, deduplicated
     seen: set[str] = set()
     result: list[str] = []
     for _, msg in recs_with_priority:
@@ -314,7 +290,6 @@ def calculate_score(
     dockerfile_executed = coverage.get("dockerfile", True)
     sbom_executed = coverage.get("sbom", True)
 
-    # Per-category scores (0-100 each)
     sast_score = _calculate_category_score(sast_findings, max_score=100, executed=sast_executed)
     secrets_score = _calculate_category_score(secrets, max_score=100, executed=secrets_executed)
     deps_score = _calculate_category_score(vulnerable_packages, max_score=100, executed=deps_executed)
@@ -322,7 +297,6 @@ def calculate_score(
     sbom_score = _calculate_sbom_score(sbom) if sbom_executed else 0
     stack_score = _calculate_stack_detection_score(stack_detection)
 
-    # Apply weights
     breakdown = ScoreBreakdown(
         sast=int(sast_score * SCORING_WEIGHTS["sast"] / 100),
         secrets=int(secrets_score * SCORING_WEIGHTS["secrets"] / 100),
@@ -364,14 +338,12 @@ def calculate_score(
             stack_detection=SCORING_WEIGHTS["stack_detection"],
         )
 
-    # Determine grade (industry standard: A, B, C, D, F)
     grade = Grade.F
     for threshold, letter in GRADE_THRESHOLDS:
         if total_score >= threshold:
             grade = Grade(letter)
             break
 
-    # Severity counts across all findings
     severity_counts = SeverityCounts()
     all_findings = (
         [(f.severity.value if isinstance(f.severity, Severity) else f.severity) for f in sast_findings]

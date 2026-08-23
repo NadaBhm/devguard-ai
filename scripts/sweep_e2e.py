@@ -310,11 +310,24 @@ def main() -> None:
     parser.add_argument("--teardown", action="store_true", help="Terraform-destroy deploy workspaces after each run")
     parser.add_argument("--plan-only", action="store_true", help="Stop after InfraCost (gate 2) and run terraform plan dry-run without apply")
     parser.add_argument("--max-cost-usd", type=float, default=None, help="Abort sweep if estimated monthly cost exceeds this (saves budget)")
+    parser.add_argument("--no-skip-validated", action="store_true", help="Re-test repos already validated (default: skip them)")
     args = parser.parse_args()
 
     repos = json.loads(Path(args.corpus).read_text(encoding="utf-8"))
     if args.limit:
         repos = repos[: args.limit]
+
+    if not args.no_skip_validated:
+        vpath = Path(__file__).resolve().parent / "validated.json"
+        done = set(json.loads(vpath.read_text())["validated"]) if vpath.exists() else set()
+        before = len(repos)
+        repos = [r for r in repos if r.get("label") not in done]
+        skipped = before - len(repos)
+        if skipped:
+            print(f"skip-list: {skipped} already-validated repo(s) skipped", flush=True)
+        if not repos:
+            print("nothing to do — all repos validated", flush=True)
+            return
 
     results = []
     total_cost = 0.0
@@ -332,6 +345,16 @@ def main() -> None:
         except Exception:
             pass
         results.append(result)
+        if result.get("outcome") == "completed" and result.get("job_id"):
+            vpath = Path(__file__).resolve().parent / "validated.json"
+            try:
+                vdata = json.loads(vpath.read_text()) if vpath.exists() else {"validated": []}
+                label = result.get("label")
+                if label and label not in vdata["validated"]:
+                    vdata["validated"].append(label)
+                    vpath.write_text(json.dumps(vdata, indent=2))
+            except Exception:
+                pass
         if args.teardown:
             job_id = result.get("job_id")
             if job_id:

@@ -84,7 +84,6 @@ class GeminiClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> GeminiResponse:
-        """Generate text from a prompt."""
         config = self._build_generation_config(
             temperature=temperature or self.temperature,
             max_output_tokens=max_tokens or self.max_output_tokens,
@@ -116,7 +115,6 @@ class GeminiClient:
         schema: dict,
         system_instruction: Optional[str] = None,
     ) -> GeminiResponse:
-        """Generate structured JSON output."""
         schema = self._normalize_schema_types(schema)
 
         config = self._build_generation_config(
@@ -200,7 +198,6 @@ class GeminiClient:
         prompt: str,
         system_instruction: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        """Stream text chunks."""
         config = self._build_generation_config()
 
         if system_instruction:
@@ -228,7 +225,6 @@ class GeminiClient:
                 yield chunk.text
 
     def start_chat(self, system_instruction: Optional[str] = None) -> genai.ChatSession:
-        """Start a new chat session."""
         model = self._model
         if system_instruction:
             chat = model.start_chat(history=[])
@@ -241,7 +237,6 @@ class GeminiClient:
         chat_session: genai.ChatSession,
         message: str,
     ) -> GeminiResponse:
-        """Send a message in an existing chat session."""
         response = await asyncio.to_thread(
             chat_session.send_message,
             message,
@@ -250,7 +245,6 @@ class GeminiClient:
         return self._parse_response(response)
 
     def _parse_response(self, raw_response: Any) -> GeminiResponse:
-        """Parse raw Gemini response."""
         usage = getattr(raw_response, "usage_metadata", None)
         tokens_input = getattr(usage, "prompt_token_count", 0) if usage else 0
         tokens_output = getattr(usage, "candidates_token_count", 0) if usage else 0
@@ -278,7 +272,6 @@ class GeminiClient:
         )
 
     async def embed(self, text: str) -> list[float]:
-        """Generate embeddings."""
         embedding_model = "models/embedding-001"
         result = await asyncio.to_thread(
             genai.embed_content,

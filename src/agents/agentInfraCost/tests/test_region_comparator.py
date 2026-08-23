@@ -18,9 +18,7 @@ def _load_analysis(filename: str) -> RepoAnalysisInput:
     return RepoAnalysisInput.model_validate(raw)
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
+# --- Nominal cases ---
 
 
 def test_compare_regions_returns_one_entry_per_region() -> None:
@@ -58,9 +56,7 @@ def test_other_regions_cost_more_than_us_east_1() -> None:
     assert results["ap-southeast-1"] > results["us-east-1"]
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_each_region_cost_is_a_computed_range_not_a_single_figure() -> None:
@@ -93,9 +89,7 @@ def test_region_costs_scale_with_decision_sizing_not_hardcoded() -> None:
     assert small_eu.estimated_monthly_cost.amount < large_eu.estimated_monthly_cost.amount
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
+# --- Error cases ---
 
 
 def test_missing_region_multipliers_raises_named_error(monkeypatch: pytest.MonkeyPatch) -> None:

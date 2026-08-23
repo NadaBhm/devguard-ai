@@ -29,22 +29,11 @@ def clone_repo(
     max_files: int = 10_000,
     timeout: int = _DEFAULT_CLONE_TIMEOUT_SECONDS,
 ) -> Path:
-    """Shallow-clone a public repository into ``target_dir``.
+    """Shallow-clone a public repository into ``target_dir``, aborting on
+    size/file-count limits or timeout. ``target_dir`` is recreated if it
+    already exists — a stale clone must never be reused.
 
-    Args:
-        repo_url: HTTPS URL of the repository.
-        target_dir: destination directory. Recreated if it already exists —
-            a stale clone must never be reused.
-        max_size_mb: abort if the cloned tree exceeds this many MB.
-        max_files: abort if the cloned tree contains more files than this.
-        timeout: per-``git clone`` attempt timeout in seconds.
-
-    Returns:
-        The ``target_dir`` path, once validated.
-
-    Raises:
-        RuntimeError: git is unavailable, the clone fails or times out, or
-            the cloned tree exceeds the size/file limits.
+    Raises RuntimeError on limit/timeout violations.
     """
     target = Path(target_dir)
     if target.exists():

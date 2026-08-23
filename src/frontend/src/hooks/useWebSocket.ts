@@ -105,7 +105,7 @@ export function useWebSocket(jobId: string | undefined) {
           const data = JSON.parse(msg.data as string) as WsEvent
           pushEvent(data)
         } catch {
-          /* ignore malformed frames */
+          // ignore malformed frames
         }
       }
 

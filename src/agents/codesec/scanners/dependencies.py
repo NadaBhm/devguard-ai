@@ -205,7 +205,6 @@ def _parse_manifest_files(repo_path: Path) -> tuple[int, int, int]:
     direct = 0
     transitive = 0
 
-    # Python requirements.txt
     req_files = find_files(repo_path, patterns=("requirements*.txt",))
     for rf in req_files:
         content = read_file_safe(rf, max_size_mb=1)
@@ -216,7 +215,6 @@ def _parse_manifest_files(repo_path: Path) -> tuple[int, int, int]:
                     direct += 1
                     total += 1
 
-    # package.json
     pkg_files = find_files(repo_path, patterns=("package.json",))
     for pf in pkg_files:
         try:
@@ -228,7 +226,6 @@ def _parse_manifest_files(repo_path: Path) -> tuple[int, int, int]:
         except json.JSONDecodeError:
             pass
 
-    # go.mod
     go_files = find_files(repo_path, patterns=("go.mod",))
     for gf in go_files:
         content = read_file_safe(gf, max_size_mb=1)
@@ -254,14 +251,12 @@ def run_dependency_scan(repo_path: Path) -> DependenciesResult:
     """
     all_vulns: list[VulnerablePackage] = []
 
-    # Try pip-audit (Python)
     try:
         pip_audit_findings = _run_pip_audit(repo_path)
         all_vulns.extend(pip_audit_findings)
     except ScannerError as exc:
         logger.warning("pip-audit failed: %s", exc)
 
-    # Try Safety (Python fallback)
     if not all_vulns:
         try:
             safety_findings = _run_safety(repo_path)
@@ -269,14 +264,12 @@ def run_dependency_scan(repo_path: Path) -> DependenciesResult:
         except ScannerError as exc:
             logger.warning("Safety failed: %s", exc)
 
-    # Try Trivy (multi-ecosystem)
     try:
         trivy_findings = _run_trivy_fs(repo_path)
         all_vulns.extend(trivy_findings)
     except ScannerError as exc:
         logger.warning("Trivy dependency scan failed: %s", exc)
 
-    # Deduplicate by (package, cve_id)
     seen: set[tuple[str, str | None]] = set()
     deduped: list[VulnerablePackage] = []
     for v in all_vulns:

@@ -35,8 +35,9 @@ _STATIC_PRIMARY_LANGUAGES: Final[frozenset[str]] = frozenset(
     {"html", "css", "javascript", "typescript"}
 )
 
-# ECS Fargate task_cpu/task_memory must be one of AWS's valid paired
-# combinations; the high tier lives in _ECS_SIZE_DEFAULT.
+# ECS Fargate sizing tiers. task_cpu/task_memory must be one of AWS's valid
+# paired combinations — arbitrary values are rejected at RegisterTaskDefinition.
+# The high tier lives in _ECS_SIZE_DEFAULT.
 _ECS_SIZE_TIERS: Final[tuple[tuple[int, str, str], ...]] = (
     (5_000, "256", "512"),
     (15_000, "512", "1024"),

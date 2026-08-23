@@ -66,7 +66,7 @@ let res = await doFetch()
       const body = (await res.json()) as { detail?: string | unknown }
       if (typeof body.detail === "string") detail = body.detail
     } catch {
-      /* non-JSON error body */
+      // non-JSON error body is fine
     }
     throw new ApiError(res.status, detail)
   }

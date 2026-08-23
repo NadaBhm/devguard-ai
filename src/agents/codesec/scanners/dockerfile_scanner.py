@@ -234,26 +234,22 @@ def run_dockerfile_scan(repo_path: Path) -> list[DockerfileFinding]:
     """
     all_findings: list[DockerfileFinding] = []
 
-    # Try Trivy config
     try:
         trivy_findings = _run_trivy_config(repo_path)
         all_findings.extend(trivy_findings)
     except ScannerError as exc:
         logger.warning("Trivy config scan failed: %s", exc)
 
-    # Try Hadolint
     try:
         hadolint_findings = _run_hadolint(repo_path)
         all_findings.extend(hadolint_findings)
     except ScannerError as exc:
         logger.warning("Hadolint failed: %s", exc)
 
-    # Fallback to built-in checks
     if not all_findings:
         builtin_findings = _run_builtin_checks(repo_path)
         all_findings.extend(builtin_findings)
 
-    # Deduplicate by (file, line, rule_id)
     seen: set[tuple[str, int, str]] = set()
     deduped: list[DockerfileFinding] = []
     for f in all_findings:

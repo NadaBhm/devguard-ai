@@ -87,7 +87,7 @@ export const jobsApi = {
         const body = (await res.json()) as { detail?: string }
         if (typeof body.detail === "string") detail = body.detail
       } catch {
-        // ignore invalid JSON responses
+        // non-JSON body is fine
       }
       throw new Error(detail)
     }

@@ -18,9 +18,7 @@ def _load_analysis(filename: str) -> RepoAnalysisInput:
     return RepoAnalysisInput.model_validate(raw)
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
+# --- Nominal cases ---
 
 
 def test_generate_terraform_for_ecs_fixture() -> None:
@@ -106,9 +104,8 @@ def test_ecs_template_is_applyable_with_execution_role_and_logging() -> None:
 
     files = generate_terraform(decision, context)
 
-    # IAM execution role with the ECS-tasks assume-role policy; the name is
-    # job-id-suffixed (constants.unique_resource_name) so concurrent deploys
-    # never collide on the same IAM role.
+    # IAM execution role with the ECS-tasks assume-role policy; job-id-suffixed name
+    # (constants.unique_resource_name) means concurrent deploys never collide.
     assert "aws_iam_role" in files.main_tf
     assert 'name = "devguard-task-execution-role-550e8400"' in files.main_tf
     assert 'Principal' in files.main_tf
@@ -150,10 +147,9 @@ def test_ecs_multi_container_renders_one_definition_per_image() -> None:
     assert files.main_tf.count("portMappings = [") == 1
     assert "name  = \"devguard-app\"" in files.main_tf
     assert "name  = \"devguard-app-frontend\"" in files.main_tf
-    # The secondary container shares the task's localhost, so it must NOT map
-    # a host port — one Fargate task has a single ENI, and two containers on
-    # the same port made RegisterTaskDefinition fail with "TCP host port
-    # '3000' is mapped multiple times in task" (verified live on mean-docker).
+    # Secondary containers share the task's localhost (one ENI per Fargate task), so
+    # they must NOT map a host port: duplicates made RegisterTaskDefinition fail with
+    # "TCP host port '3000' is mapped multiple times in task" (verified on mean-docker).
     assert "containerPort = 80\n" not in files.main_tf
     assert "containerPort = 8000" in files.main_tf
     # ALB + SG + service block all target the primary container.
@@ -270,9 +266,7 @@ def test_ec2_resource_names_are_suffixed_with_job_id() -> None:
     assert 'resource "aws_security_group" "instance"' in files.main_tf
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_sizing_is_actually_templated_not_hardcoded() -> None:
@@ -341,9 +335,7 @@ def test_terraform_files_round_trip_with_contract_aliases() -> None:
     assert set(dumped.keys()) == {"main.tf", "variables.tf", "outputs.tf"}
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
+# --- Error cases ---
 
 
 def test_terraform_context_requires_job_id() -> None:

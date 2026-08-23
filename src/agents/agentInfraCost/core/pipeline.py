@@ -1,29 +1,17 @@
 """Step 9 of the InfraCost pipeline: orchestrate modules 1-4, 6, 7 and 10.
 
-Architecture decision (module 2) now goes through
-``decide_architecture_via_llm`` (Phase B): an LLM picks ``compute_type``
-when ``OPENROUTER_API_KEY`` is set and the call succeeds, otherwise it
-transparently falls back to ``decide_architecture``'s deterministic scoring
-— see ``core/llm_architecture_advisor.py`` for the full contract. The
-Terraform deployment context (region/environment, module 3's inputs) goes
-through ``decide_deployment_context`` (Phase C) the same way — see
-``core/llm_deployment_advisor.py``.
-
 A single synchronous entry point, ``run_pipeline``, calling every module in
 order. Deliberately a plain function, not ``async def``: the shared
-orchestrator (``src/subgroup2/orchestrator/graph.py``) integrates every
-agent as a synchronous, in-process call today — no agent anywhere in this
-project is async yet. Any future async caller can wrap this in
-``asyncio.to_thread(run_pipeline, raw)`` without this module changing at
-all; making it async pre-emptively, with no async caller to justify it,
-would be the wrong default.
+orchestrator (``src/subgroup2/orchestrator/graph.py``) integrates agents
+synchronously today, and any future async caller can wrap this in
+``asyncio.to_thread(run_pipeline, raw)`` without this module changing.
+Architecture (Phase B) and deployment context (Phase C) go through the LLM
+advisors with transparent fallback to the deterministic scoring — see
+``core/llm_architecture_advisor.py`` / ``core/llm_deployment_advisor.py``.
 
-Error handling is precise per stage: module 1's own typed exceptions
-(``InvalidStatusError``, ``LowConfidenceError``, ...) already name exactly
-what went wrong and carry a ``job_id`` — they propagate unwrapped, since
-wrapping them would only obscure that detail. Every other stage's failure
-is wrapped in ``PipelineStageError``, naming which stage failed — never a
-bare, ambiguous traceback.
+Error handling is precise per stage: module 1's typed exceptions propagate
+unwrapped (they already name what went wrong and carry a ``job_id``); every
+other stage's failure is wrapped in ``PipelineStageError`` naming which stage failed.
 """
 
 from __future__ import annotations
@@ -35,7 +23,7 @@ from pathlib import Path
 from typing import Final
 
 from core.cost_estimator import estimate_cost
-from core.decision_engine import DecisionResult
+from core.decision_engine import DecisionResult, decide_architecture
 from core.finops_optimizer import FinOpsRecommendation, optimize_finops
 from core.input_validator import validate_input
 from core.llm_architecture_advisor import decide_architecture_via_llm
@@ -173,10 +161,12 @@ def _apply_inferred_health_port(
             r'(?mi)^CMD\b.*?(?:--port|-p)\s*[",\s]*"?(\d+)', primary_dockerfile
         )
         m_expose = re.search(r"(?mi)^\s*EXPOSE\s+(\d+)", primary_dockerfile)
-        # No port signal at all -> leave the rendered default untouched.
+        # No signal, or a degenerate "0" extracted -> leave default untouched.
         if not m_cmd and not m_expose:
             return
         new_port = int(m_cmd.group(1)) if m_cmd else int(m_expose.group(1))
+        if not new_port:
+            return
         cur = re.search(r"(?im)^\s*port\s*=\s*(\d+)", terraform_files.main_tf)
         if not cur:
             return
@@ -453,14 +443,12 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
     """
     analysis = validate_input(raw)  # not wrapped: already typed + carries job_id
 
-    # Whole-repo digestion for the OpenRouter LLM advisors and the Terraform
-    # refiner, so they see the real code -- on EVERY pass, not just Gate-2
-    # regeneration. The orchestrator re-clones the repo for InfraCost and
-    # threads repo_path through; on the first try that lets the LLM generate
-    # a runnable Dockerfile / correct port / health path from the actual app
-    # instead of shipping the deterministic stub and waiting for a regen.
-    # Fail-soft by design: no repo_path, no digest, or any failure -> the
-    # pipeline proceeds exactly as before (repo_context stays None).
+    # Whole-repo digestion for the OpenRouter LLM advisors/refiner, on EVERY
+    # pass (not just Gate-2 regens): the orchestrator re-clones the repo and
+    # threads repo_path, letting the first try generate a runnable Dockerfile /
+    # correct port / health path from the actual app. Fail-soft by design: no
+    # repo_path or any failure -> repo_context stays None and the pipeline
+    # proceeds exactly as before.
     if raw.get("repo_path"):
         try:
             repo_context = ingest_repo(
@@ -478,26 +466,29 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             analysis = analysis.model_copy(update={"repo_context": repo_context})
 
     try:
-        decision = decide_architecture_via_llm(analysis)
+        # Fast-path: a bare static site is always S3 — skip the LLM advisors.
+        from core.decision_engine import _is_static_site
+        if _is_static_site(analysis):
+            decision = decide_architecture(analysis)
+            decision.decision_source = "deterministic"
+            logger.info("Static site fast-path: deterministic S3 decision, LLM advisor skipped")
+        else:
+            decision = decide_architecture_via_llm(analysis)
     except Exception as exc:
         raise PipelineStageError("decision_engine", exc) from exc
 
     try:
         docker_images = resolve_docker_artifacts(analysis, decision)
-        # Prefer the real Dockerfile content the CodeSec agent extracted
-        # (agent.payload["dockerfile_content"] / ["dockerfile_contents"]),
-        # never a synthesized stand-in. Plural dict (path -> content) maps
-        # onto each image by build context; singular string still overrides
-        # the primary (first) image for legacy payloads.
+        # Prefer the real Dockerfile content the CodeSec agent captured
+        # (payload["dockerfile_content"] / ["dockerfile_contents"]) over a
+        # synthesized stand-in; plural dict maps by build context, singular
+        # string overrides the primary image (legacy payloads).
         raw_contents = raw.get("dockerfile_contents")
-        # Whether at least one image carries a real Dockerfile CodeSec
-        # captured (vs. the synthesized "FROM ... COPY . /app" stub). The
-        # first-try artifact fix only needs to regenerate the Dockerfile when
-        # it's a stub: regenerating a real one from the repo digest makes the
-        # LLM rewrite a working Dockerfile from scratch, and it has corrupted
-        # valid ones before (splicing a stray "RUN apk add" into an apt-get
-        # block -> build died). Real Dockerfiles still get the port/health
-        # correction pass, just not a full regeneration.
+        # Whether at least one image carries a real Dockerfile (vs. the
+        # synthesized stub): only stubs need full regeneration — regenerating
+        # a working Dockerfile has corrupted valid ones before (splicing a
+        # stray "RUN apk add" into an apt-get block -> build died). Real ones
+        # still get the port/health correction pass, just not a full regen.
         has_real_dockerfile = False
         if isinstance(raw_contents, dict) and raw_contents:
             for image in docker_images:
@@ -510,17 +501,14 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
                 image.dockerfile = raw["dockerfile_content"]
             has_real_dockerfile = bool(raw.get("dockerfile_content"))
         # Extract each image's real listen port from its own Dockerfile's
-        # EXPOSE line, instead of always wiring the ECS template's fixed
-        # default (8080) into both the container's containerPort and the
-        # ALB target group. Confirmed mismatch in practice: a FastAPI app
-        # on port 8000 got 8080 wired in, nothing ever answered there, and
-        # every health check failed with 502 -> full rollback. Fail-soft:
-        # None (no EXPOSE line, e.g. the generic synthesized Dockerfile)
-        # falls back to ECS_HEALTH_CHECK_PORT in terraform_generator.py.
+        # EXPOSE line instead of always wiring the ECS template's fixed
+        # default (8080) into both containerPort and the ALB target group.
+        # Confirmed mismatch in practice: a FastAPI app on port 8000 got 8080
+        # wired in, nothing ever answered there, and every health check failed
+        # with 502 -> full rollback. Fail-soft: None (no EXPOSE line, e.g. the
+        # synthesized stub) falls back to ECS_HEALTH_CHECK_PORT in
+        # terraform_generator.py.
         primary_image = docker_images[0] if docker_images else None
-        # Extract each container's real listen port from its own Dockerfile's
-        # EXPOSE line (same reasoning as the singular port below). None falls
-        # back to ECS_HEALTH_CHECK_PORT in terraform_generator.py.
         def _expose_port(image) -> int | None:
             match = (
                 re.search(r"^\s*EXPOSE\s+(\d+)", image.dockerfile, re.MULTILINE)
@@ -570,11 +558,9 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             ]
         terraform_files = generate_terraform(decision, terraform_context)
         # LLM artifact pass: let the LLM edit the rendered files (and the
-        # effective Dockerfile) so they match the real app. Runs on the FIRST
-        # try too -- not just Gate-2 feedback -- so the artifacts aren't the
-        # deterministic stub (bare "FROM python:3.12-slim COPY . /app", hard
-        # coded 8080/"/health") that can't run the app. Fail-soft: unchanged
-        # files if the refiner can't run.
+        # effective Dockerfile) to match the real app. Runs on the FIRST try
+        # too, so artifacts aren't the deterministic stub (bare FROM+COPY,
+        # hardcoded 8080/"/health") that can't run the app. Fail-soft.
         force_dockerfile = False
         if analysis.user_feedback:
             feedback = analysis.user_feedback
@@ -639,9 +625,8 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         raise PipelineStageError("terraform_generator", exc) from exc
 
     # Deterministic health-path inference: the refiner is asked to correct the
-    # path but is unreliable on it, so fall back to reading the app itself.
-    # Runs on every render (first try and regens) so the path is right even
-    # when the LLM leaves the template's "/health" in place.
+    # path but is unreliable, so read it from the app itself — on every render,
+    # first try and regens alike.
     _apply_inferred_health_path(
         terraform_files,
         primary_image.dockerfile if primary_image else None,
@@ -665,10 +650,10 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
                 image.dockerfile, raw.get("repo_path")
             )
 
-    # Boot-blocking env vars: apps like Animetrix hard-exit unless secrets
-    # (MONGODB_URI, JWT_TOKEN) are set, so the container never reaches healthy.
-    # Can't conjure the values, but must surface them at Gate 2 rather than
-    # let the deploy silently roll back.
+    # Boot-blocking env vars (e.g. secrets like MONGODB_URI/JWT_TOKEN that
+    # apps such as Animetrix hard-exit without):
+    # surface them at Gate 2 rather than let the deploy silently roll back
+    # (see _required_env_vars).
     required_env_vars = _required_env_vars(
         primary_image.dockerfile if primary_image else None
     )
@@ -681,11 +666,10 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         else []
     )
 
-    # A detected database is declared in terraform but NEVER provisioned: the
-    # ECS template wires DB_* env vars from tfvars (DEVGUARD_DB_*), so the app
-    # cannot reach healthy unless a database already exists somewhere the
-    # deployer controls. Surface it at Gate 2 instead of letting the deploy
-    # fail later on an obscure "required variable" error.
+    # A detected database is declared in terraform but never provisioned: the
+    # ECS template wires DB_* env vars from tfvars, so the app can't go healthy
+    # unless a database already exists somewhere the deployer controls — surface
+    # at Gate 2 instead of failing later on an obscure "required variable" error.
     # sqlite is a local file, not a server — no managed DB needed.
     if analysis.stack_detection.database and analysis.stack_detection.database != "sqlite":
         warnings.append(
@@ -694,11 +678,9 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         )
 
     # After Gate-2 feedback the refiner may have rewritten sizing in main.tf;
-    # cost must reflect what actually ships, not the pre-regen decision.
-    # Fail-soft: if the refined Terraform carries no readable sizing, this
-    # returns the original decision and cost stays unchanged. The recomputed
-    # decision is threaded through every downstream stage (finops, enrichment,
-    # output) so the reported sizing, cost and FinOps scenarios stay in sync.
+    # cost must reflect what actually ships. Fail-soft: unreadable sizing keeps
+    # the original decision. The recomputed decision is threaded through every
+    # downstream stage so sizing, cost and FinOps scenarios stay in sync.
     refined_decision = _recompute_decision_from_refined(decision, terraform_files)
     try:
         cost = estimate_cost(refined_decision)

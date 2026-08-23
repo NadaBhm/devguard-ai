@@ -62,16 +62,11 @@ def _normalize_scanner(scanner: str | None) -> str:
 
 
 def _docker_artifacts(state: dict) -> list[tuple[str, str, str | None]]:
-    """Docker artifacts from an orchestrator ``state``: the real InfraCost
-    agent stashes them at ``infracost_result._deploy_inputs.artifacts``, the
-    mock/legacy shape at ``deployops_result.artifacts``. Returns
-    ``(file_path, artifact_type, content)`` tuples, content None when absent
-    (e.g. a serverless Lambda run).
-
-    Multi-container payloads carry the canonical plural ``docker_images``
-    list; each image becomes its own artifact row keyed by its build context
-    (``<context>/Dockerfile`` or ``Dockerfile`` for the repo root). Legacy
-    payloads keep the singular ``dockerfile`` + ``docker_image`` shape.
+    """Docker artifacts from an orchestrator ``state`` as
+    ``(file_path, artifact_type, content)`` tuples (content None when absent).
+    Real InfraCost stashes them at ``infracost_result._deploy_inputs.artifacts``
+    with the plural ``docker_images`` list; the mock/legacy shape lives at
+    ``deployops_result.artifacts`` with singular ``dockerfile`` + ``docker_image``.
     """
     artifacts: dict[str, Any] = {}
     infracost = cast(dict[str, Any], state.get("infracost_result") or {})

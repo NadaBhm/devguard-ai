@@ -73,7 +73,6 @@ def find_files(repo_path: Path, patterns: tuple[str, ...], exclude: tuple[str, .
             file_path = root_path / filename
             rel_path = file_path.relative_to(repo_path).as_posix()
 
-            # Check excludes first
             if any(fnmatch.fnmatch(rel_path, ex) or fnmatch.fnmatch(filename, ex) for ex in exclude):
                 continue
 

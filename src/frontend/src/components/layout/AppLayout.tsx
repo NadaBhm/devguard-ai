@@ -96,7 +96,7 @@ export function AppLayout() {
       try {
         localStorage.setItem(STORAGE_KEY, next ? "1" : "0")
       } catch {
-        /* ignore */
+        // storage may be unavailable; treat as off
       }
       return next
     })

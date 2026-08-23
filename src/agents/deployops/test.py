@@ -1,7 +1,4 @@
-"""
-    mock tests of deployOps before actual  AWS testing
-
-"""
+"""Mocked tests of DeployOps, run before live AWS testing."""
 
 
 
@@ -782,11 +779,9 @@ async def test_moto_rollback_uses_prior_revision(agent, moto_ecs, sample_payload
 async def test_run_docker_cmd_forces_buildkit(agent, monkeypatch, tmp_path):
     """Every docker command must run with BuildKit enabled. The legacy builder
     cannot pull multi-arch images for a multi-stage Dockerfile built with
-    --platform linux/amd64 when a base image is already cached for another
-    platform (e.g. arm64 on Apple Silicon) — it dies with "image ... does not
-    provide the specified platform". DOCKER_BUILDKIT=1 fixes the cross-platform
-    multi-stage pull/build (confirmed live with the exact DeployOps
-    Dockerfile)."""
+    --platform linux/amd64 when a base image is cached for another platform,
+    dying with "image ... does not provide the specified platform";
+    DOCKER_BUILDKIT=1 fixes it (confirmed live)."""
     docker_config = str(tmp_path / "docker-config")
     Path(docker_config).mkdir(parents=True, exist_ok=True)
     captured_env = {}

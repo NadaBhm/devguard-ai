@@ -54,20 +54,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# =============================================================================
-# PERSISTENT CHECKPOINTER (replaces MemorySaver - T-4.3)
-# =============================================================================
-# MemorySaver kept every paused job's state only inside the current process:
-# any backend restart (a crash, a redeploy, even `uvicorn --reload`) silently
-# lost every job waiting at a human gate, and a fresh process had no way to
-# resume a thread_id checkpointed by a dead process.
-#
-# SqliteSaver persists the same checkpoints to a file on disk, so a freshly
-# built graph in a brand new process can resume exactly where an earlier
-# process left off. Chosen over PostgresSaver because it works immediately
-# without a running Postgres (and matches devguard.db, the backend's own
-# SQLite dev database); both implement BaseCheckpointSaver, so swapping to
-# PostgresSaver later (T-5.12) is a one-line change.
+# === PERSISTENT CHECKPOINTER (replaces MemorySaver - T-4.3) ===
+# MemorySaver kept paused jobs' state only in-process: any backend restart
+# silently lost every job waiting at a human gate. SqliteSaver persists the same
+# checkpoints to disk so a fresh process resumes where the last left off;
+# chosen over PostgresSaver because it needs no running Postgres (matches
+# devguard.db), and swapping to PostgresSaver later (T-5.12) is a one-line change.
 
 CHECKPOINT_DB_PATH = os.getenv("DEVGUARD_CHECKPOINT_DB", "orchestrator_checkpoints.sqlite")
 
@@ -85,9 +77,7 @@ def _build_checkpointer() -> SqliteSaver:
     saver.setup()
     return saver
 
-# =============================================================================
-# SECTION 7: GRAPH CONSTRUCTION
-# =============================================================================
+# === GRAPH CONSTRUCTION ===
 
 
 def _wrap_node(node_func, node_name: str):
@@ -151,13 +141,10 @@ def build_orchestrator_graph() -> Any:
     return graph
 
 
-# =============================================================================
-# SECTION 7.1: GRAPH SINGLETON
-# =============================================================================
+# === GRAPH SINGLETON ===
 # The graph (and its checkpointer) must be built ONCE and reused: rebuilding
-# per call creates a fresh, empty checkpoint store, so a job paused at an
-# interrupt() would become unresumable. Built lazily on first use (typically
-# once at FastAPI app startup).
+# per call creates a fresh, empty checkpoint store, making jobs paused at an
+# interrupt() unresumable. Built lazily on first use.
 
 _graph_singleton: Optional[Any] = None
 
@@ -184,9 +171,7 @@ def reset_orchestrator_graph() -> None:
     _graph_singleton = None
 
 
-# =============================================================================
-# SECTION 8: PUBLIC API
-# =============================================================================
+# === PUBLIC API ===
 
 def _get_current_state(graph, config, fallback_state: Any) -> Any:
     """Safely fetch the latest checkpointed state from the graph."""
@@ -331,9 +316,7 @@ def resume_workflow(
         raise
 
 
-# =============================================================================
-# SECTION 9: MAIN (for testing)
-# =============================================================================
+# === MAIN (for testing) ===
 
 # Development-only demo. Not part of the shipped code path: enable explicitly
 # with DEVGUARD_DEMO=1 to run the manual "test run" walkthrough.

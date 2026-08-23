@@ -134,7 +134,6 @@ def run_secrets_scan(repo_path: Path) -> list[Secret]:
     """Run secrets detection on a repository."""
     all_findings: list[Secret] = []
 
-    # External tool fallback: try GitLeaks if installed.
     try:
         result = run_subprocess(
             ["gitleaks", "detect", "--no-git", "--report-format=json", "--path=."],
@@ -175,11 +174,9 @@ def run_secrets_scan(repo_path: Path) -> list[Secret]:
     except ScannerError:
         logger.info("GitLeaks not available; using regex fallback for secrets detection.")
 
-    # Fallback regex only if gitleaks found nothing or failed
     if not all_findings:
         all_findings = _run_regex_fallback(repo_path)
 
-    # Post-filter false positives (README, placeholders, examples)
     all_findings = [s for s in all_findings if not _is_likely_false_positive(s)]
 
     return all_findings

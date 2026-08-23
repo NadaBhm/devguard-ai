@@ -400,7 +400,6 @@ class CodeSecAgent:
         validated_url = validated_url or (str(repo_path) if repo_path is not None else repo_url)
         repo_metadata = self._get_repo_metadata(repo_path, validated_url)
 
-        # Stack detection runs once, before the parallel scanners
         stack_start = datetime.now(timezone.utc)
         _add_phase("stack_detection", PhaseStatus.RUNNING, started=stack_start)
         try:

@@ -34,9 +34,7 @@ def _has_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-not-a-real-key")
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
+# --- Nominal cases ---
 
 
 def test_call_llm_returns_message_content_from_mocked_response(
@@ -119,9 +117,7 @@ def test_call_llm_reads_provider_order_from_env_var(monkeypatch: pytest.MonkeyPa
     assert captured["provider"] == {"order": ["nvidia", "deepseek"], "allow_fallbacks": False}
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_call_llm_returns_none_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,9 +141,7 @@ def test_call_llm_env_model_used_when_no_explicit_override(
     assert captured["model"] == "mistralai/mistral-large"
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
+# --- Error cases ---
 
 
 def test_call_llm_returns_none_on_non_2xx_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,14 +170,12 @@ def test_call_llm_returns_none_on_malformed_response_shape(
 
     monkeypatch.setattr("core.llm_provider.httpx.post", _fake_post)
     # Force max-retries to 1 so the exhausted-fallback path is exercised fast,
-    # not slowed down by the backoff sleeps.
+    # not slowed by the backoff sleeps.
     monkeypatch.setattr("core.llm_provider._MAX_LLM_RETRIES", 1)
     assert call_llm(prompt="p", system_instruction="s") is None
 
 
-# --------------------------------------------------------------------------
-# Retry policy
-# --------------------------------------------------------------------------
+# --- Retry policy ---
 
 
 @pytest.fixture

@@ -40,9 +40,7 @@ def _build(analysis: RepoAnalysisInput, decision: DecisionResult, **kwargs):
     return build_output(analysis, decision, terraform_files, cost, _FALLBACK_ENRICHMENT, **kwargs)
 
 
-# --------------------------------------------------------------------------
-# Nominal cases
-# --------------------------------------------------------------------------
+# --- Nominal cases ---
 
 
 def test_ecs_fixture_builds_ecs_variant_with_nulls_elsewhere() -> None:
@@ -166,9 +164,7 @@ def test_approval_status_defaults_to_pending_and_can_be_overridden() -> None:
     assert approved_output.approval.status == "approved"
 
 
-# --------------------------------------------------------------------------
-# Limit / edge cases
-# --------------------------------------------------------------------------
+# --- Limit / edge cases ---
 
 
 def test_docker_tag_falls_back_to_latest_with_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -274,9 +270,7 @@ def test_region_and_environment_are_threaded_instead_of_hardcoded() -> None:
     }
 
 
-# --------------------------------------------------------------------------
-# Error cases
-# --------------------------------------------------------------------------
+# --- Error cases ---
 
 
 def test_unknown_compute_type_raises_key_error() -> None:

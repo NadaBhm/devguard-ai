@@ -1,18 +1,13 @@
 
 """
-CodeSec SBOM Generator
+CodeSec SBOM Generator.
 Generates Software Bill of Materials in CycloneDX format from package files.
 
-US-1.1.6: As a compliance officer, I want an SBOM so that I can track dependencies.
-
-Technology Decision (ADR):
-- Primary: cyclonedx-py — official OWASP CycloneDX tool for Python, supports
-  requirements.txt, Pipfile, poetry.lock, and installed environments. OSS,
-  Apache-2.0, outputs CycloneDX 1.5 JSON.
-- Fallback: Trivy fs --format cyclonedx — multi-ecosystem SBOM generation
-  when cyclonedx-py is unavailable or for non-Python repos.
-- Not chosen: Syft — excellent but focused on container images rather than
-  source manifest files.
+Toolchain: cyclonedx-py primary (official OWASP CycloneDX tool for Python,
+CycloneDX 1.5 JSON); Trivy fs --format cyclonedx fallback when cyclonedx-py
+is unavailable or yields nothing; direct manifest parsing as last resort.
+Syft not chosen: it focuses
+on container images rather than source manifest files.
 """
 
 from __future__ import annotations
@@ -36,10 +31,8 @@ def _parse_requirements_txt(content: str) -> list[SbomComponent]:
     components: list[SbomComponent] = []
     for raw_line in content.splitlines():
         line = raw_line.strip()
-        # Skip empty lines and pure comments
         if not line or line.startswith("#"):
             continue
-        # Remove inline comments
         if "#" in line:
             line = line.split("#")[0].strip()
         # Skip markdown fences and options (e.g. -r, -e, --index-url)
@@ -84,7 +77,6 @@ def _parse_package_json(content: str) -> list[SbomComponent]:
         data = json.loads(content)
         deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
         for name, version in deps.items():
-            # Strip semver prefixes (^, ~, >=, etc.)
             clean_version = version.lstrip("^~>=<!")
             components.append(
                 SbomComponent(
@@ -130,7 +122,6 @@ def _run_cyclonedx_py(repo_path: Path) -> SBOM | None:
 
     output_path = repo_path / ".codesec_sbom.json"
 
-    # Try poetry.lock first, then requirements.txt
     req_files = find_files(repo_path, patterns=("requirements*.txt", "poetry.lock", "Pipfile"))
     if not req_files:
         return None
@@ -246,21 +237,18 @@ def _generate_fallback_sbom(repo_path: Path) -> SBOM:
     """Generate SBOM by parsing manifest files directly when no tools are available."""
     components: list[SbomComponent] = []
 
-    # Python requirements.txt
     req_files = find_files(repo_path, patterns=("requirements*.txt",))
     for rf in req_files:
         content = read_file_safe(rf, max_size_mb=1)
         if content:
             components.extend(_parse_requirements_txt(content))
 
-    # package.json
     pkg_files = find_files(repo_path, patterns=("package.json",))
     for pf in pkg_files:
         content = read_file_safe(pf, max_size_mb=1)
         if content:
             components.extend(_parse_package_json(content))
 
-    # go.mod
     go_files = find_files(repo_path, patterns=("go.mod",))
     for gf in go_files:
         content = read_file_safe(gf, max_size_mb=1)
@@ -283,7 +271,6 @@ def generate_sbom(repo_path: Path) -> SBOM:
 
     Tries cyclonedx-py first, then Trivy, then falls back to manifest parsing.
     """
-    # Try cyclonedx-py
     try:
         sbom = _run_cyclonedx_py(repo_path)
         if sbom and sbom.components_count > 0:
@@ -292,7 +279,6 @@ def generate_sbom(repo_path: Path) -> SBOM:
     except ScannerError as exc:
         logger.warning("cyclonedx-py failed: %s", exc)
 
-    # Try Trivy
     try:
         sbom = _run_trivy_sbom(repo_path)
         if sbom and sbom.components_count > 0:
@@ -301,7 +287,6 @@ def generate_sbom(repo_path: Path) -> SBOM:
     except ScannerError as exc:
         logger.warning("Trivy SBOM failed: %s", exc)
 
-    # Fallback to manifest parsing
     sbom = _generate_fallback_sbom(repo_path)
     logger.info("Fallback SBOM generated with %d components", sbom.components_count)
     return sbom

@@ -149,10 +149,14 @@ def _apply_inferred_health_port(
             r'(?mi)^CMD\b.*?(?:--port|-p)\s*[",\s]*"?(\d+)', primary_dockerfile
         )
         m_expose = re.search(r"(?mi)^\s*EXPOSE\s+(\d+)", primary_dockerfile)
+        # Also check ENV PORT=NNNN (heroku-style apps set this in Dockerfile)
+        m_env = re.search(r'(?mi)^ENV\s+PORT\s*=\s*(\d+)', primary_dockerfile)
         # No signal, or a degenerate "0" extracted -> leave default untouched.
-        if not m_cmd and not m_expose:
+        if not m_cmd and not m_expose and not m_env:
             return
-        new_port = int(m_cmd.group(1)) if m_cmd else int(m_expose.group(1))
+        new_port = int(m_cmd.group(1)) if m_cmd else (
+            int(m_expose.group(1)) if m_expose else int(m_env.group(1))
+        )
         if not new_port:
             return
         cur = re.search(r"(?im)^\s*port\s*=\s*(\d+)", terraform_files.main_tf)

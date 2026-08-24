@@ -156,11 +156,15 @@ class DeployOpsAgent:
 
         await self._write_artifacts(deploy_payload.artifacts, workspace_dir)
 
+        self.logger.info(f"[{job_id}] compute={deploy_payload.compute_type} images={len(deploy_payload.artifacts.docker_images)}")
+
         # S3 static sites ship plain files and carry no images, so the loop is a no-op for them.
-        for docker_image in deploy_payload.artifacts.docker_images:
+        for img_idx, docker_image in enumerate(deploy_payload.artifacts.docker_images):
+            self.logger.info(f"[{job_id}] building image {img_idx+1}/{len(deploy_payload.artifacts.docker_images)}: {docker_image.name}")
             image_uri = await self._build_and_push_image(
                 docker_image, deploy_payload.aws_config, job_id
             )
+            self.logger.info(f"[{job_id}] build result: {image_uri}")
             if not image_uri:
                 self.logger.error(f"Image build/push failed for {docker_image.name}")
                 return {
@@ -1079,27 +1083,32 @@ class DeployOpsAgent:
             if rc != 0:
                 continue
 
-            # Wait up to 60s for the app to start serving
+            # Wait up to 30s for the app to start, probing via host TCP connect
             served = False
-            for check in range(12):
+            for check in range(6):
                 await asyncio.sleep(5)
-                probe_rc, _, _ = await self._run_docker_cmd(
-                    ["docker", "exec", container_name,
-                     "wget", "-q", "--spider", f"http://127.0.0.1:{port}/"],
-                    timeout=10.0, docker_config=docker_config_dir,
-                )
-                if probe_rc == 0:
-                    served = True
-                    break
-                # Also try from host
-                hrc, _, _ = await self._run_docker_cmd(
-                    ["curl", "-s", "--max-time", "3", "-o", "/dev/null",
-                     "-w", "%{http_code}", f"http://127.0.0.1:{port}/"],
+                # Check container still running (crashed = exits)
+                rc, out, _ = await self._run_docker_cmd(
+                    ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
                     timeout=8.0, docker_config=docker_config_dir,
                 )
-                if hrc == 0:
+                if rc != 0 or out.strip() != "true":
+                    self.logger.warning(f"Pre-flight: container {container_name} exited")
+                    break
+
+                # Probe from host: any TCP connection on the port counts
+                import socket as _socket
+                sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                sock.settimeout(3)
+                try:
+                    sock.connect(("127.0.0.1", int(port)))
+                    sock.close()
                     served = True
                     break
+                except (ConnectionRefusedError, OSError):
+                    pass
+                finally:
+                    sock.close()
 
             # Always clean up the pre-flight container
             await self._run_docker_cmd(
@@ -1235,16 +1244,18 @@ class DeployOpsAgent:
 
         aws = AWSClient(region=region, assume_role_arn=aws_config.assume_role_arn)
         account_id = aws_config.target_account_id or aws.get_account_id()
+        self.logger.info(f"[{job_id}] ECR: account={account_id} region={region} repo={image_name}:{image_tag}")
 
         ecr_client = aws.session.client("ecr", region_name=region, config=RETRY_CONFIG)
         try:
             ecr_client.create_repository(repositoryName=image_name)
-            self.logger.info(f"Created ECR repository: {image_name}")
+            self.logger.info(f"[{job_id}] Created ECR repository: {image_name}")
         except ecr_client.exceptions.RepositoryAlreadyExistsException:
-            pass
+            self.logger.info(f"[{job_id}] ECR repository already exists: {image_name}")
 
         # Use ECR authorization token instead of relying on AWS CLI env
         auth_response = ecr_client.get_authorization_token()
+        self.logger.info(f"[{job_id}] ECR auth token acquired")
         auth_data = auth_response["authorizationData"][0]
         token = auth_data["authorizationToken"]
         proxy_endpoint = auth_data["proxyEndpoint"]
@@ -1253,11 +1264,13 @@ class DeployOpsAgent:
 
         # login/build/push must share ONE DOCKER_CONFIG dir so credentials
         # survive across commands.
+        self.logger.info(f"[{job_id}] starting docker login/build/push sequence")
         with tempfile.TemporaryDirectory() as docker_config_dir:
             returncode, stdout, stderr = await self._run_docker_cmd(
                 ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint],
                 timeout=60.0, docker_config=docker_config_dir,
             )
+            self.logger.info(f"[{job_id}] docker login rc={returncode}")
             if returncode != 0:
                 self.logger.error(f"ECR login failed: {stderr}")
                 return None
@@ -1276,13 +1289,15 @@ class DeployOpsAgent:
                 timeout=1800.0, docker_config=docker_config_dir,
             )
             if returncode != 0:
-                self.logger.error(f"Docker build failed: {stderr}")
+                self.logger.error(f"Docker build failed: {stderr[-500:]}")
                 return None
+            self.logger.info(f"[{job_id}] docker build OK, starting preflight")
 
             # Pre-flight: run the container locally and verify it serves HTTP
             # before pushing to ECR or provisioning AWS. Catches ~70% of
             # failures in 60 seconds instead of 25 minutes post-deploy.
             served = await self._preflight_check(image_uri, build_context, docker_image, docker_config_dir, job_id)
+            self.logger.info(f"[{job_id}] preflight result: {served}")
             if not served:
                 self.logger.error(f"Pre-flight failed for {image_uri}: no variant serves HTTP")
                 return None

@@ -202,7 +202,14 @@ resource "aws_ecs_service" "this" {
     container_port   = {{ primary_container.port }}
   }
 
-  depends_on = [aws_lb_listener.this]
+  depends_on = [aws_lb_listener.this{% if database in ['postgresql', 'postgres', 'mysql'] %}, aws_db_instance.app{% endif %}]
+
+  # Wait for the app to stabilize. When a DB is provisioned alongside the
+  # service, tasks crash-loop because RDS takes 5–10 min to become ready
+  # after terraform apply finishes (the endpoint exists but isn't accepting
+  # connections yet). The health_check_grace_period tells ECS to ignore
+  # ALB health checks for this window, preventing premature rollback.
+  health_check_grace_period_seconds = {% if database %}300{% else %}30{% endif %}
 }
 
 {% if database in ['postgresql', 'postgres', 'mysql'] %}

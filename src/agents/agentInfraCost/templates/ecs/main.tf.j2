@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -202,14 +206,14 @@ resource "aws_ecs_service" "this" {
     container_port   = {{ primary_container.port }}
   }
 
-  depends_on = [aws_lb_listener.this{% if database in ['postgresql', 'postgres', 'mysql'] %}, aws_db_instance.app{% endif %}]
+  depends_on = [aws_lb_listener.this{% if database in ['postgresql', 'postgres', 'mysql'] %}, aws_db_instance.app, null_resource.db_ready{% endif %}]
 
   # Wait for the app to stabilize. When a DB is provisioned alongside the
   # service, tasks crash-loop because RDS takes 5–10 min to become ready
   # after terraform apply finishes (the endpoint exists but isn't accepting
   # connections yet). The health_check_grace_period tells ECS to ignore
   # ALB health checks for this window, preventing premature rollback.
-  health_check_grace_period_seconds = {% if database %}300{% else %}30{% endif %}
+  health_check_grace_period_seconds = {% if database in ['postgresql', 'postgres', 'mysql'] %}600{% else %}60{% endif %}
 }
 
 {% if database in ['postgresql', 'postgres', 'mysql'] %}
@@ -253,5 +257,31 @@ resource "aws_db_instance" "app" {
   skip_final_snapshot  = true
   publicly_accessible  = false
   deletion_protection  = false
+
+  # RDS takes 5-10 minutes after creation to accept connections. Without
+  # this wait, ECS tasks start immediately, crash on DB connection failure,
+  # and crash-loop — the ALB never gets a healthy target.
+  lifecycle {
+    ignore_changes = [apply_immediately]
+  }
+}
+
+# Block ECS service creation until the DB actually accepts connections.
+# Runs locally where terraform executes (has network access to RDS).
+resource "null_resource" "db_ready" {
+  count      = var.create_db ? 1 : 0
+  depends_on = [aws_db_instance.app]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      echo "Waiting for ${aws_db_instance.app[0].address}:${aws_db_instance.app[0].port}..."
+      for i in $(seq 1 60); do
+        nc -z -w 3 ${aws_db_instance.app[0].address} ${aws_db_instance.app[0].port} 2>/dev/null && echo "DB ready!" && exit 0
+        sleep 10
+      done
+      echo "WARNING: DB not reachable after 600s"
+    EOT
+    interpreter = ["/bin/bash", "-c"]
+  }
 }
 {% endif %}

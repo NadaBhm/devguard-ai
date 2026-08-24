@@ -311,8 +311,8 @@ def test_first_try_without_repo_path_skips_refiner() -> None:
 
     assert isinstance(output, EcsInfraCostOutput)
     assert output.artifacts.dockerfile is not None
-    # Stub must be runnable: WORKDIR, COPY and a CMD that serves traffic.
-    assert "COPY . ." in output.artifacts.dockerfile
+    # Template or stub must include a COPY and a CMD that serves traffic
+    assert "COPY" in output.artifacts.dockerfile
     assert "CMD" in output.artifacts.dockerfile
 
 

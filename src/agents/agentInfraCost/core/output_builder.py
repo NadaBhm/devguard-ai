@@ -30,6 +30,7 @@ from core.constants import (
     LAMBDA_TIMEOUT_SECONDS,
     S3_BUCKET_PREFIX,
 )
+from core.deploy_templates import match_template as _match_template
 from core.decision_engine import DecisionResult
 from models.input_schema import RepoAnalysisInput
 from models.output_schema import (
@@ -194,9 +195,22 @@ def resolve_docker_artifacts(
     images: list[DockerImage] = []
     for index, container in enumerate(containers):
         base_image = container.base_image or fallback_base
-        dockerfile = container.dockerfile_content or _stub_dockerfile(
-            base_image, analysis.stack_detection.primary_language
-        )
+        # Template match takes priority: proven Dockerfiles for known frameworks
+        tmpl = _match_template(
+            analysis.stack_detection.primary_language,
+            analysis.stack_detection.frameworks,
+            analysis.stack_detection.detected_files,
+        ) if index == 0 and not container.dockerfile_content else None
+
+        if tmpl:
+            dockerfile = tmpl["dockerfile"]
+            logger.info("Using deploy template for %s/%s",
+                        analysis.stack_detection.primary_language,
+                        ",".join(analysis.stack_detection.frameworks[:3]))
+        elif container.dockerfile_content:
+            dockerfile = container.dockerfile_content
+        else:
+            dockerfile = _stub_dockerfile(base_image, analysis.stack_detection.primary_language)
         images.append(
             DockerImage(
                 name=_image_name_for(container.dockerfile_path, index),

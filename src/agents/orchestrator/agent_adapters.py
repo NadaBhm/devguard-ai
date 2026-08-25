@@ -147,7 +147,9 @@ async def call_infracost(
         repo_path = tempfile.mkdtemp(prefix=f"devguard-repo-{job_id[:8]}-")
         # 50k: monorepos (next.js = 31k files) are legit; the digestor
         # self-caps reading, so a bigger tree is only a disk/time cost.
-        clone_repo(codesec_result.get("repo_url", ""), repo_path, max_files=50_000)
+        # timeout=300: 60s expired for mid-size repos while docker buildx
+        # saturated the link (same fix as codesec's _clone_repo).
+        clone_repo(codesec_result.get("repo_url", ""), repo_path, max_files=50_000, timeout=300)
         raw_input["repo_path"] = repo_path
     except Exception as exc:
         logger.warning("[%s] Could not re-clone repo for InfraCost: %s", job_id, exc)

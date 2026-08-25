@@ -18,7 +18,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-_DEFAULT_CLONE_TIMEOUT_SECONDS: int = 60
+_DEFAULT_CLONE_TIMEOUT_SECONDS: int = 300
 
 
 def clone_repo(

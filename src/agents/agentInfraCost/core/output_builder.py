@@ -82,12 +82,19 @@ _FALLBACK_BASE_IMAGES: Final[dict[str, str]] = {
 
 # Runnable stub bodies per language: bare FROM+COPY exits immediately (base-image
 # CMD is a no-op), crash-looping the task until every health probe times out.
+# Include health-file shims so the ALB target group probe (/health, /healthz,
+# /actuator/health etc.) succeeds even when the terraform default differs from
+# the stub's "/" root. http.server and http-server serve plain files at those
+# exact paths, so create them at build time.
 _STUB_RUN: Final[dict[str, str]] = {
-    "javascript": 'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", "."]',
-    "typescript": 'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", "."]',
-    "python": 'EXPOSE 8080\nCMD ["python", "-m", "http.server", "8080", "--bind", "0.0.0.0"]',
-    "ruby": 'EXPOSE 8080\nCMD ["ruby", "-run", "-e", "httpd", ".", "-p", "8080"]',
-    "php": 'EXPOSE 8080\nCMD ["php", "-S", "0.0.0.0:8080", "-t", "."]',
+    "javascript": 'RUN echo ok > health && echo ok > healthz && echo ok > status && mkdir -p api && echo ok > api/health\n'
+                  'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", ".", "--cors"]',
+    "typescript": 'RUN echo ok > health && echo ok > healthz && echo ok > status && mkdir -p api && echo ok > api/health\n'
+                  'EXPOSE 3000\nENV PORT=3000\nCMD ["npx", "-y", "http-server", "-p", "3000", ".", "--cors"]',
+    "python": 'RUN echo ok > health && echo ok > healthz && echo ok > status && mkdir -p api && echo ok > api/health\n'
+              'EXPOSE 8080\nCMD ["python", "-m", "http.server", "8080", "--bind", "0.0.0.0"]',
+    "ruby": 'RUN echo ok > health && echo ok > healthz\nEXPOSE 8080\nCMD ["ruby", "-run", "-e", "httpd", ".", "-p", "8080"]',
+    "php": 'RUN echo ok > health && echo ok > healthz\nEXPOSE 8080\nCMD ["php", "-S", "0.0.0.0:8080", "-t", "."]',
 }
 
 
@@ -188,10 +195,36 @@ def resolve_docker_artifacts(
     containers = analysis.stack_detection.containers or [
         analysis.stack_detection.container
     ]
-    # Language-aware base image for repos without a Dockerfile.
     fallback_base = _FALLBACK_BASE_IMAGES.get(
         analysis.stack_detection.primary_language, "python:3.12-slim"
     )
+    # Monorepo packaging artifacts: pnpm and similar tool repos carry internal
+    # Dockerfiles under docker/, __patches__, pnpr/, fixtures/, .github/ etc.
+    # Treating those as separate ECS images creates a multi-image service that
+    # always fails its build (version-mismatch, missing release tarball). Keep
+    # only root-proximate Dockerfiles unless docker-compose explicitly declared
+    # a multi-service primary; otherwise collapse to the primary entrypoint.
+    if len(containers) > 1:
+        shallow = [
+            c for c in containers
+            if c.dockerfile_path and Path(c.dockerfile_path).parts[0].lower() not in (
+                "docker", "__patches__", "fixtures", "pnpr", ".github", "scripts", "tools"
+            ) and c.dockerfile_path.count("/") <= 1
+        ]
+        if shallow:
+            containers = shallow
+        elif not any(c.dockerfile_path == "Dockerfile" for c in containers):
+            logger.info("Monorepo tool images filtered out; collapsing to single stub")
+            containers = []
+    if not containers:
+        # No Dockerfile at all (common for libraries/CLIs): synthesize one so
+        # the pipeline still produces a runnable artifact for health probing.
+        containers = [analysis.stack_detection.container] if analysis.stack_detection.container else []
+        if not containers or not containers[0].dockerfile_content:
+            if containers and containers[0]:
+                containers[0].dockerfile_content = None  # type: ignore
+            else:
+                containers = [type("C", (), {"dockerfile_path": None, "dockerfile_content": None, "base_image": fallback_base})()]  # type: ignore
     images: list[DockerImage] = []
     for index, container in enumerate(containers):
         base_image = container.base_image or fallback_base

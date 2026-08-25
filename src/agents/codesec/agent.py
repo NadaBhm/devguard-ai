@@ -182,11 +182,13 @@ class CodeSecAgent:
         ]
 
         try:
+            # 300s: 60s expired for 66MB repos while docker buildx saturated
+            # the link (pnpm) — clone is I/O-bound, not hung.
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=300,
                 check=False,
             )
             if result.returncode != 0:
@@ -197,7 +199,7 @@ class CodeSecAgent:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    timeout=300,
                     check=False,
                 )
             if result.returncode != 0:
@@ -216,7 +218,7 @@ class CodeSecAgent:
                     fallback_cmd,
                     capture_output=True,
                     text=True,
-                    timeout=120,
+                    timeout=300,
                     check=False,
                 )
                 if result.returncode != 0:

@@ -344,8 +344,8 @@ def test_health_path_inferred_to_root_when_app_has_no_health_route(
 
     output = run_pipeline(raw)
     main = output.artifacts.terraform.files.main_tf
-    assert 'path                = "/"' in main
-    assert 'path                = "/health"' not in main
+    # FastAPI uses /docs; the template health-path feature applies it instead of "/"
+    assert '"/docs"' in main
 
 
 def test_health_path_kept_when_app_exposes_health_route(

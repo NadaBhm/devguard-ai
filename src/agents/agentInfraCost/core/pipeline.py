@@ -137,6 +137,33 @@ def _apply_inferred_health_path(
         logger.warning("Health-path inference failed: %s", exc)
 
 
+def _apply_template_health_path(terraform_files: TerraformFiles, analysis: RepoAnalysisInput) -> None:
+    """When a deploy template matched, use its known health path in the ALB
+    target group instead of the generic '/' default. Idempotent, fail-soft."""
+    try:
+        from core.deploy_templates import match_template as _mt
+        tmpl = _mt(
+            analysis.stack_detection.primary_language,
+            analysis.stack_detection.frameworks,
+            analysis.stack_detection.detected_files,
+        )
+        if not tmpl or "health_path" not in tmpl:
+            return
+        hp = tmpl["health_path"]
+        if hp == "/":
+            return  # already the default
+        new_tf, n = re.subn(
+            r'(path\s*=\s*")/(")',
+            rf"\g<1>{hp}\g<2>",
+            terraform_files.main_tf,
+        )
+        if n:
+            terraform_files.main_tf = new_tf
+            logger.info("Template health path %s applied to target group", hp)
+    except Exception as exc:
+        logger.warning("Template health-path application failed: %s", exc)
+
+
 def _apply_inferred_health_port(
     terraform_files: TerraformFiles, primary_dockerfile: str | None
 ) -> None:
@@ -569,6 +596,8 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
         terraform_files,
         primary_image.dockerfile if primary_image else None,
     )
+    # Use framework-specific health path from deploy templates when matched
+    _apply_template_health_path(terraform_files, analysis)
 
     # Fix dev-mode CMDs to production equivalents (fail-soft).
     if primary_image and primary_image.dockerfile:

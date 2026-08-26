@@ -138,7 +138,7 @@ def test_update_ships_new_image_and_skips_terraform(deployops_agent, monkeypatch
     ecs = boto3.client("ecs", region_name="us-east-1")
     _seed_ecs_service(ecs)
 
-    async def fake_build_and_push(docker_image, aws_config, job_id):
+    async def fake_build_and_push(docker_image, aws_config, job_id, health_check_port=8080):
         assert docker_image.name == "app"
         return NEW_IMAGE
 
@@ -163,7 +163,7 @@ def test_update_build_failure_leaves_live_service_untouched(deployops_agent, mon
     _seed_ecs_service(ecs)
     original_task_def = ecs.describe_services(cluster=CLUSTER, services=[SERVICE])["services"][0]["taskDefinition"]
 
-    async def failing_build_and_push(docker_image, aws_config, job_id):
+    async def failing_build_and_push(docker_image, aws_config, job_id, health_check_port=8080):
         return None
 
     monkeypatch.setattr(deployops_agent, "_build_and_push_image", failing_build_and_push)

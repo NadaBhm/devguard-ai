@@ -12,7 +12,13 @@ export type RunState =
   | "rolled_back"
   | "rejected"
 
-export type RunStatus = "queued" | "running" | "completed" | "failed"
+export type RunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "rolled_back"
+  | "destroyed"
 export type GateName = "gate_1_pre_infracost" | "gate_2_pre_deployops"
 
 export interface JobSummary {

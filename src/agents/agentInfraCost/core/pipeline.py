@@ -9,6 +9,7 @@ failure wraps in ``PipelineStageError`` naming the stage.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 from pathlib import Path
@@ -460,6 +461,22 @@ def _run_pipeline_internal(raw: dict) -> PipelineContext:
             decision = decide_architecture_via_llm(analysis)
     except Exception as exc:
         raise PipelineStageError("decision_engine", exc) from exc
+
+    # Ops override to pin compute type (ecs|ec2|s3|lambda).
+    forced = os.getenv("DEVGUARD_FORCE_COMPUTE", "").strip().lower()
+    if forced in ("ecs", "ec2", "s3", "lambda") and decision.compute_type != forced:
+        logger.warning(
+            "DEVGUARD_FORCE_COMPUTE=%s overriding %s -> %s",
+            forced, decision.compute_type, forced,
+        )
+        from core.decision_engine import compute_sizing
+        decision.compute_type = forced  # type: ignore[assignment]
+        try:
+            decision.sizing = compute_sizing(forced, analysis)  # type: ignore[assignment]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Re-sizing failed (%s); using defaults", exc)
+            if forced == "ecs":
+                decision.sizing = {"task_cpu": "256", "task_memory": "512"}
 
     try:
         docker_images = resolve_docker_artifacts(analysis, decision)

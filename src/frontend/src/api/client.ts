@@ -34,11 +34,16 @@ async function refreshAccessToken(): Promise<boolean> {
   return true
 }
 
-async function request<T>(path: string, init: RequestInit = {}, auth = true): Promise<T> {
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  auth = true,
+  jsonContentType = true,
+): Promise<T> {
   const build = (token?: string) => ({
     ...init,
     headers: {
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.body && jsonContentType ? { "Content-Type": "application/json" } : {}),
       ...(auth && token ? { Authorization: `Bearer ${token}` } : {}),
       ...init.headers,
     },
@@ -82,4 +87,9 @@ export const client = {
     request<T>(path, { method: "PUT", body: JSON.stringify(body) }, auth),
   patch: <T>(path: string, body?: unknown, auth = true) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }, auth),
+  // FormData bodies must NOT set Content-Type: the browser fills in the
+  // multipart boundary. jsonContentType=false skips the JSON header.
+  upload: <T>(path: string, body: FormData, auth = true) =>
+    request<T>(path, { method: "POST", body }, auth, false),
+  del: <T>(path: string, auth = true) => request<T>(path, { method: "DELETE" }, auth),
 }

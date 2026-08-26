@@ -74,25 +74,8 @@ export interface DestroyResponse {
 }
 export const jobsApi = {
   create: (body: JobCreate) => client.post<JobResponse>("/jobs/", body),
-  upload: (formData: FormData) => fetch(`/api/jobs/upload`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("access_token") ?? ""}`,
-    },
-    body: formData,
-  }).then(async (res) => {
-    if (!res.ok) {
-      let detail = res.statusText
-      try {
-        const body = (await res.json()) as { detail?: string }
-        if (typeof body.detail === "string") detail = body.detail
-      } catch {
-        // non-JSON body is fine
-      }
-      throw new Error(detail)
-    }
-    return res.json() as Promise<JobResponse>
-  }),
+  remove: (jobId: string) => client.del<{ job_id: string; deleted: boolean }>(`/jobs/${jobId}`),
+upload: (formData: FormData) => client.upload<JobResponse>("/jobs/upload", formData),
   list: () => client.get<JobListResponse>("/jobs/"),
   get: (jobId: string) => client.get<JobDetail>(`/jobs/${jobId}`),
   approve: (jobId: string, body: ApproveRequest) => client.post<JobResponse>(`/jobs/${jobId}/approve`, body),

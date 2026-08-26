@@ -148,7 +148,11 @@ class DeployOpsAgent:
             from src.lib.repo import clone_repo
             try:
                 # 50k files: monorepos (next.js = 31k) are legit build contexts.
-                clone_repo(repo_url, workspace_dir, max_files=50_000, timeout=300)
+                target_sha = (deploy_payload.metadata or {}).get("commit_sha")
+                clone_repo(
+                    repo_url, workspace_dir, max_files=50_000, timeout=300,
+                    commit_sha=target_sha if target_sha and target_sha != "HEAD" else None,
+                )
                 self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
             except Exception as exc:  # noqa: BLE001 - surface as failed deploy
                 self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
@@ -397,14 +401,19 @@ class DeployOpsAgent:
         region = payload.aws_config.region
         cluster = payload.aws_config.model_dump().get("ecs_cluster") or "todo-app-cluster"
         service_name = payload.aws_config.model_dump().get("service_name") or "todo-app-dev-frontend"
+        self.logger.info(f"[ECS UPDATE {job_id}] target cluster={cluster!r} service={service_name!r} region={region}")
 
         workspace_dir = self._workspace_dir(job_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
         repo_url = (payload.metadata or {}).get("repo_url")
         if repo_url:
             from src.lib.repo import clone_repo
+            target_sha = (payload.metadata or {}).get("commit_sha")
             try:
-                clone_repo(repo_url, workspace_dir, timeout=300)
+                clone_repo(
+                    repo_url, workspace_dir, timeout=300,
+                    commit_sha=target_sha if target_sha and target_sha != "HEAD" else None,
+                )
                 self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
             except Exception as exc:  # noqa: BLE001 - surface as failed deploy
                 self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
@@ -707,25 +716,48 @@ class DeployOpsAgent:
     @xray_recorder.capture("rollback_deployment")  # type: ignore[reportCallIssue]
     async def rollback_deployment(
         self,
-        app_name: str,
-        environment: str,
+        ecs_cluster: str,
         service_name: str,
         target_revision: Optional[int] = None,
         region: str | None = None,
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Roll back/forward a live ECS service to a task-definition revision.
+        Names are used verbatim. Auto-target falls back to revision history
+        when only one live deployment exists."""
         aws = AWSClient(region=region)
-        cluster = f"{app_name}-cluster"
-        service = f"{app_name}-{environment}-{service_name}"
+        cluster = ecs_cluster
+        service = service_name
         try:
-            if target_revision is None:
-                current = aws.ecs().describe_services(cluster=cluster, services=[service])["services"][0]
-                deployments = current.get("deployments", [])
-                if len(deployments) < 2:
-                    return {"status": "failed", "error": "No previous deployment to rollback to"}
-                task_definition = deployments[1]["taskDefinition"]
+            desc = aws.ecs().describe_services(cluster=cluster, services=[service])
+            services = desc.get("services") or []
+            if not services or services[0].get("status") == "INACTIVE":
+                return {"status": "failed", "error": f"Service {service} not found in {cluster}"}
+            current_arn = services[0].get("taskDefinition")
+            current_task = (current_arn or "").rsplit("/", 1)[-1]
+            family = current_task.rsplit(":", 1)[0] if ":" in current_task else current_task
+
+            if target_revision is not None:
+                task_definition = f"{family}:{target_revision}"
+                if task_definition == current_task:
+                    return {
+                        "status": "failed",
+                        "error": f"Revision {target_revision} is already the active task definition",
+                    }
             else:
-                task_definition = f"{app_name}-{environment}-{service_name}:{target_revision}"
+                deployments = services[0].get("deployments", [])
+                prior = [d["taskDefinition"] for d in deployments if d["taskDefinition"] != current_arn]
+                if not prior:
+                    # Single live entry — check revision history.
+                    revisions = aws.ecs().list_task_definitions(
+                        familyPrefix=family,
+                        status="ACTIVE",
+                        sort="DESC",
+                    ).get("taskDefinitionArns", [])
+                    prior = [arn for arn in revisions if arn != current_arn]
+                if not prior:
+                    return {"status": "failed", "error": "No previous deployment to rollback to"}
+                task_definition = prior[0]
 
             aws.ecs().update_service(
                 cluster=cluster,
@@ -736,8 +768,7 @@ class DeployOpsAgent:
             aws.ecs().get_waiter("services_stable").wait(cluster=cluster, services=[service])
             return {
                 "status": "success",
-                "app_name": app_name,
-                "environment": environment,
+                "cluster": cluster,
                 "service": service,
                 "task_definition": task_definition,
                 "reason": reason,

@@ -496,7 +496,9 @@ def codesec_agent_impl(state: OrchestratorState) -> OrchestratorState:
     state["orchestrator_metadata"]["nodes_executed"].append("codesec_agent")
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-    state["codesec_result"] = run_sync(call_codesec(state["repo_url"], job_id))
+    state["codesec_result"] = run_sync(
+        call_codesec(state["repo_url"], job_id, commit_sha=state.get("target_commit_sha"))
+    )
 
     score = state["codesec_result"].get("security_score", {}).get("score", 0)
     grade = state["codesec_result"].get("security_score", {}).get("grade", "N/A")
@@ -581,6 +583,12 @@ def deployops_agent_impl(state: OrchestratorState) -> OrchestratorState:
             is_update=state.get("is_update", False),
             existing_deployment=state.get("existing_deployment"),
         )
+        # Pin the deploy build to the exact commit CodeSec analyzed.
+        target_sha = state.get("target_commit_sha") or (
+            ((state.get("codesec_result") or {}).get("repo_metadata") or {}).get("commit_sha")
+        )
+        if target_sha:
+            raw_output["commit_sha"] = target_sha
 
     state["deployops_result"] = cast(DeployOpsResult, run_sync(call_deployops(deploy_payload, job_id)))
 

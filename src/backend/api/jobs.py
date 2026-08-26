@@ -187,6 +187,7 @@ def _create_job_for_repo(
         repo_url=repo_url,
         thread_id=str(run.id),
         on_node_progress=_publish_node_progress(str(run.id)),
+        commit_sha=commit_sha or "HEAD",
         ))
         state["job_id"] = str(run.id)
     except Exception as exc:
@@ -305,7 +306,10 @@ def trigger_update(
 
     # "rolled_back" still counts as live: rollback swaps ECS to a previous
     # task-def revision without teardown; only "failed"/"destroyed" mean nothing to update.
-    deployment = (
+    # Prefer the NEWEST deployment whose record actually carries usable ECS
+    # targeting info — a failed later run must not block updating an older
+    # healthy service.
+    candidates = (
         db.query(models.Deployment)
         .join(models.AnalysisRun, models.Deployment.run_id == models.AnalysisRun.id)
         .filter(
@@ -313,12 +317,18 @@ def trigger_update(
             models.Deployment.status.in_(["succeeded", "rolled_back"]),
         )
         .order_by(models.Deployment.created_at.desc())
-        .first()
+        .all()
     )
+    deployment = None
+    existing = {}
+    for cand in candidates:
+        cand_cfg = _extract_aws_config(cand)
+        if cand_cfg.get("ecs_cluster") and cand_cfg.get("service_name"):
+            deployment = cand
+            existing = cand_cfg
+            break
     if not deployment:
         raise HTTPException(status_code=400, detail="No live deployment to update")
-
-    existing = _extract_aws_config(deployment)
     if not existing.get("ecs_cluster") or not existing.get("service_name"):
         raise HTTPException(
             status_code=400,
@@ -344,9 +354,16 @@ def trigger_update(
     previous_monthly_cost_usd = (
         float(sum(row[0] for row in previous_costs)) if previous_costs else None
     )
-    
+
+    # Store resolved tip SHA (not literal "HEAD") for correct check-update.
+    from src.lib.git_remote import latest_remote_sha
+    try:
+        update_target_sha = latest_remote_sha(project.github_url, project.default_branch)
+    except RuntimeError:
+        update_target_sha = "HEAD"
+
     new_run = _create_run(
-    db, project, str(current_user.id), commit_sha="HEAD", commit_message="Update deployment"
+    db, project, str(current_user.id), commit_sha=update_target_sha, commit_message="Update deployment"
     )
 
     logger.info(
@@ -368,6 +385,7 @@ def trigger_update(
             "service_name": existing["service_name"],
         },
         previous_monthly_cost_usd=previous_monthly_cost_usd,
+        commit_sha="HEAD",
         ))
         state["job_id"] = str(new_run.id)
     except Exception as exc:
@@ -603,18 +621,32 @@ def rollback_job(
     """Roll back a run's most recent deployment to a previous ECS
     task-definition revision via DeployOpsAgent, using the recorded AWS config."""
     run = _get_owned_run(db, job_id, str(current_user.id))
+    project = run.project
 
-    deployment = (
+    # Targeting comes from the newest project deployment whose record actually
+    # carries usable ECS info — a failed update run's empty record must not
+    # block rolling back the live service (same rule as trigger_update).
+    candidates = (
         db.query(models.Deployment)
-        .filter(models.Deployment.run_id == job_id)
+        .join(models.AnalysisRun, models.Deployment.run_id == models.AnalysisRun.id)
+        .filter(
+            models.AnalysisRun.project_id == project.id,
+            models.Deployment.status.in_(["succeeded", "rolled_back"]),
+        )
         .order_by(models.Deployment.created_at.desc())
-        .first()
+        .all()
     )
+    deployment = None
+    resolved: dict = {}
+    for cand in candidates:
+        cand_cfg = _extract_aws_config(cand)
+        if cand_cfg.get("ecs_cluster") and cand_cfg.get("service_name"):
+            deployment = cand
+            resolved = cand_cfg
+            break
     if not deployment:
         raise HTTPException(status_code=404, detail="No deployment found for this job")
 
-    # deployops_result stores terraform_outputs, not aws_config; reuse destroy_job's helper.
-    resolved = _extract_aws_config(deployment)
     region = resolved.get("region") or "us-east-1"
     ecs_cluster = resolved.get("ecs_cluster")
     service_name = resolved.get("service_name")
@@ -642,8 +674,7 @@ def rollback_job(
             agent = DeployOpsAgent()
             result = asyncio.run(
                 agent.rollback_deployment(
-                    app_name=ecs_cluster,
-                    environment="dev",
+                    ecs_cluster=ecs_cluster,
                     service_name=service_name,
                     target_revision=body.target_revision,
                     region=region,
@@ -678,10 +709,7 @@ class DestroyRequest(BaseModel):
 
 
 def _extract_aws_config(deployment: models.Deployment) -> dict:
-    """Resolve ecs_cluster/service_name/region from a deployment's
-    infrastructure_json: DeployOps-native ``aws_config`` shape first, falling
-    back to ``terraform_outputs`` (same suffix-derivation workaround as the
-    /monitoring endpoint) for older records with ecs_cluster_name empty."""
+    """Resolve ECS cluster/service/region from deployment record."""
     infra = deployment.infrastructure_json or {}
     aws_config = infra.get("aws_config") or {}
     region = aws_config.get("region") or deployment.aws_region or "us-east-1"
@@ -767,6 +795,60 @@ def destroy_job(
     # no_state/failed/partial_failure: don't mutate deployment.status -- resources
     # may still be live; remaining_resources shows UI what remains (destroy-decision #3).
     return {"job_id": job_id, "status": status, "result": result}
+
+
+@router.delete("/{job_id}", status_code=200)
+def delete_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Permanently remove a run and all its database history (deployments,
+    findings, cost estimates, artifacts, reports). This is the UX complement
+    to ``POST /{job_id}/destroy``: destroy tears down infrastructure but
+    keeps the record; delete removes the record itself.
+
+    Guard: runs whose latest deployment still tracks live infrastructure
+    (succeeded / applying / rolled_back) are refused — destroy first, or AWS
+    resources would outlive their only record."""
+    run = _get_owned_run(db, job_id, str(current_user.id))
+
+    deployment = (
+        db.query(models.Deployment)
+        .filter(models.Deployment.run_id == job_id)
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if deployment and deployment.status in ("succeeded", "applying", "rolled_back"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This job has a live deployment on record — destroy the "
+                "infrastructure first, then delete the job."
+            ),
+        )
+
+    db.delete(run)  # children cascade (ondelete=CASCADE + sqlite pragma)
+
+    # Best-effort: drop the LangGraph checkpoint thread so paused/resumed
+    # workflows don't leave orphan state in the checkpoints store.
+    try:
+        import sqlite3 as _sqlite3
+
+        ckpt_path = Path("orchestrator_checkpoints.sqlite")
+        if ckpt_path.exists():
+            con = _sqlite3.connect(ckpt_path)
+            con.execute("DELETE FROM checkpoints WHERE thread_id = ?", (job_id,))
+            con.execute("DELETE FROM writes WHERE thread_id = ?", (job_id,))
+            con.commit()
+            con.close()
+    except Exception as exc:  # noqa: BLE001 - checkpoint cleanup is best-effort
+        logger.warning(f"Checkpoint cleanup for {job_id} failed: {exc}")
+
+    db.commit()
+    logger.info(f"Deleted job {job_id} and its history")
+    return {"job_id": job_id, "deleted": True}
+
 
 @router.get("/{job_id}/deployments/revisions")
 def list_deployment_revisions(

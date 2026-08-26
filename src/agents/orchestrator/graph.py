@@ -167,12 +167,14 @@ def run_workflow(
     is_update: bool = False,
     existing_deployment: Optional[dict] = None,
     previous_monthly_cost_usd: Optional[float] = None,
+    commit_sha: Optional[str] = None,
 ) -> OrchestratorState:
     """
     Run the complete orchestrator workflow for a repository; pauses at human gates -- resume via
     resume_workflow(thread_id, resume_data), never by re-calling run_workflow() (new job_id).
     on_node_progress(node, state) streams per-node progress; is_update/existing_deployment/
     previous_monthly_cost_usd arrive pre-resolved from the DB for update runs (state.py).
+    commit_sha pins every clone in the pipeline to that exact commit ("HEAD"/None = tip).
     """
     graph = get_orchestrator_graph()
     state = create_initial_state(
@@ -182,6 +184,8 @@ def run_workflow(
         existing_deployment=existing_deployment,
         previous_monthly_cost_usd=previous_monthly_cost_usd,
     )
+    if commit_sha:
+        state["target_commit_sha"] = commit_sha
     config = {"configurable": {"thread_id": thread_id or state["job_id"]}}
 
     logger.info(f"Starting workflow for job {state['job_id']} | repo: {repo_url}")

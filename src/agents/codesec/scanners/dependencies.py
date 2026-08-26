@@ -148,6 +148,7 @@ def _run_trivy_fs(repo_path: Path) -> list[VulnerablePackage]:
     report_path = repo_path / ".codesec_trivy_deps.json"
     cmd = [
         tool.executable,
+        "--skip-dirs", ".venv,node_modules,__pycache__,.pytest_cache,dist,build",
         "fs",
         "--scanners=vuln",
         "--format=json",

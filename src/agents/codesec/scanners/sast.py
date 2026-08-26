@@ -78,7 +78,6 @@ def _run_semgrep(repo_path: Path) -> list[SASTFinding]:
         logger.info("No source files found for Semgrep scan.")
         return []
 
-    # FIX #4: --include takes glob patterns, not a file list path
     cmd = [
         tool.executable,
         "--config=auto",
@@ -164,7 +163,7 @@ def _run_bandit(repo_path: Path) -> list[SASTFinding]:
         "-f",
         "json",
         "-x",
-        "tests,test,venv,.venv",
+        "tests,test,venv,.venv,node_modules",
     ]
 
     try:

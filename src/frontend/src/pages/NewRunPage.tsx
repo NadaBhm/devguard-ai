@@ -31,10 +31,105 @@ export function NewRunPage() {
         formData.append("commit_sha", commitSha || "HEAD")
         formData.append("default_branch", defaultBranch)
         formData.append("source_type", "local_folder")
+
+        // 1. Dossiers à exclure (inclut les variants de venv + dossiers internes venv)
+        const SKIP_DIRS = new Set([
+          ".venv", "venv", "env", ".env", "virtualenv", ".virtualenvs", "envs",
+          "node_modules", ".git", "__pycache__", ".pytest_cache",
+          "dist", "build", ".mypy_cache", ".ruff_cache", "coverage", ".tox",
+          ".next", ".nuxt", ".output", ".vercel", ".netlify", "out",
+          ".idea", ".vscode", ".vs", ".github", ".gitlab",
+          ".cache", "tmp", "temp", "logs", "log",
+          ".venv_old_broken", ".venv_old", "venv_old", "venv_bak", "env_bak",
+          // Dossiers internes d'un venv Python (souvent en majuscule sur Windows)
+          "lib", "lib64", "include", "scripts", "bin", "share", "man",
+          "site-packages", "dist-packages", "libs",
+        ])
+
+        // 2. Extensions à garder (whitelist)
+        const KEEP_EXTS = new Set([
+          ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+          ".yml", ".yaml", ".json", ".tf", ".hcl", ".tpl",
+          ".md", ".txt", ".toml", ".ini", ".cfg", ".conf",
+          ".html", ".htm", ".css", ".scss", ".sass", ".less", ".styl",
+          ".j2", ".jinja", ".jinja2",
+          ".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd",
+          ".sql", ".graphql", ".proto", ".thrift",
+          ".rs", ".go", ".java", ".kt", ".scala", ".rb", ".php", ".cs", ".cpp", ".c", ".h", ".hpp", ".swift", ".r",
+          ".dockerfile"
+        ])
+
+        // 3. Fichiers sans extension à garder
+        const KEEP_NAMES = new Set([
+          "dockerfile", "dockerfile.dev", "dockerfile.prod", "dockerfile.test",
+          "makefile", "makefile.win", "gnumakefile",
+          "requirements.txt", "requirements-dev.txt", "requirements-test.txt",
+          "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+          "pyproject.toml", "setup.py", "setup.cfg", "poetry.lock", "pipfile", "pipfile.lock",
+          "tsconfig.json", "jsconfig.json",
+          "vite.config.ts", "vite.config.js", "vite.config.mjs",
+          "tailwind.config.js", "tailwind.config.ts",
+          "next.config.js", "next.config.ts",
+          "jest.config.js", "jest.config.ts",
+          "babel.config.js", ".babelrc", ".babelrc.json",
+          ".eslintrc", ".eslintrc.json", ".eslintrc.js", ".eslintrc.yaml",
+          ".prettierrc", ".prettierrc.json", ".prettierrc.js",
+          ".gitignore", ".gitattributes", ".editorconfig", ".dockerignore", ".npmignore",
+          "manifest.json", "robots.txt", "sitemap.xml",
+          ".env", ".env.example", ".env.local", ".env.development", ".env.production",
+          "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+          "nginx.conf", "apache.conf", "httpd.conf"
+        ])
+
+        let fileCount = 0
+        const dirCounts: Record<string, number> = {}
+        const passedFiles: string[] = []
+
         Array.from(uploadedFiles).forEach((file) => {
           const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
-          formData.append("files", file, relPath)
+          const parts = relPath.split(/[/\\]/)
+
+          // Skip excluded directories
+          if (parts.some(part => SKIP_DIRS.has(part.toLowerCase()))) return
+
+          const nameLower = file.name.toLowerCase()
+          const ext = nameLower.includes(".") ? nameLower.slice(nameLower.lastIndexOf(".")) : ""
+
+          // Keep by extension
+          if (KEEP_EXTS.has(ext)) {
+            formData.append("files", file, relPath)
+            fileCount++
+            const topDir = parts[0] || "root"
+            dirCounts[topDir] = (dirCounts[topDir] || 0) + 1
+            if (passedFiles.length < 20) passedFiles.push(relPath)
+            return
+          }
+
+          // Keep by exact filename
+          if (KEEP_NAMES.has(nameLower)) {
+            formData.append("files", file, relPath)
+            fileCount++
+            const topDir = parts[0] || "root"
+            dirCounts[topDir] = (dirCounts[topDir] || 0) + 1
+            if (passedFiles.length < 20) passedFiles.push(relPath)
+            return
+          }
+
+          // Skip everything else
         })
+
+        console.log("=== UPLOAD DIAGNOSTIC ===")
+        console.log("Files per top directory:", dirCounts)
+        console.log("First 20 files passing filter:", passedFiles)
+        console.log("=========================")
+
+        alert(`Uploading ${fileCount} files (skipped ${uploadedFiles.length - fileCount})\n\nTop dirs: ${JSON.stringify(dirCounts, null, 2).slice(0, 500)}`)
+        if (fileCount === 0) {
+          throw new Error("No valid files to upload after filtering.")
+        }
+        if (fileCount > 2000) {
+          throw new Error(`Too many files (${fileCount}). Check console (F12) for diagnostic.`)
+        }
 
         return jobsApi.upload(formData)
       }

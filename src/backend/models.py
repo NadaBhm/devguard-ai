@@ -325,6 +325,32 @@ class Deployment(Base):
     )
 
 
+class DeploymentMonitoringSnapshot(Base):
+    """A point-in-time snapshot of a deployment's live AWS status, recorded
+    each time GET /monitoring is polled -- powers the monitoring history
+    chart (running task count + estimated cost over time) without needing
+    real AWS billing data, which this project has no access to."""
+    __tablename__ = "deployment_monitoring_snapshots"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    deployment_id = Column(String, ForeignKey("deployments.id", ondelete="CASCADE"), nullable=False, index=True)
+    checked_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    status = Column(String(50), nullable=True)
+    desired_count = Column(Integer, nullable=True)
+    running_count = Column(Integer, nullable=True)
+    pending_count = Column(Integer, nullable=True)
+    healthy_targets = Column(Integer, nullable=True)
+    unhealthy_targets = Column(Integer, nullable=True)
+    estimated_monthly_cost_usd = Column(Numeric(12, 2), nullable=True)
+
+    deployment = relationship("Deployment", backref="monitoring_snapshots")
+
+    __table_args__ = (
+        Index("idx_monitoring_snapshots_deployment_id", "deployment_id"),
+        Index("idx_monitoring_snapshots_checked_at", "checked_at"),
+    )
+
+
 class Notification(Base):
     __tablename__ = "notifications"
 

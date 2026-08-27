@@ -72,6 +72,46 @@ export interface DestroyResponse {
     }
   }
 }
+export interface MonitoringSnapshot {
+  checked_at: string
+  status: string | null
+  desired_count: number | null
+  running_count: number | null
+  pending_count: number | null
+  healthy_targets: number | null
+  unhealthy_targets: number | null
+  estimated_monthly_cost_usd: number | null
+}
+export interface MonitoringHistoryResponse {
+  job_id: string
+  snapshots: MonitoringSnapshot[]
+}
+export interface MonitoringTargetHealth {
+  target_id?: string
+  port?: number
+  state?: string
+  reason?: string
+}
+export interface MonitoringResponse {
+  job_id: string
+  ecs_cluster?: string
+  service_name?: string
+  status: string
+  detail?: string
+  desired_count?: number
+  running_count?: number
+  pending_count?: number
+  deployments?: Array<{
+    status?: string
+    rollout_state?: string
+    rollout_state_reason?: string
+    desired_count?: number
+    running_count?: number
+  }>
+  target_health?: MonitoringTargetHealth[]
+  target_health_error?: string | null
+  estimated_monthly_cost_usd?: number | null
+}
 export const jobsApi = {
   create: (body: JobCreate) => client.post<JobResponse>("/jobs/", body),
   remove: (jobId: string) => client.del<{ job_id: string; deleted: boolean }>(`/jobs/${jobId}`),
@@ -88,6 +128,10 @@ upload: (formData: FormData) => client.upload<JobResponse>("/jobs/upload", formD
     client.post<DestroyResponse>(`/jobs/${jobId}/destroy`, body),
   deploymentRevisions: (jobId: string) =>
     client.get<DeploymentRevisionsResponse>(`/jobs/${jobId}/deployments/revisions`),
+  monitoring: (jobId: string) =>
+    client.get<MonitoringResponse>(`/jobs/${jobId}/monitoring`),
+  monitoringHistory: (jobId: string) =>
+    client.get<MonitoringHistoryResponse>(`/jobs/${jobId}/monitoring/history`),
   checkUpdate: (jobId: string) =>
     client.get<CheckUpdateResponse>(`/jobs/${jobId}/check-update`),
   triggerUpdate: (jobId: string) =>

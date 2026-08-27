@@ -32,6 +32,7 @@ from ..persistence import (
 )
 from ..redis_client import publish_gate, publish_progress, publish_results_ready
 from src.agents.orchestrator.agent_adapters import report_mode
+from src.lib.aws.client import AWSClient, RETRY_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +308,7 @@ def trigger_update(
     # "rolled_back" still counts as live: rollback swaps ECS to a previous
     # task-def revision without teardown; only "failed"/"destroyed" mean nothing to update.
     # Prefer the NEWEST deployment whose record actually carries usable ECS
-    # targeting info — a failed later run must not block updating an older
+    # targeting info ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a failed later run must not block updating an older
     # healthy service.
     candidates = (
         db.query(models.Deployment)
@@ -624,7 +625,7 @@ def rollback_job(
     project = run.project
 
     # Targeting comes from the newest project deployment whose record actually
-    # carries usable ECS info — a failed update run's empty record must not
+    # carries usable ECS info ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a failed update run's empty record must not
     # block rolling back the live service (same rule as trigger_update).
     candidates = (
         db.query(models.Deployment)
@@ -809,7 +810,7 @@ def delete_job(
     keeps the record; delete removes the record itself.
 
     Guard: runs whose latest deployment still tracks live infrastructure
-    (succeeded / applying / rolled_back) are refused — destroy first, or AWS
+    (succeeded / applying / rolled_back) are refused ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â destroy first, or AWS
     resources would outlive their only record."""
     run = _get_owned_run(db, job_id, str(current_user.id))
 
@@ -823,7 +824,7 @@ def delete_job(
         raise HTTPException(
             status_code=409,
             detail=(
-                "This job has a live deployment on record — destroy the "
+                "This job has a live deployment on record ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â destroy the "
                 "infrastructure first, then delete the job."
             ),
         )
@@ -930,6 +931,195 @@ def list_deployment_revisions(
         "job_id": job_id,
         "service": result.get("service"),
         "versions": result.get("versions", []),
+    }
+
+
+@router.get("/{job_id}/monitoring")
+def get_deployment_monitoring(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Live status of a job's deployed AWS resources -- ECS service health,
+    ALB target health, and current monthly cost estimate. Queries AWS
+    directly rather than trusting what Terraform reported at apply time,
+    since a service can drift long after a successful deploy with no
+    visibility into it otherwise. Each call also records a snapshot row so
+    the frontend's polling naturally builds a history for the monitoring
+    chart, without needing real AWS billing data."""
+    _get_owned_run(db, job_id, str(current_user.id))
+    deployment = (
+        db.query(models.Deployment)
+        .filter(models.Deployment.run_id == job_id)
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if not deployment:
+        raise HTTPException(status_code=404, detail="No deployment found for this job")
+
+    resolved = _extract_aws_config(deployment)
+    region = resolved.get("region") or "us-east-1"
+    ecs_cluster = resolved.get("ecs_cluster")
+    service_name = resolved.get("service_name")
+
+    if not ecs_cluster or not service_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Deployment has no ECS cluster/service info to monitor",
+        )
+
+    def _save_snapshot(**fields) -> None:
+        # Best-effort: a failed snapshot write must never break the live
+        # status response the user is waiting on.
+        try:
+            db.add(models.DeploymentMonitoringSnapshot(deployment_id=deployment.id, **fields))
+            db.commit()
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            logger.warning(f"[{job_id}] Failed to save monitoring snapshot: {exc}")
+
+    try:
+        aws = AWSClient(region=region)
+        ecs = aws.session.client("ecs", region_name=region, config=RETRY_CONFIG)
+        try:
+            svc_resp = ecs.describe_services(cluster=ecs_cluster, services=[service_name])
+        except ecs.exceptions.ClusterNotFoundException:
+            # The cluster itself is gone (fully destroyed, or the guessed
+            # name from _extract_aws_config never existed) -- this is a
+            # normal "nothing left to monitor" outcome, not a fetch failure.
+            _save_snapshot(status="not_found")
+            return {
+                "job_id": job_id,
+                "ecs_cluster": ecs_cluster,
+                "service_name": service_name,
+                "status": "not_found",
+                "detail": "ECS cluster no longer exists in AWS (possibly destroyed).",
+            }
+        services = svc_resp.get("services") or []
+        if not services or services[0].get("status") == "INACTIVE":
+            _save_snapshot(status="not_found")
+            return {
+                "job_id": job_id,
+                "ecs_cluster": ecs_cluster,
+                "service_name": service_name,
+                "status": "not_found",
+                "detail": "Service no longer exists in AWS (possibly rolled back or destroyed).",
+            }
+        svc = services[0]
+
+        target_health: list[dict] = []
+        target_health_error = None
+        healthy_count = 0
+        unhealthy_count = 0
+        elbv2 = aws.session.client("elbv2", region_name=region, config=RETRY_CONFIG)
+        for lb in svc.get("loadBalancers", []):
+            tg_arn = lb.get("targetGroupArn")
+            if not tg_arn:
+                continue
+            try:
+                health_resp = elbv2.describe_target_health(TargetGroupArn=tg_arn)
+                for entry in health_resp.get("TargetHealthDescriptions", []):
+                    state = entry.get("TargetHealth", {}).get("State")
+                    if state == "healthy":
+                        healthy_count += 1
+                    elif state:
+                        unhealthy_count += 1
+                    target_health.append({
+                        "target_id": entry.get("Target", {}).get("Id"),
+                        "port": entry.get("Target", {}).get("Port"),
+                        "state": state,
+                        "reason": entry.get("TargetHealth", {}).get("Reason"),
+                    })
+            except Exception as tg_exc:  # noqa: BLE001
+                # The ECS service can outlive its target group (e.g. a
+                # partial rollback/destroy) -- still return the ECS-level
+                # status rather than failing the whole endpoint.
+                target_health_error = str(tg_exc)
+
+        cost = float(deployment.cost_total_monthly) if deployment.cost_total_monthly else None
+
+        _save_snapshot(
+            status=svc.get("status"),
+            desired_count=svc.get("desiredCount"),
+            running_count=svc.get("runningCount"),
+            pending_count=svc.get("pendingCount"),
+            healthy_targets=healthy_count,
+            unhealthy_targets=unhealthy_count,
+            estimated_monthly_cost_usd=cost,
+        )
+
+        return {
+            "job_id": job_id,
+            "ecs_cluster": ecs_cluster,
+            "service_name": service_name,
+            "status": svc.get("status"),
+            "desired_count": svc.get("desiredCount"),
+            "running_count": svc.get("runningCount"),
+            "pending_count": svc.get("pendingCount"),
+            "deployments": [
+                {
+                    "status": d.get("status"),
+                    "rollout_state": d.get("rolloutState"),
+                    "rollout_state_reason": d.get("rolloutStateReason"),
+                    "desired_count": d.get("desiredCount"),
+                    "running_count": d.get("runningCount"),
+                }
+                for d in svc.get("deployments", [])
+            ],
+            "target_health": target_health,
+            "target_health_error": target_health_error,
+            "estimated_monthly_cost_usd": cost,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[{job_id}] Monitoring fetch failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"Could not fetch live AWS status: {exc}") from exc
+
+
+@router.get("/{job_id}/monitoring/history")
+def get_monitoring_history(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Snapshot history for the monitoring chart -- one point per past call
+    to GET /monitoring, oldest first."""
+    _get_owned_run(db, job_id, str(current_user.id))
+    deployment = (
+        db.query(models.Deployment)
+        .filter(models.Deployment.run_id == job_id)
+        .order_by(models.Deployment.created_at.desc())
+        .first()
+    )
+    if not deployment:
+        raise HTTPException(status_code=404, detail="No deployment found for this job")
+
+    snapshots = (
+        db.query(models.DeploymentMonitoringSnapshot)
+        .filter(models.DeploymentMonitoringSnapshot.deployment_id == deployment.id)
+        .order_by(models.DeploymentMonitoringSnapshot.checked_at.asc())
+        .limit(200)
+        .all()
+    )
+
+    return {
+        "job_id": job_id,
+        "snapshots": [
+            {
+                "checked_at": s.checked_at,
+                "status": s.status,
+                "desired_count": s.desired_count,
+                "running_count": s.running_count,
+                "pending_count": s.pending_count,
+                "healthy_targets": s.healthy_targets,
+                "unhealthy_targets": s.unhealthy_targets,
+                "estimated_monthly_cost_usd": (
+                    float(s.estimated_monthly_cost_usd) if s.estimated_monthly_cost_usd is not None else None
+                ),
+            }
+            for s in snapshots
+        ],
     }
 
 

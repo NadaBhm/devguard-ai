@@ -107,11 +107,16 @@ def _create_run(
 
 def _store_uploaded_files(files: list[UploadFile], job_id: str) -> Path:
     base_dir = Path(tempfile.mkdtemp(prefix=f"devguard_upload_{job_id}_"))
+    # Dossiers à ignorer complètement
+    SKIP_DIRS = {".venv", "node_modules", ".git", "__pycache__", ".pytest_cache", "dist", "build"}
     for uploaded in files:
         if not uploaded.filename:
             continue
         relative = PurePosixPath(uploaded.filename)
         if relative.is_absolute() or any(part in ("..", "") for part in relative.parts):
+            continue
+        # Ignore si le fichier est dans un dossier exclu
+        if any(part in SKIP_DIRS for part in relative.parts):
             continue
         target = base_dir.joinpath(*relative.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -234,7 +239,7 @@ def create_job(
 
 
 @router.post("/upload", status_code=201)
-def upload_job(
+async def upload_job(
     files: list[UploadFile] = File(...),
     commit_sha: str = Form("HEAD"),
     commit_message: str | None = Form(default=None),

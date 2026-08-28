@@ -260,7 +260,8 @@ class CodeSecAgent:
     def _get_repo_metadata(self, repo_path: Path, repo_url: str) -> RepoMetadata:
         """Extract repository metadata from cloned directory."""
         repo_name = repo_url.rstrip("/").split("/")[-1]
-        total_files = sum(1 for _ in repo_path.rglob("*") if _.is_file())
+        SKIP_DIRS = {".venv", "node_modules", ".git", "__pycache__", ".pytest_cache", "dist", "build"}
+        total_files = sum(1 for f in repo_path.rglob("*") if f.is_file() and not any(part in SKIP_DIRS for part in f.relative_to(repo_path).parts))
         lang_breakdown = get_language_breakdown(repo_path)
         total_loc = sum(lang_breakdown.values())
 
@@ -385,6 +386,15 @@ class CodeSecAgent:
             if repo_path is None:
                 repo_path = self._clone_repo(validated_url or "", job_id, commit_sha=commit_sha)
             else:
+                # Local path: apply same size/file limits as cloned repos
+                total_size = sum(f.stat().st_size for f in repo_path.rglob("*") if f.is_file())
+                total_size_mb = total_size / (1024 * 1024)
+                if total_size_mb > MAX_REPO_SIZE_MB:
+                    raise RuntimeError(f"Local folder exceeds {MAX_REPO_SIZE_MB} MB limit ({total_size_mb:.1f} MB)")
+                total_files = sum(1 for _ in repo_path.rglob("*") if _.is_file())
+                if total_files > MAX_FILES_PER_REPO:
+                     raise RuntimeError(f"Local folder exceeds {MAX_FILES_PER_REPO} file limit ({total_files} files)")
+    
                 # Local path: run RAG ingestion if available
                 try:
                     from lib.rag.ingestion import ingest_repo

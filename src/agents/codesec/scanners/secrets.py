@@ -136,7 +136,10 @@ def run_secrets_scan(repo_path: Path) -> list[Secret]:
 
     try:
         result = run_subprocess(
-            ["gitleaks", "detect", "--no-git", "--report-format=json", "--path=."],
+            [
+                "gitleaks", "detect", "--no-git", "--report-format=json", "--path=.",
+                "--exclude-folders=.venv,node_modules,__pycache__,.pytest_cache,dist,build",
+            ],
             cwd=repo_path,
             timeout=60,
         )

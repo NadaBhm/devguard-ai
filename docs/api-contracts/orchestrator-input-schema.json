@@ -1031,6 +1031,48 @@
     "__interrupt__": {
       "type": "array",
       "description": "Ajoute par LangGraph quand le workflow est en pause sur une gate humaine. ATTENTION: en memoire, les elements sont des OBJETS Python langgraph.types.Interrupt (avec .value et .id), PAS des dicts JSON - l'etat retourne par graph.invoke() n'est donc pas serialisable tel quel. Le backend les retire/aplatit avant persistance (cf. src/backend/persistence.py). Aucune contrainte sur les items ici, precisement parce que leur type differe entre l'etat en memoire et sa forme serialisee. Declare car additionalProperties=false ferait autrement echouer la validation de tout job en attente d'approbation - soit l'essentiel de sa duree de vie."
+    },
+    "target_commit_sha": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Commit pin: set by the backend when the run targets a specific commit ('HEAD'/absent = default-branch tip). CodeSec/InfraCost/DeployOps clone this exact SHA so check-update compares the deployed revision against the remote tip."
+    },
+    "is_update": {
+      "type": "boolean",
+      "description": "'Update deployment' flow flag: set once by the backend; deployops_agent_impl redeploys onto the existing ECS service instead of provisioning fresh infra."
+    },
+    "existing_deployment": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "{region, ecs_cluster, service_name} of the live deployment an update run targets.",
+      "properties": {
+        "region": {
+          "type": "string"
+        },
+        "ecs_cluster": {
+          "type": "string"
+        },
+        "service_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "region",
+        "ecs_cluster",
+        "service_name"
+      ],
+      "additionalProperties": false
+    },
+    "previous_monthly_cost_usd": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Previous monthly cost carried by update runs so Gate 2 can show a cost delta."
     }
   },
   "required": [

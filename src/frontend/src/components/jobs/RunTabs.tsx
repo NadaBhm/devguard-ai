@@ -1,6 +1,6 @@
 import { Link, useSearchParams } from "react-router-dom"
 
-export type RunTab = "overview" | "codesec" | "infracost" | "artifacts" | "deploy"
+export type RunTab = "overview" | "codesec" | "infracost" | "artifacts" | "deploy" | "monitoring"
 
 const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -8,6 +8,7 @@ const TABS: Array<{ id: RunTab; label: string }> = [
   { id: "infracost", label: "InfraCost" },
   { id: "artifacts", label: "Artifacts" },
   { id: "deploy", label: "Deploy" },
+  { id: "monitoring", label: "Monitoring" },
 ]
 
 // Legacy: pre-rename URLs used ?tab=terraform.

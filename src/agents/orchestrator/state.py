@@ -172,14 +172,11 @@ class OrchestratorState(TypedDict):
     infracost_feedback: Optional[str]
     infracost_iterations: list[InfracostIteration]
 
-    # "Update deployment" flow: set once, up front, by the backend (which has
-    # DB access the orchestrator itself never does) and threaded through
-    # unchanged so deployops_agent_impl can redeploy onto the existing ECS
-    # service instead of provisioning fresh infra, and human_gate_2 can show
-    # a cost delta instead of only the new total.
+    # Update flow: redeploy onto live ECS service.
     is_update: bool
     existing_deployment: Optional[ExistingDeploymentInfo]
     previous_monthly_cost_usd: Optional[float]
+    target_commit_sha: Optional[str]
 
 
 def create_initial_state(

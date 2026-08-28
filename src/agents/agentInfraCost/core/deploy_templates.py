@@ -13,9 +13,10 @@ from typing import Optional
 
 # Each entry: (base_image, build_steps, expose_port, health_path, start_cmd)
 _TEMPLATES: dict[tuple[str, str], dict] = {
-    # --- Java / Spring Boot ---
+    # --- Java / Spring Boot (Maven) ---
     ("java", "spring"): {
         "base_image": "eclipse-temurin:17-jre",
+        "build_tool": "maven",
         "build": (
             "FROM maven:3.9-eclipse-temurin-17 AS builder\n"
             "WORKDIR /app\n"
@@ -27,6 +28,27 @@ _TEMPLATES: dict[tuple[str, str], dict] = {
             "FROM eclipse-temurin:17-jre\n"
             "WORKDIR /app\n"
             "COPY --from=builder /app/target/*.jar app.jar\n"
+            "EXPOSE 8080\n"
+            'HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8080/ || exit 1\n'
+            'CMD ["java", "-jar", "app.jar"]\n'
+        ),
+        "health_path": "/actuator/health",
+    },
+    # --- Java / Spring Boot (Gradle) ---
+    ("java", "gradle_spring"): {
+        "base_image": "eclipse-temurin:17-jre",
+        "build_tool": "gradle",
+        "build": (
+            "FROM gradle:8.5-jdk17 AS builder\n"
+            "WORKDIR /app\n"
+            "{copy_deps}\n"
+            "{copy_src}\n"
+            "RUN gradle bootJar --no-daemon -x test\n"
+        ),
+        "runtime": (
+            "FROM eclipse-temurin:17-jre\n"
+            "WORKDIR /app\n"
+            "COPY --from=builder /app/build/libs/*.jar app.jar\n"
             "EXPOSE 8080\n"
             'HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8080/ || exit 1\n'
             'CMD ["java", "-jar", "app.jar"]\n'
@@ -155,7 +177,18 @@ def match_template(
 
     file_set = {f.lower() for f in detected_files}
 
-    # Try exact (lang, framework) match first
+    # Java: detect build tool from presence of pom.xml vs build.gradle
+    if lang == "java" and "spring" in norm_fws:
+        if "pom.xml" in file_set:
+            tmpl = _TEMPLATES.get(("java", "spring"))
+            if tmpl:
+                return _resolve_template(tmpl, lang, "spring", file_set)
+        elif any(f in file_set for f in ("build.gradle", "build.gradle.kts")):
+            tmpl = _TEMPLATES.get(("java", "gradle_spring"))
+            if tmpl:
+                return _resolve_template(tmpl, lang, "gradle_spring", file_set)
+
+    # Try exact (lang, framework) match
     for fw in norm_fws:
         key = (lang, fw)
         tmpl = _TEMPLATES.get(key)

@@ -478,6 +478,8 @@ async def test_rollback_service_not_found(mock_aws_client, agent, sample_payload
 @patch("src.agents.deployops.agent.AWSClient")
 @patch("src.agents.deployops.agent.TerraformRunner")
 async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
+    # Mock preflight to always pass
+    agent._preflight_check = AsyncMock(return_value=True)
     tf_instance = MagicMock()
     tf_instance.init.return_value = True
     tf_instance.plan.return_value = {"planned": "changes"}
@@ -524,6 +526,7 @@ async def test_deploy_full_success(mock_tf_runner, mock_aws_client, mock_create_
 @patch("src.agents.deployops.agent.TerraformRunner")
 @patch("src.lib.repo.clone_repo")
 async def test_deploy_clones_repo_into_workspace(mock_clone, mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
+    agent._preflight_check = AsyncMock(return_value=True)
     """A payload carrying metadata.repo_url must clone the source into the
     build workspace, otherwise a real image build has no package.json and dies
     (npm ci)."""
@@ -575,6 +578,7 @@ async def test_deploy_clones_repo_into_workspace(mock_clone, mock_tf_runner, moc
 @patch("src.agents.deployops.agent.AWSClient")
 @patch("src.agents.deployops.agent.TerraformRunner")
 async def test_deploy_health_check_fails_calls_rollback(mock_tf_runner, mock_aws_client, mock_create_subprocess_exec, mock_create_subprocess_shell, agent, sample_payload):
+    agent._preflight_check = AsyncMock(return_value=True)
     tf_instance = MagicMock()
     tf_instance.init.return_value = True
     tf_instance.plan.return_value = {"planned": "changes"}

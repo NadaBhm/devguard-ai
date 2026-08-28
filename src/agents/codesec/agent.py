@@ -161,8 +161,23 @@ class CodeSecAgent:
 
         return cleaned
 
-    def _clone_repo(self, repo_url: str, job_id: str) -> Path:
-        """Clone a repository to the local filesystem."""
+    def _clone_repo(self, repo_url: str, job_id: str, commit_sha: str | None = None) -> Path:
+        """Clone a repository to the local filesystem. ``commit_sha`` pins the
+        checkout to that exact commit via the shared helper (None = tip)."""
+        if commit_sha and commit_sha != "HEAD":
+            repo_name = repo_url.rstrip("/").split("/")[-1]
+            target_dir = self.clone_dir / f"{job_id}_{repo_name}"
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            logger.info("Cloning %s @ %s into %s", repo_url, commit_sha, target_dir)
+            from src.lib.repo import clone_repo as _shared_clone
+            return _shared_clone(
+                repo_url, target_dir,
+                max_size_mb=MAX_REPO_SIZE_MB,
+                max_files=MAX_FILES_PER_REPO,
+                timeout=300,
+                commit_sha=commit_sha,
+            )
         repo_name = repo_url.rstrip("/").split("/")[-1]
         target_dir = self.clone_dir / f"{job_id}_{repo_name}"
 
@@ -182,11 +197,13 @@ class CodeSecAgent:
         ]
 
         try:
+            # 300s: 60s expired for 66MB repos while docker buildx saturated
+            # the link (pnpm) — clone is I/O-bound, not hung.
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=300,
                 check=False,
             )
             if result.returncode != 0:
@@ -197,7 +214,7 @@ class CodeSecAgent:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=60,
+                    timeout=300,
                     check=False,
                 )
             if result.returncode != 0:
@@ -216,7 +233,7 @@ class CodeSecAgent:
                     fallback_cmd,
                     capture_output=True,
                     text=True,
-                    timeout=120,
+                    timeout=300,
                     check=False,
                 )
                 if result.returncode != 0:
@@ -324,14 +341,9 @@ class CodeSecAgent:
 
         return results
 
-    async def analyze(self, repo_url: str, job_id: str | None = None) -> CodeSecResult:
-        """
-        Run the complete CodeSec analysis pipeline.
-
-        Raises:
-            ValueError: If URL is invalid.
-            RuntimeError: If cloning or scanning fails critically.
-        """
+    async def analyze(self, repo_url: str, job_id: str | None = None, commit_sha: str | None = None) -> CodeSecResult:
+        """Run the complete CodeSec analysis pipeline. ``commit_sha`` pins
+        checkout to that commit (None/HEAD = tip)."""
         import uuid
 
         job_id = job_id or str(uuid.uuid4())
@@ -372,7 +384,7 @@ class CodeSecAgent:
         _add_phase("clone", PhaseStatus.RUNNING, started=clone_start)
         try:
             if repo_path is None:
-                repo_path = self._clone_repo(validated_url or "", job_id)
+                repo_path = self._clone_repo(validated_url or "", job_id, commit_sha=commit_sha)
             else:
                 # Local path: apply same size/file limits as cloned repos
                 total_size = sum(f.stat().st_size for f in repo_path.rglob("*") if f.is_file())
@@ -541,6 +553,6 @@ class CodeSecAgent:
         )
         return result
 
-    def analyze_sync(self, repo_url: str, job_id: str | None = None) -> CodeSecResult:
+    def analyze_sync(self, repo_url: str, job_id: str | None = None, commit_sha: str | None = None) -> CodeSecResult:
         """Synchronous wrapper for analyze()."""
-        return asyncio.run(self.analyze(repo_url, job_id))
+        return asyncio.run(self.analyze(repo_url, job_id, commit_sha))

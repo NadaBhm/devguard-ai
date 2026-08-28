@@ -53,7 +53,7 @@ def run_sync(coro: Any) -> Any:
         return pool.submit(asyncio.run, coro).result()
 
 
-async def call_codesec(repo_url: str, job_id: str) -> dict[str, Any]:
+async def call_codesec(repo_url: str, job_id: str, commit_sha: str | None = None) -> dict[str, Any]:
     if not use_real_codesec():
         from .nodes import build_mock_codesec_result
         logger.info("[%s] CodeSec: MOCK mode (set DEVGUARD_REAL_CODESEC=1 for real)", job_id)
@@ -61,9 +61,10 @@ async def call_codesec(repo_url: str, job_id: str) -> dict[str, Any]:
 
     from src.agents.codesec.agent import CodeSecAgent
 
-    logger.info("[%s] CodeSec: REAL agent on %s", job_id, repo_url)
+    logger.info("[%s] CodeSec: REAL agent on %s%s", job_id, repo_url,
+                f" @ {commit_sha}" if commit_sha and commit_sha != "HEAD" else "")
     agent = CodeSecAgent()
-    result = await agent.analyze(repo_url, job_id)
+    result = await agent.analyze(repo_url, job_id, commit_sha=commit_sha)
 
     payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else dict(result)
 
@@ -142,12 +143,21 @@ async def call_infracost(
         if iteration_number is not None:
             raw_input["regen_iteration"] = iteration_number
 
+    # Pin the re-clone to the same commit CodeSec analyzed so the refiner
+    # digests the exact code that will be built/deployed.
+    target_sha = codesec_result.get("target_commit_sha") or (
+        (codesec_result.get("repo_metadata") or {}).get("commit_sha")
+    )
     try:
         from src.lib.repo import clone_repo
         repo_path = tempfile.mkdtemp(prefix=f"devguard-repo-{job_id[:8]}-")
         # 50k: monorepos (next.js = 31k files) are legit; the digestor
         # self-caps reading, so a bigger tree is only a disk/time cost.
-        clone_repo(codesec_result.get("repo_url", ""), repo_path, max_files=50_000)
+        clone_repo(
+            codesec_result.get("repo_url", ""), repo_path,
+            max_files=50_000, timeout=300,
+            commit_sha=target_sha if target_sha and target_sha != "HEAD" else None,
+        )
         raw_input["repo_path"] = repo_path
     except Exception as exc:
         logger.warning("[%s] Could not re-clone repo for InfraCost: %s", job_id, exc)
@@ -313,6 +323,17 @@ def translate_infracost_to_deploy_payload(
     artifacts = deploy_inputs.get("artifacts") or {}
     aws_config = deploy_inputs.get("aws_config") or {}
     deployment_config = deploy_inputs.get("deployment_config") or {}
+
+    # Update runs must target the live ECS service — force ecs if needed.
+    if is_update and existing_deployment and compute_type != "ecs":
+        logger.warning(
+            "[%s] Update run: InfraCost picked %r but the live deployment is "
+            "ECS — forcing ecs so the revision swap targets the real service.",
+            job_id,
+            compute_type,
+        )
+        compute_type = "ecs"
+        deploy_inputs["compute_type"] = "ecs"
 
     if compute_type not in ("ecs", "ec2", "s3"):
         if compute_type == "lambda" and os.getenv("DEVGUARD_FORCE_COMPUTE_ECS", "1").lower() == "1":
@@ -496,6 +517,10 @@ def translate_infracost_to_deploy_payload(
         },
         "metadata": (
             ({"repo_url": repo_url} if repo_url else {})
+            | (
+                {"commit_sha": commit_sha}
+                if (commit_sha := deploy_inputs.get("commit_sha")) else {}
+            )
             | ({"ecs_update_only": True} if is_update else {})
         ),
         "compute_type": compute_type,
@@ -516,7 +541,20 @@ async def call_deployops(deploy_payload: dict[str, Any], job_id: str) -> dict[st
     agent = DeployOpsAgent()
     raw = await agent.deploy(deploy_payload)
 
-    return translate_deployops_result(raw, job_id)
+    result = translate_deployops_result(raw, job_id)
+
+    # Update runs have no terraform outputs — inherit targeting.
+    if deploy_payload.get("metadata", {}).get("ecs_update_only"):
+        tf_out = result.setdefault("terraform_outputs", {})
+        existing = {
+            "ecs_cluster_name": (deploy_payload.get("aws_config") or {}).get("ecs_cluster") or "",
+            "service_name": (deploy_payload.get("aws_config") or {}).get("service_name") or "",
+        }
+        for key, value in existing.items():
+            if not tf_out.get(key):
+                tf_out[key] = value
+
+    return result
 
 
 def translate_deployops_result(raw: dict[str, Any], job_id: str) -> dict[str, Any]:
@@ -551,8 +589,19 @@ def translate_deployops_result(raw: dict[str, Any], job_id: str) -> dict[str, An
         "rollback_reason": raw.get("error") if not succeeded else None,
         "error": raw.get("error"),
         "terraform_outputs": {
-            "ecs_cluster_name": _tf_out("ecs_cluster_name"),
+            # Template output names vary across compute types/generations: ECS
+            # emits cluster_name/service_name/load_balancer_dns_name while the
+            # legacy shape was ecs_cluster_name/alb_dns — try every known alias
+            # or update-deployment records end with an empty cluster and the
+            # backend refuses updates with cluster_was_guessed.
+            "ecs_cluster_name": (
+                _tf_out("ecs_cluster_name") or _tf_out("cluster_name")
+            ),
             "service_name": _tf_out("service_name"),
-            "alb_dns": _tf_out("alb_dns") or _tf_out("alb_dns_name"),
+            "alb_dns": (
+                _tf_out("alb_dns")
+                or _tf_out("alb_dns_name")
+                or _tf_out("load_balancer_dns_name")
+            ),
         },
     }

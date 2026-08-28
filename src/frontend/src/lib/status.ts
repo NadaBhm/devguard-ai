@@ -8,6 +8,8 @@ export const statusMeta: Record<RunStatus, { label: string; tone: BadgeTone }> =
   running: { label: "Running", tone: "info" },
   completed: { label: "Completed", tone: "success" },
   failed: { label: "Failed", tone: "danger" },
+  rolled_back: { label: "Rolled back", tone: "warning" },
+  destroyed: { label: "Destroyed", tone: "neutral" },
 }
 
 export const runStateMeta: Record<string, { label: string; tone: BadgeTone }> = {

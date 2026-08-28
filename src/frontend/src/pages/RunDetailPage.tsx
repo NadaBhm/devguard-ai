@@ -14,10 +14,11 @@ import { CodeSecTab } from "../components/findings/CodeSecTabContent"
 import { InfraCostTab } from "../components/cost/InfraCostTabContent"
 import { TerraformTab } from "../components/terraform/TerraformTabContent"
 import { DeployTab } from "../components/deploy/DeployTabContent"
+import { MonitoringTab } from "../components/monitoring/MonitoringTabContent"
 import { formatCurrency, formatDate, formatDuration, shortId } from "../lib/format"
 import type { GateContext, JobDetail, JobState, RunState } from "../types/jobs"
 
-const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "artifacts", "deploy"]
+const VALID_TABS: RunTab[] = ["overview", "codesec", "infracost", "artifacts", "deploy", "monitoring"]
 
 // Legacy: pre-rename URLs used ?tab=terraform.
 const LEGACY_TAB_ALIASES: Record<string, RunTab> = { terraform: "artifacts" }
@@ -133,7 +134,7 @@ export function RunDetailPage() {
     return (
       <div className="flex items-center justify-center gap-3 py-24 text-muted">
         <Spinner size={20} />
-        <span className="text-sm">Loading run…</span>
+        <span className="text-sm">Loading runâ€¦</span>
       </div>
     )
   }
@@ -166,7 +167,7 @@ export function RunDetailPage() {
         </div>
         {lastProgress?.type === "progress" && ws.status === "open" && (
           <span className="rounded-full border border-accent/25 bg-accent/10 px-3 py-1 text-[12px] text-accent">
-            {lastProgress.message || "Running…"}
+            {lastProgress.message || "Runningâ€¦"}
           </span>
         )}
       </header>
@@ -233,7 +234,7 @@ export function RunDetailPage() {
                       <span className="font-mono text-foreground">{t.agent_name}</span>
                       <span className="text-faint">{t.status}</span>
                       {t.retry_count > 0 && (
-                        <span className="ml-auto text-[12px] text-faint">retried {t.retry_count}×</span>
+                        <span className="ml-auto text-[12px] text-faint">retried {t.retry_count}Ã—</span>
                       )}
                     </li>
                   ))}
@@ -248,7 +249,7 @@ export function RunDetailPage() {
                     <li key={i} className="flex items-start gap-2 text-[12.5px]">
                       <span className="mt-0.5 size-1.5 shrink-0 rounded-full bg-critical" />
                       <span className="text-muted">
-                        <span className="font-mono text-critical">{err.node}</span> · {err.message}
+                        <span className="font-mono text-critical">{err.node}</span> Â· {err.message}
                       </span>
                     </li>
                   ))}
@@ -287,6 +288,12 @@ export function RunDetailPage() {
       {activeTab === "deploy" && (
         <div className="overflow-hidden rounded-lg border border-border bg-surface">
           <DeployTab deployments={results?.deployments ?? []} jobId={jobId} />
+        </div>
+      )}
+
+      {activeTab === "monitoring" && (
+        <div className="overflow-hidden rounded-lg border border-border bg-surface">
+          <MonitoringTab jobId={jobId} deployments={results?.deployments ?? []} />
         </div>
       )}
     </div>

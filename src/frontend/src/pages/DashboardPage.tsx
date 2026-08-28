@@ -110,7 +110,7 @@ export function DashboardPage() {
         acc[j.status] += 1
         return acc
       },
-      { queued: 0, running: 0, completed: 0, failed: 0 },
+      { queued: 0, running: 0, completed: 0, failed: 0, rolled_back: 0, destroyed: 0 },
     )
     const totalFindings = detailRows.reduce((s, r) => s + r.findings, 0)
     const totalMonthly = detailRows.reduce((s, r) => s + r.costMonthly, 0)

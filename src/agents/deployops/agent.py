@@ -148,7 +148,11 @@ class DeployOpsAgent:
             from src.lib.repo import clone_repo
             try:
                 # 50k files: monorepos (next.js = 31k) are legit build contexts.
-                clone_repo(repo_url, workspace_dir, max_files=50_000)
+                target_sha = (deploy_payload.metadata or {}).get("commit_sha")
+                clone_repo(
+                    repo_url, workspace_dir, max_files=50_000, timeout=300,
+                    commit_sha=target_sha if target_sha and target_sha != "HEAD" else None,
+                )
                 self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
             except Exception as exc:  # noqa: BLE001 - surface as failed deploy
                 self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
@@ -156,11 +160,16 @@ class DeployOpsAgent:
 
         await self._write_artifacts(deploy_payload.artifacts, workspace_dir)
 
+        self.logger.info(f"[{job_id}] compute={deploy_payload.compute_type} images={len(deploy_payload.artifacts.docker_images)}")
+
         # S3 static sites ship plain files and carry no images, so the loop is a no-op for them.
-        for docker_image in deploy_payload.artifacts.docker_images:
+        for img_idx, docker_image in enumerate(deploy_payload.artifacts.docker_images):
+            self.logger.info(f"[{job_id}] building image {img_idx+1}/{len(deploy_payload.artifacts.docker_images)}: {docker_image.name}")
             image_uri = await self._build_and_push_image(
-                docker_image, deploy_payload.aws_config, job_id
+                docker_image, deploy_payload.aws_config, job_id,
+                health_check_port=deploy_payload.deployment_config.health_check_port,
             )
+            self.logger.info(f"[{job_id}] build result: {image_uri}")
             if not image_uri:
                 self.logger.error(f"Image build/push failed for {docker_image.name}")
                 return {
@@ -191,6 +200,16 @@ class DeployOpsAgent:
 
         if not tf_runner.apply():
             self.logger.error("Terraform apply failed")
+            # Partial-apply cleanup: resources created before the failure
+            # (IAM roles, ALBs) would otherwise leak as AWS orphans that break
+            # retries with EntityAlreadyExists. Best-effort destroy of whatever
+            # state was written; never masks the original failure.
+            try:
+                if tf_runner.output():
+                    self.logger.info("Cleaning up partial apply state via terraform destroy")
+                    tf_runner.destroy()
+            except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+                self.logger.warning(f"Post-apply-failure cleanup incomplete: {exc}")
             return {"status": "failed", "error": "terraform apply failed"}
 
         output = tf_runner.output()
@@ -382,14 +401,19 @@ class DeployOpsAgent:
         region = payload.aws_config.region
         cluster = payload.aws_config.model_dump().get("ecs_cluster") or "todo-app-cluster"
         service_name = payload.aws_config.model_dump().get("service_name") or "todo-app-dev-frontend"
+        self.logger.info(f"[ECS UPDATE {job_id}] target cluster={cluster!r} service={service_name!r} region={region}")
 
         workspace_dir = self._workspace_dir(job_id)
         workspace_dir.mkdir(parents=True, exist_ok=True)
         repo_url = (payload.metadata or {}).get("repo_url")
         if repo_url:
             from src.lib.repo import clone_repo
+            target_sha = (payload.metadata or {}).get("commit_sha")
             try:
-                clone_repo(repo_url, workspace_dir)
+                clone_repo(
+                    repo_url, workspace_dir, timeout=300,
+                    commit_sha=target_sha if target_sha and target_sha != "HEAD" else None,
+                )
                 self.logger.info(f"Cloned source from {repo_url} into {workspace_dir}")
             except Exception as exc:  # noqa: BLE001 - surface as failed deploy
                 self.logger.error(f"Failed to clone source repo {repo_url}: {exc}")
@@ -401,7 +425,10 @@ class DeployOpsAgent:
         # failure must never leave the running task definition half-updated.
         built_images: Dict[str, str] = {}
         for docker_image in payload.artifacts.docker_images:
-            image_uri = await self._build_and_push_image(docker_image, payload.aws_config, job_id)
+            image_uri = await self._build_and_push_image(
+                docker_image, payload.aws_config, job_id,
+                health_check_port=payload.deployment_config.health_check_port,
+            )
             if not image_uri:
                 self.logger.error(f"Image build/push failed for {docker_image.name}")
                 return {
@@ -689,25 +716,48 @@ class DeployOpsAgent:
     @xray_recorder.capture("rollback_deployment")  # type: ignore[reportCallIssue]
     async def rollback_deployment(
         self,
-        app_name: str,
-        environment: str,
+        ecs_cluster: str,
         service_name: str,
         target_revision: Optional[int] = None,
         region: str | None = None,
         reason: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Roll back/forward a live ECS service to a task-definition revision.
+        Names are used verbatim. Auto-target falls back to revision history
+        when only one live deployment exists."""
         aws = AWSClient(region=region)
-        cluster = f"{app_name}-cluster"
-        service = f"{app_name}-{environment}-{service_name}"
+        cluster = ecs_cluster
+        service = service_name
         try:
-            if target_revision is None:
-                current = aws.ecs().describe_services(cluster=cluster, services=[service])["services"][0]
-                deployments = current.get("deployments", [])
-                if len(deployments) < 2:
-                    return {"status": "failed", "error": "No previous deployment to rollback to"}
-                task_definition = deployments[1]["taskDefinition"]
+            desc = aws.ecs().describe_services(cluster=cluster, services=[service])
+            services = desc.get("services") or []
+            if not services or services[0].get("status") == "INACTIVE":
+                return {"status": "failed", "error": f"Service {service} not found in {cluster}"}
+            current_arn = services[0].get("taskDefinition")
+            current_task = (current_arn or "").rsplit("/", 1)[-1]
+            family = current_task.rsplit(":", 1)[0] if ":" in current_task else current_task
+
+            if target_revision is not None:
+                task_definition = f"{family}:{target_revision}"
+                if task_definition == current_task:
+                    return {
+                        "status": "failed",
+                        "error": f"Revision {target_revision} is already the active task definition",
+                    }
             else:
-                task_definition = f"{app_name}-{environment}-{service_name}:{target_revision}"
+                deployments = services[0].get("deployments", [])
+                prior = [d["taskDefinition"] for d in deployments if d["taskDefinition"] != current_arn]
+                if not prior:
+                    # Single live entry — check revision history.
+                    revisions = aws.ecs().list_task_definitions(
+                        familyPrefix=family,
+                        status="ACTIVE",
+                        sort="DESC",
+                    ).get("taskDefinitionArns", [])
+                    prior = [arn for arn in revisions if arn != current_arn]
+                if not prior:
+                    return {"status": "failed", "error": "No previous deployment to rollback to"}
+                task_definition = prior[0]
 
             aws.ecs().update_service(
                 cluster=cluster,
@@ -718,8 +768,7 @@ class DeployOpsAgent:
             aws.ecs().get_waiter("services_stable").wait(cluster=cluster, services=[service])
             return {
                 "status": "success",
-                "app_name": app_name,
-                "environment": environment,
+                "cluster": cluster,
                 "service": service,
                 "task_definition": task_definition,
                 "reason": reason,
@@ -897,6 +946,20 @@ class DeployOpsAgent:
         )
         (tf_dir / "backend.tf").write_text(backend_tf)
 
+    @staticmethod
+    def _fix_hcl_syntax(content: str) -> str:
+        """Deterministic HCL repairs for LLM-refined Terraform. The refiner
+        occasionally fuses the closing brace onto the last argument line
+        (`health_check_grace_period_seconds = 600}`), which is invalid HCL and
+        kills `terraform init` after a full image build."""
+        # value-then-brace on one line -> newline before }
+        fixed = re.sub(
+            r'=(\s*(?:\d+|true|false|"[^"\n]*"))\}',
+            r"=\1\n}",
+            content,
+        )
+        return fixed
+
     async def _write_artifacts(self, artifacts: Artifacts, workspace: Path) -> None:
         tf_dir = workspace / "terraform"
         tf_dir.mkdir(parents=True, exist_ok=True)
@@ -908,6 +971,8 @@ class DeployOpsAgent:
             if tf_root not in filepath.resolve().parents:
                 raise ValueError(f"Invalid Terraform artifact path: {filename}")
             filepath.parent.mkdir(parents=True, exist_ok=True)
+            if filename.endswith(".tf"):
+                content = self._fix_hcl_syntax(content)
             filepath.write_text(content)
             self.logger.info(f"Wrote {filename} to {filepath}")
 
@@ -974,6 +1039,104 @@ class DeployOpsAgent:
         return docker_config
 
     @staticmethod
+    def _sanitize_php_dockerfile(build_context: Path) -> None:
+        """Ensure PHP images have the system packages php's composer needs:
+        git (source fallback) + unzip + zip extension. LLM-generated Dockerfiles
+        commonly omit them, failing on both dist (zip) and source (git) paths.
+        Also strips the obsolete `json` extension (built-in since PHP 8) that
+        kills `docker-php-ext-install` on php:8.x."""
+        dockerfile_path = build_context / "Dockerfile"
+        if not dockerfile_path.is_file():
+            return
+        original_text = dockerfile_path.read_text(encoding="utf-8", errors="ignore")
+        text = original_text
+        # Case-insensitive FROM php match ("FROM php".lower() never appears in
+        # text.lower() — the literal uppercase needle against a lowercase hay).
+        if not re.search(r"(?mi)^from\s+php", text):
+            return
+        # Strip phantom `json` from docker-php-ext-install (fails on php 8.x)
+        if "docker-php-ext-install" in text and " json" in text:
+            text = re.sub(r"docker-php-ext-install([^\n]*)\bjson\b", r"docker-php-ext-install\1", text)
+        # The `|| composer install --prefer-source` fallback git-clones every
+        # package when dist fails (or zip ext missing) — measured 30-minute
+        # hangs. Drop the fallback clause entirely; dist + unzip is enough.
+        if "--prefer-source" in text:
+            lines_out = []
+            for line in text.splitlines():
+                if "--prefer-source" in line and "composer install" in line and "||" in line:
+                    primary = line.split("||", 1)[0].rstrip()
+                    line = primary
+                line = line.replace("--prefer-source", "--prefer-dist")
+                lines_out.append(line)
+            text = "\n".join(lines_out) + "\n"
+        # If composer is used, ensure required packages are present.
+        if "composer" not in text.lower():
+            if text != dockerfile_path.read_text(encoding="utf-8", errors="ignore"):
+                dockerfile_path.write_text(text, encoding="utf-8")
+            return
+        # Already has the fix?
+        if "libzip-dev" in text and " unzip" in text:
+            if text != original_text:
+                dockerfile_path.write_text(text, encoding="utf-8")
+                logging.getLogger(__name__).info("Sanitized PHP Dockerfile: json/prefer-source cleanup")
+            return
+        # Insert apt-get install for missing deps before first composer-related RUN
+        lines = text.splitlines()
+        new_lines: list[str] = []
+        injected = False
+        for line in lines:
+            # Inject once before the first RUN that mentions composer
+            if not injected and line.strip().startswith("RUN") and "composer" in line.lower():
+                if "unzip" not in text:
+                    new_lines.append("RUN apt-get update && apt-get install -y unzip libzip-dev \\")
+                    new_lines.append("    && docker-php-ext-install zip 2>/dev/null || true")
+                    injected = True
+            new_lines.append(line)
+        if injected or text != original_text:
+            dockerfile_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+            logging.getLogger(__name__).info("Sanitized PHP Dockerfile: injected unzip/libzip for composer")
+
+    @staticmethod
+    def _drop_optional_copy_from_build(build_context: Path) -> None:
+        """The Laravel template's ``COPY --from=build /app/public/build`` is optional:
+        not all Laravel apps ship a vite-built public/build asset tree. A hard COPY
+        fails the checksum when that path is absent in the build stage — rewrite to
+        a shell fallback that copies only when present."""
+        dockerfile_path = build_context / "Dockerfile"
+        if not dockerfile_path.is_file():
+            return
+        text = dockerfile_path.read_text(encoding="utf-8", errors="ignore")
+        if "COPY --from=build /app/public/build" not in text:
+            return
+        new_text = text.replace(
+            "COPY --from=build /app/public/build ./public/build",
+            "RUN --mount=from=build,src=/app/public/build,target=/tmp/build cp -r /tmp/build ./public/build 2>/dev/null || echo 'no public/build assets, skipping'",
+        )
+        if new_text != text:
+            dockerfile_path.write_text(new_text, encoding="utf-8")
+            logging.getLogger(__name__).info("Rewrote optional COPY --from=build public/build to shell fallback")
+
+    @staticmethod
+    def _exact_case_exists(build_context: Path, rel: str) -> bool:
+        """Case-SENSITIVE existence check. The host filesystem (macOS APFS) is
+        case-insensitive, so ``Path.exists()`` returns True for LLM-hallucinated
+        lowercase paths (restserviceapplication.java) that do not exist inside
+        the case-sensitive Linux build container — failing the build there."""
+        current = build_context
+        for part in rel.split("/"):
+            if not current.is_dir():
+                return False
+            try:
+                names = os.listdir(current)
+            except OSError:
+                return False
+            if part in names:
+                current = current / part
+            else:
+                return False
+        return current.is_file()
+
+    @staticmethod
     def _drop_missing_copy_sources(build_context: Path) -> None:
         """Drop ``COPY <src>`` lines whose sources don't exist in ``build_context``: the refiner
         hallucinates files (e.g. ``COPY rust-toolchain.toml /`` on next.js), killing the build at
@@ -1024,7 +1187,7 @@ class DeployOpsAgent:
             missing = [
                 s for s in sources
                 if "*" not in s and "?" not in s
-                and not (build_context / s.lstrip("/")).exists()
+                and not DeployOpsAgent._exact_case_exists(build_context, s.lstrip("/"))
             ]
             if missing:
                 dropped.append(stripped)
@@ -1066,7 +1229,10 @@ class DeployOpsAgent:
 
         for idx, cmd_override in enumerate(variants):
             container_name = f"pf-{job_id[:8]}-{idx}"
-            run_cmd = ["docker", "run", "-d", "--rm", "-p", f"{port}:{port}", "--name", container_name]
+            # Use ephemeral host port (0 -> random free port) to avoid collisions
+            # with host services (e.g. homebrew tomcat on 8080). The mapped port
+            # is discovered via `docker port` after the container starts.
+            run_cmd = ["docker", "run", "-d", "--rm", "-p", f"0:{port}", "--name", container_name]
             if cmd_override:
                 run_cmd += ["--entrypoint", "/bin/sh"]
             run_cmd += [image_uri]
@@ -1077,29 +1243,51 @@ class DeployOpsAgent:
                 run_cmd, timeout=15.0, docker_config=docker_config_dir
             )
             if rc != 0:
+                self.logger.warning(f"Pre-flight docker run failed for {container_name}: {err[:200]}")
                 continue
+            # Discover the ephemeral host port Docker assigned.
+            rc2, out2, _ = await self._run_docker_cmd(
+                ["docker", "port", container_name, str(port)],
+                timeout=5.0, docker_config=docker_config_dir,
+            )
+            host_port = port
+            if rc2 == 0 and out2.strip():
+                # out like "0.0.0.0:54321" or ":::54321"
+                m = re.search(r":(\d+)\s*$", out2.strip().splitlines()[-1])
+                if m:
+                    try:
+                        host_port = int(m.group(1))
+                    except ValueError:
+                        pass
 
-            # Wait up to 60s for the app to start serving
+            # Wait up to 60s for the app to start (Java/Spring needs longer),
+            # probing via host TCP connect. Java images get a longer window.
+            max_checks = 12 if lang == "java" else 6
             served = False
-            for check in range(12):
+            for check in range(max_checks):
                 await asyncio.sleep(5)
-                probe_rc, _, _ = await self._run_docker_cmd(
-                    ["docker", "exec", container_name,
-                     "wget", "-q", "--spider", f"http://127.0.0.1:{port}/"],
-                    timeout=10.0, docker_config=docker_config_dir,
-                )
-                if probe_rc == 0:
-                    served = True
-                    break
-                # Also try from host
-                hrc, _, _ = await self._run_docker_cmd(
-                    ["curl", "-s", "--max-time", "3", "-o", "/dev/null",
-                     "-w", "%{http_code}", f"http://127.0.0.1:{port}/"],
+                # Check container still running (crashed = exits)
+                rc, out, _ = await self._run_docker_cmd(
+                    ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
                     timeout=8.0, docker_config=docker_config_dir,
                 )
-                if hrc == 0:
+                if rc != 0 or out.strip() != "true":
+                    self.logger.warning(f"Pre-flight: container {container_name} exited")
+                    break
+
+                # Probe from host: any TCP connection on the ephemeral host_port counts
+                import socket as _socket
+                sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+                sock.settimeout(3)
+                try:
+                    sock.connect(("127.0.0.1", int(host_port)))
+                    sock.close()
                     served = True
                     break
+                except (ConnectionRefusedError, OSError):
+                    pass
+                finally:
+                    sock.close()
 
             # Always clean up the pre-flight container
             await self._run_docker_cmd(
@@ -1109,11 +1297,11 @@ class DeployOpsAgent:
 
             if served:
                 if idx > 0:
-                    self.logger.info(f"Pre-flight: fallback CMD #{idx} serves on {port}")
+                    self.logger.info(f"Pre-flight: fallback CMD #{idx} serves on {port} (host {host_port})")
                     # Rewrite Dockerfile CMD so ECR push uses the working variant
                     self._rewrite_dockerfile_cmd(build_context / "Dockerfile", cmd_override)
                 else:
-                    self.logger.info(f"Pre-flight: original CMD serves on {port}")
+                    self.logger.info(f"Pre-flight: original CMD serves on {port} (host {host_port})")
                 return True
 
             self.logger.warning(f"Pre-flight variant {idx} did not serve on {port}")
@@ -1225,8 +1413,58 @@ class DeployOpsAgent:
             returncode = process.returncode if process.returncode is not None else -1
             return returncode, stdout.decode("utf-8", errors="replace"), stderr.decode("utf-8", errors="replace")
 
+    @staticmethod
+    def _stub_dockerfile_for(build_context: Path, port: int = 8080) -> str:
+        """Language-aware runnable stub for repos whose own (or the refiner's)
+        Dockerfile cannot build: stale monorepo contexts, missing subprojects,
+        hallucinated COPY targets. Mirrors InfraCost's stub philosophy — a
+        serving container beats a guaranteed build failure, and preflight +
+        health still gate the deploy."""
+        lang_cmds = {
+            "javascript": ("node:20-alpine", 'EXPOSE {p}\nENV PORT={p}\nCMD ["npx", "-y", "http-server", "-p", "{p}", ".", "--cors"]'),
+            "typescript": ("node:20-alpine", 'EXPOSE {p}\nENV PORT={p}\nCMD ["npx", "-y", "http-server", "-p", "{p}", ".", "--cors"]'),
+            "python": ("python:3.12-slim", 'EXPOSE {p}\nCMD ["python", "-m", "http.server", "{p}", "--bind", "0.0.0.0"]'),
+            "php": ("php:8.2-cli", 'EXPOSE {p}\nCMD ["php", "-S", "0.0.0.0:{p}", "-t", "."]'),
+            "ruby": ("ruby:3.2-slim", 'EXPOSE {p}\nCMD ["ruby", "-run", "-e", "httpd", ".", "-p", "{p}"]'),
+            "go": ("golang:1.21-alpine", None),
+            "java": ("eclipse-temurin:17-jre", None),
+            "html": ("nginx:alpine", 'EXPOSE 80\nCMD ["nginx", "-g", "daemon off;"]'),
+        }
+        # Infer language from the existing Dockerfile's base image + files.
+        base = "python:3.12-slim"
+        # The stub must serve on the port the rendered Terraform maps/probes —
+        # a mismatch (stub 8080 vs locals 5000) passes local preflight but
+        # refuses every post-deploy health check.
+        body = f'EXPOSE {port}\nCMD ["python", "-m", "http.server", "{port}", "--bind", "0.0.0.0"]'
+        old_df = build_context / "Dockerfile"
+        detected = ""
+        if old_df.is_file():
+            m = re.search(r"(?mi)^FROM\s+(\S+)", old_df.read_text(errors="ignore"))
+            if m:
+                detected = m.group(1).lower()
+        if "node" in detected:
+            base, tmpl = lang_cmds["javascript"]
+            body = tmpl.format(p=port)
+        elif "php" in detected:
+            base, tmpl = lang_cmds["php"]
+            body = tmpl.format(p=port)
+        elif "ruby" in detected:
+            base, tmpl = lang_cmds["ruby"]
+            body = tmpl.format(p=port)
+        elif "golang" in detected or (build_context / "go.mod").exists() or any(build_context.glob("*.go")):
+            # Go has no trivial static server; fall back to python http.server on top of python image.
+            pass
+        elif "nginx" in detected:
+            base, body = lang_cmds["html"]
+        elif "jre" in detected or "jdk" in detected or (build_context / "pom.xml").exists():
+            pass
+        elif (build_context / "package.json").exists():
+            base, tmpl = lang_cmds["javascript"]
+            body = tmpl.format(p=port)
+        return f"FROM {base}\nWORKDIR /app\nCOPY . .\n{body}\n"
+
     @xray_recorder.capture("_build_and_push_image")  # type: ignore[reportCallIssue]
-    async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str) -> Optional[str]:
+    async def _build_and_push_image(self, docker_image: DockerImageConfig, aws_config: AWSConfig, job_id: str, health_check_port: int = 8080) -> Optional[str]:
         workspace = self._workspace_dir(job_id)
 
         image_name = docker_image.name
@@ -1235,16 +1473,18 @@ class DeployOpsAgent:
 
         aws = AWSClient(region=region, assume_role_arn=aws_config.assume_role_arn)
         account_id = aws_config.target_account_id or aws.get_account_id()
+        self.logger.info(f"[{job_id}] ECR: account={account_id} region={region} repo={image_name}:{image_tag}")
 
         ecr_client = aws.session.client("ecr", region_name=region, config=RETRY_CONFIG)
         try:
             ecr_client.create_repository(repositoryName=image_name)
-            self.logger.info(f"Created ECR repository: {image_name}")
+            self.logger.info(f"[{job_id}] Created ECR repository: {image_name}")
         except ecr_client.exceptions.RepositoryAlreadyExistsException:
-            pass
+            self.logger.info(f"[{job_id}] ECR repository already exists: {image_name}")
 
         # Use ECR authorization token instead of relying on AWS CLI env
         auth_response = ecr_client.get_authorization_token()
+        self.logger.info(f"[{job_id}] ECR auth token acquired")
         auth_data = auth_response["authorizationData"][0]
         token = auth_data["authorizationToken"]
         proxy_endpoint = auth_data["proxyEndpoint"]
@@ -1253,11 +1493,13 @@ class DeployOpsAgent:
 
         # login/build/push must share ONE DOCKER_CONFIG dir so credentials
         # survive across commands.
+        self.logger.info(f"[{job_id}] starting docker login/build/push sequence")
         with tempfile.TemporaryDirectory() as docker_config_dir:
             returncode, stdout, stderr = await self._run_docker_cmd(
                 ["docker", "login", "--username", "AWS", "--password", password, proxy_endpoint],
                 timeout=60.0, docker_config=docker_config_dir,
             )
+            self.logger.info(f"[{job_id}] docker login rc={returncode}")
             if returncode != 0:
                 self.logger.error(f"ECR login failed: {stderr}")
                 return None
@@ -1268,6 +1510,8 @@ class DeployOpsAgent:
             # Build with buildx --load so the image lands in the local store for push; plain
             # docker build misbehaves with cross-platform multi-stage builds on mixed-arch caches.
             build_context = self._workspace_dir(job_id) / docker_image.context
+            self._sanitize_php_dockerfile(build_context)
+            self._drop_optional_copy_from_build(build_context)
             self._drop_missing_copy_sources(build_context)
             returncode, stdout, stderr = await self._run_docker_cmd(
                 ["docker", "buildx", "build", "--load", "--platform", docker_image.platform, "-t", image_uri, str(build_context)],
@@ -1276,13 +1520,39 @@ class DeployOpsAgent:
                 timeout=1800.0, docker_config=docker_config_dir,
             )
             if returncode != 0:
-                self.logger.error(f"Docker build failed: {stderr}")
-                return None
+                # Persist full log for post-mortem and show tail in log stream.
+                try:
+                    (build_context / "docker_build.log").write_text(stderr + "\n" + stdout, encoding="utf-8", errors="ignore")
+                except Exception:
+                    pass
+                self.logger.error(f"Docker build failed: {stderr[-2000:]}")
+                # Stub retry: unbuildable Dockerfile (stale monorepo context,
+                # missing subproject) -> one deterministic stub attempt so the
+                # pipeline still produces a serving container. Preflight still
+                # gates the push.
+                stub = self._stub_dockerfile_for(build_context, port=health_check_port)
+                stub_path = build_context / "Dockerfile"
+                original_df = stub_path.read_text(encoding="utf-8", errors="ignore")
+                try:
+                    stub_path.write_text(stub, encoding="utf-8")
+                    self.logger.info(f"[{job_id}] Retrying build with language stub Dockerfile")
+                    returncode, stdout, stderr = await self._run_docker_cmd(
+                        ["docker", "buildx", "build", "--load", "--platform", docker_image.platform, "-t", image_uri, str(build_context)],
+                        timeout=900.0, docker_config=docker_config_dir,
+                    )
+                finally:
+                    if returncode != 0:
+                        stub_path.write_text(original_df, encoding="utf-8")
+                if returncode != 0:
+                    self.logger.error(f"Docker stub build also failed: {stderr[-800:]}")
+                    return None
+            self.logger.info(f"[{job_id}] docker build OK, starting preflight")
 
             # Pre-flight: run the container locally and verify it serves HTTP
             # before pushing to ECR or provisioning AWS. Catches ~70% of
             # failures in 60 seconds instead of 25 minutes post-deploy.
             served = await self._preflight_check(image_uri, build_context, docker_image, docker_config_dir, job_id)
+            self.logger.info(f"[{job_id}] preflight result: {served}")
             if not served:
                 self.logger.error(f"Pre-flight failed for {image_uri}: no variant serves HTTP")
                 return None

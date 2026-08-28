@@ -547,3 +547,86 @@ def test_trigger_update_still_works_after_rollback(_clean_db, auth_headers):
     r = client.post(f"/api/jobs/{job_id}/update", headers=headers)
     assert r.status_code == 201, r.text
     assert r.json()["job_id"] != job_id
+
+
+def test_delete_refused_while_deployment_is_live(_clean_db, auth_headers):
+    """A run whose latest deployment tracks live infra (succeeded) must not be
+    deletable — destroying first is the required order, or AWS resources would
+    outlive their only record."""
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    r = client.delete(f"/api/jobs/{job_id}", headers=headers)
+    assert r.status_code == 409, r.text
+    assert "destroy" in r.json()["detail"].lower()
+
+    # Job still exists afterwards.
+    assert client.get(f"/api/jobs/{job_id}", headers=headers).status_code == 200
+
+
+def test_delete_removes_run_and_history_after_destroyed(_clean_db, auth_headers):
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+
+    con = sqlite3.connect(TEST_DB)
+    con.execute(
+        "update deployments set status='destroyed' where run_id = ?", (job_id,)
+    )
+    con.commit()
+    counts_before = {
+        t: con.execute(f"select count(*) from {t} where run_id = ?", (job_id,)).fetchone()[0]
+        for t in ("deployments", "codesec_findings", "infracost_estimates")
+    }
+    con.close()
+    assert any(v > 0 for v in counts_before.values()), counts_before
+
+    r = client.delete(f"/api/jobs/{job_id}", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["deleted"] is True
+
+    # Run row + every child row are gone (CASCADE via sqlite FK pragma).
+    con = sqlite3.connect(TEST_DB)
+    assert con.execute("select count(*) from analysis_runs where id = ?", (job_id,)).fetchone()[0] == 0
+    for t in ("deployments", "codesec_findings", "infracost_estimates"):
+        assert (
+            con.execute(f"select count(*) from {t} where run_id = ?", (job_id,)).fetchone()[0] == 0
+        ), t
+    con.close()
+
+    # Gone from the listing too.
+    listed = client.get("/api/jobs/", headers=headers).json()["jobs"]
+    assert all(j["job_id"] != job_id for j in listed)
+
+
+def test_delete_blocked_for_other_users_run(_clean_db, auth_headers):
+    headers = auth_headers
+    client = _clean_db
+    job_id = _run_job_to_completion(client, headers)
+    con = sqlite3.connect(TEST_DB)
+    con.execute("update deployments set status='destroyed' where run_id = ?", (job_id,))
+    con.commit()
+    con.close()
+
+    r = client.post(
+        "/api/auth/register",
+        json={
+            "email": "delete-intruder@devguard.ai",
+            "password": "x",
+            "first_name": "D",
+            "last_name": "I",
+        },
+    )
+    assert r.status_code == 200
+    r = client.post("/api/auth/login", json={"email": "delete-intruder@devguard.ai", "password": "x"})
+    intruder = {"Authorization": f"Bearer {r.json()['access_token']}"}
+
+    assert client.delete(f"/api/jobs/{job_id}", headers=intruder).status_code == 404
+    # Owner still has it.
+    assert client.get(f"/api/jobs/{job_id}", headers=headers).status_code == 200
+
+
+def test_delete_unauthenticated(_clean_db):
+    r = _clean_db.delete("/api/jobs/whatever-id")
+    assert r.status_code == 401

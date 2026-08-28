@@ -1,4 +1,5 @@
 import { client } from "./client"
+import { tokenStore } from "./tokenStore"
 import type {
   ApproveRequest,
   JobCreate,
@@ -7,7 +8,6 @@ import type {
   JobResponse,
 } from "../types/jobs"
 import type { JobResults, TerraformArtifact } from "../types/results"
-
 export interface RollbackRequest {
   reason?: string
   target_revision?: number | null
@@ -77,7 +77,7 @@ export const jobsApi = {
   upload: (formData: FormData) => fetch(`/api/jobs/upload`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${localStorage.getItem("access_token") ?? ""}`,
+      Authorization: `Bearer ${tokenStore.access ?? ""}`,
     },
     body: formData,
   }).then(async (res) => {
